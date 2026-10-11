@@ -236,6 +236,75 @@ fn test_deferred_replay_survives_a_pending_landing() {
 }
 
 #[test]
+fn test_deferred_landing_provenance_survives_suppression_and_another_correction() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let pending =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let correction = OffscreenResizeOwner::new();
+    let (mut state, _) = pending_landing_recheck_state(&pending);
+    state.workspaces.get_mut(&1).unwrap()[0]
+        .insert_window(correction.hwnd, Some(300))
+        .unwrap();
+    let placements = state.workspaces[&1][0].compute_placements_animated(state.layout_viewport(1));
+    let placements = state.apply_physical_projection(placements);
+    let landings: Vec<_> = placements
+        .iter()
+        .map(|placement| leopardwm_platform_win32::PlacementLanding {
+            window_id: placement.window_id,
+            requested_rect: placement.rect,
+            requested_visibility: placement.visibility,
+            actual_visible_rect: None,
+            actual_outer_rect: None,
+            failed: false,
+            unreadable: false,
+            measurement_deferred: true,
+        })
+        .collect();
+    let (request_id, invalidation_id) = state.physical_request_ids();
+    state.consume_physical_landings(request_id, invalidation_id, &landings, &[]);
+    state.applying_layout = true;
+    let before = state.physical_request_seq;
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before);
+    assert!(!state.deferred_moved_or_resized.contains(&correction.hwnd));
+    assert!(!state.deferred_moved_or_resized.contains(&pending.window_id));
+    assert!(state.deferred_physical_landings.contains(&correction.hwnd));
+    assert!(state
+        .deferred_physical_landings
+        .contains(&pending.window_id));
+    state.applying_layout = false;
+    state.moved_or_resized_suppression.clear();
+    assert!(leopardwm_platform_win32::pending_async_position(
+        pending.window_id
+    ));
+    assert!(state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert_eq!(
+        correction.rect(),
+        placements
+            .iter()
+            .find(|placement| placement.window_id == correction.hwnd)
+            .unwrap()
+            .rect
+    );
+    assert!(!state.deferred_moved_or_resized.contains(&pending.window_id));
+    assert!(state
+        .deferred_physical_landings
+        .contains(&pending.window_id));
+    state.moved_or_resized_suppression.clear();
+    assert!(leopardwm_platform_win32::pending_async_position(
+        pending.window_id
+    ));
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert!(!state
+        .window_move_recheck_attempts
+        .contains_key(&pending.window_id));
+}
+
+#[test]
 fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()

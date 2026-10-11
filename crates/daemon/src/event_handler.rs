@@ -3544,7 +3544,9 @@ impl AppState {
                 || self.display_change_pending
                 || self.should_suppress_moved_or_resized(hwnd)
             {
-                self.deferred_moved_or_resized.insert(hwnd);
+                if replay_windows.contains(&hwnd) {
+                    self.deferred_moved_or_resized.insert(hwnd);
+                }
                 continue;
             }
             self.deferred_physical_landings.remove(&hwnd);
@@ -3552,7 +3554,8 @@ impl AppState {
             self.on_window_moved_or_resized(hwnd, true);
             if self.physical_request_seq != before {
                 checked = true;
-                self.deferred_moved_or_resized.extend(deferred);
+                self.deferred_moved_or_resized
+                    .extend(deferred.filter(|hwnd| replay_windows.contains(hwnd)));
                 break;
             }
         }
