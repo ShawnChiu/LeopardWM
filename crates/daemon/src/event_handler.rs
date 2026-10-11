@@ -3498,7 +3498,6 @@ impl AppState {
     pub(crate) fn recheck_deferred_window_moves(&mut self) -> bool {
         let mut checked = false;
         let mut deferred = std::mem::take(&mut self.deferred_moved_or_resized);
-        deferred.extend(self.deferred_physical_landings.iter().copied());
         deferred.extend(
             self.window_move_recheck_attempts
                 .keys()
@@ -3510,6 +3509,8 @@ impl AppState {
                             .is_some_and(|visibility| visibility != Visibility::Visible)
                 }),
         );
+        let replay_windows = deferred.clone();
+        deferred.extend(self.deferred_physical_landings.iter().copied());
         deferred.retain(|hwnd| {
             if self.is_managed_member(*hwnd) {
                 return true;
@@ -3529,8 +3530,13 @@ impl AppState {
                 self.deferred_physical_landings.remove(&hwnd);
                 continue;
             }
-            if self.deferred_physical_landings.contains(&hwnd)
-                && leopardwm_platform_win32::pending_async_position(hwnd)
+            if !replay_windows.contains(&hwnd)
+                && (leopardwm_platform_win32::pending_async_position(hwnd)
+                    || defer_snapback_while_settling(
+                        self.window_managed_at.get(&hwnd).copied(),
+                        self.window_last_maximized_at.get(&hwnd).copied(),
+                        std::time::Instant::now(),
+                    ))
             {
                 continue;
             }

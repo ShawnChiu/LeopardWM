@@ -186,17 +186,10 @@ fn placement_state(window_ids: &[u64]) -> AppState {
     state
 }
 
-#[test]
-fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
-    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let owner =
-        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+fn pending_landing_recheck_state(owner: &PlacementOwner) -> (AppState, Vec<WindowPlacement>) {
     let mut state = placement_state(&[owner.window_id]);
     let placements = state.workspaces[&1][0].compute_placements_animated(state.layout_viewport(1));
     let placements = state.apply_physical_projection(placements);
-    let start = Instant::now();
     let mut cache = leopardwm_platform_win32::PlacementCache::new();
     leopardwm_platform_win32::apply_placements(
         &placements,
@@ -213,6 +206,44 @@ fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
     let (request_id, invalidation_id) = state.physical_request_ids();
     state.consume_physical_landings(request_id, invalidation_id, &landing.landings, &[]);
     assert!(state.deferred_physical_landings.contains(&owner.window_id));
+    (state, placements)
+}
+
+#[test]
+fn test_deferred_replay_survives_a_pending_landing() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (mut state, _) = pending_landing_recheck_state(&owner);
+    state.deferred_moved_or_resized.insert(owner.window_id);
+    state.applying_layout = true;
+    let before = state.physical_request_seq;
+    assert!(leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before);
+    state.applying_layout = false;
+    state.moved_or_resized_suppression.clear();
+    assert!(leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    assert!(state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert!(!state.window_move_recheck_attempts[&owner.window_id].gave_up);
+}
+
+#[test]
+fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (mut state, placements) = pending_landing_recheck_state(&owner);
+    let submitted_by = Instant::now();
     let before = state.physical_request_seq;
     for _ in 0..3 {
         assert!(leopardwm_platform_win32::pending_async_position(
@@ -226,7 +257,7 @@ fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
             .contains_key(&owner.window_id));
         thread::sleep(Duration::from_millis(600));
     }
-    thread::sleep(Duration::from_millis(10_100).saturating_sub(start.elapsed()));
+    thread::sleep(Duration::from_millis(10_300).saturating_sub(submitted_by.elapsed()));
     assert!(!leopardwm_platform_win32::pending_async_position(
         owner.window_id
     ));

@@ -13512,6 +13512,34 @@ fn test_deferred_landing_is_superseded_or_cleared_on_unmanage() {
 }
 
 #[test]
+fn test_deferred_landing_retries_after_maximize_settling_without_move_event() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner = OffscreenResizeOwner::new();
+    let mut state = visible_resize_recheck_state(owner.hwnd);
+    owner.resize(0, 200);
+    consume_visible_recheck_landing(&mut state, &owner, true, false, false);
+    let now = std::time::Instant::now();
+    state.window_managed_at.insert(owner.hwnd, now);
+    state.window_last_maximized_at.insert(owner.hwnd, now);
+    state.moved_or_resized_suppression.clear();
+    let before = state.physical_request_seq;
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before);
+    assert_eq!(owner.rect().width, 200);
+    let settled = now - Duration::from_secs(60);
+    state.window_managed_at.insert(owner.hwnd, settled);
+    state.window_last_maximized_at.insert(owner.hwnd, settled);
+    assert!(state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert_eq!(owner.rect(), Rect::new(0, 0, 300, 560));
+    state.moved_or_resized_suppression.clear();
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+}
+
+#[test]
 fn test_deferred_landing_without_move_event_is_rechecked_once() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
