@@ -19,6 +19,14 @@ unsafe extern "system" fn placement_owner_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == windows::Win32::UI::WindowsAndMessaging::WM_APP + 42 {
+        let _ = SetPropW(
+            hwnd,
+            w!("LeopardWMFixtureQueueDrained"),
+            Some(HANDLE(std::ptr::dangling_mut())),
+        );
+        return LRESULT(0);
+    }
     if message == WM_WINDOWPOSCHANGING {
         let position = &mut *(lparam.0 as *mut WINDOWPOS);
         if !position.flags.contains(SWP_NOSIZE) {
@@ -79,7 +87,7 @@ impl PlacementOwner {
                 None,
             )
             .unwrap();
-            if min_width > 0 {
+            if min_width > 0 || sent_messages_only {
                 SetPropW(
                     hwnd,
                     w!("LeopardWMFixtureMinWidth"),
@@ -338,6 +346,98 @@ fn test_deferred_landing_corrects_responsive_non_draining_owner_promptly() {
     state.moved_or_resized_suppression.clear();
     assert!(!state.recheck_deferred_window_moves());
     assert_eq!(state.physical_request_seq, before + 1);
+}
+
+#[test]
+fn test_deferred_landing_waits_for_latest_async_submission() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = pending_landing_recheck_state(&owner);
+    thread::sleep(Duration::from_millis(350));
+    placements[0].rect.x += 100;
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(
+        leopardwm_platform_win32::pending_async_position(owner.window_id),
+        "a fresh frame must remain pending even when the first frame is old"
+    );
+    let landing = leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(landing.landings[0].measurement_deferred);
+    assert_ne!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+}
+
+#[test]
+fn test_deferred_landing_preserves_latest_endpoint_when_owner_drains_later() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = pending_landing_recheck_state(&owner);
+    thread::sleep(Duration::from_millis(350));
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    placements[0].rect.x += 100;
+    let correction = leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(!correction.landings[0].measurement_deferred);
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+    let hwnd = HWND(owner.window_id as usize as *mut _);
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(hwnd),
+            windows::Win32::UI::WindowsAndMessaging::WM_APP + 42,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .unwrap();
+    }
+    owner.resume();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while unsafe {
+        GetPropW(hwnd, w!("LeopardWMFixtureQueueDrained"))
+            .0
+            .is_null()
+    } {
+        assert!(
+            Instant::now() < deadline,
+            "owner did not drain its posted queue"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect),
+        "old queued frames must not overtake the latest endpoint"
+    );
 }
 
 #[test]
