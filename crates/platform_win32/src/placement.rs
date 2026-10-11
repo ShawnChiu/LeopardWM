@@ -624,7 +624,8 @@ fn apply_placements_inner(
     // Uncloak before positioning so DWM composites returning windows at their
     // new rect before the landing measurement. The retry can repeat this safely.
     uncloak_becoming_visible(&entries);
-    let mut pending_window_ids = pending_async_entries(&entries);
+    let mut pending_window_ids =
+        pending_async_entries(&entries, async_flag == SET_WINDOW_POS_FLAGS(0));
     pending_window_ids.extend(owner_deferrals.pending.iter().copied());
     let (applied, mut failed_window_ids) = position_entries_for_pending(
         &entries,
@@ -1223,6 +1224,21 @@ struct OwnerDeferrals {
     unresponsive: HashSet<WindowId>,
 }
 
+fn placement_owner_answers(hwnd: HWND, timeout_ms: u32) -> bool {
+    unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            timeout_ms,
+            None,
+        )
+        .0 != 0
+    }
+}
+
 fn probe_placement_owners(
     placements: &[WindowPlacement],
     display_change: bool,
@@ -1283,18 +1299,7 @@ fn probe_placement_owners(
             if timeout_ms == 0 {
                 return None;
             }
-            Some(unsafe {
-                SendMessageTimeoutW(
-                    hwnd,
-                    WM_NULL,
-                    WPARAM(0),
-                    LPARAM(0),
-                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
-                    timeout_ms,
-                    None,
-                )
-                .0 != 0
-            })
+            Some(placement_owner_answers(hwnd, timeout_ms))
         });
         if answered == Some(true) {
             if was_marked {
@@ -1320,7 +1325,12 @@ fn probe_placement_owners(
 /// Position all entries in one DeferWindowPos batch; returns (applied, failed ids).
 #[cfg(test)]
 fn position_entries(entries: &[DeferEntry], post_animation_landing: bool) -> (u32, HashSet<u64>) {
-    let pending = pending_async_entries(entries);
+    let pending = pending_async_entries(
+        entries,
+        entries
+            .iter()
+            .all(|entry| !entry.flags.contains(SWP_ASYNCWINDOWPOS)),
+    );
     let mut queued_endpoints = HashMap::new();
     position_entries_for_pending(
         entries,
@@ -1428,19 +1438,26 @@ where
     ((entries.len() - failures.len()) as u32, failures)
 }
 
-fn pending_async_entries(entries: &[DeferEntry]) -> HashSet<WindowId> {
+fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> HashSet<WindowId> {
     let now = std::time::Instant::now();
     let mut guard = lock_async_positions();
     let Some(submissions) = guard.as_mut() else {
         return HashSet::new();
     };
     let mut pending = HashSet::new();
+    let mut owner_answers = HashMap::new();
     for entry in entries {
         let Some(previous) = submissions.get(&entry.window_id).copied() else {
             continue;
         };
         let current = observed_async_position(entry.hwnd);
-        match async_position_state(previous, current, now) {
+        match async_position_state_with_owner_probe(
+            previous,
+            current,
+            now,
+            probe_owners.then_some(entry.hwnd),
+            &mut owner_answers,
+        ) {
             AsyncPositionState::Drained => {
                 submissions.remove(&entry.window_id);
             }
@@ -1542,6 +1559,34 @@ fn async_position_state(
     }
 }
 
+fn async_position_state_with_owner_probe(
+    submission: AsyncPositionSubmission,
+    current_position: Option<(i32, i32)>,
+    now: std::time::Instant,
+    hwnd: Option<HWND>,
+    owner_answers: &mut HashMap<u32, bool>,
+) -> AsyncPositionState {
+    let state = async_position_state(submission, current_position, now);
+    if state != AsyncPositionState::Pending
+        || submission.wait_for_owner
+        || now.saturating_duration_since(submission.first_submitted) < RESPONSIVE_OWNER_DRAIN_WAIT
+    {
+        return state;
+    }
+    let Some(hwnd) = hwnd else {
+        return state;
+    };
+    let owner_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    let answered = *owner_answers
+        .entry(owner_thread)
+        .or_insert_with(|| placement_owner_answers(hwnd, 50));
+    if answered {
+        AsyncPositionState::Expired
+    } else {
+        state
+    }
+}
+
 pub fn pending_async_position(window_id: WindowId) -> bool {
     let now = std::time::Instant::now();
     let mut guard = lock_async_positions();
@@ -1551,10 +1596,10 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
     let Some(submission) = submissions.get(&window_id).copied() else {
         return false;
     };
-    let current = window_id_to_hwnd(window_id)
-        .ok()
-        .and_then(observed_async_position);
-    match async_position_state(submission, current, now) {
+    let hwnd = window_id_to_hwnd(window_id).ok();
+    let current = hwnd.and_then(observed_async_position);
+    match async_position_state_with_owner_probe(submission, current, now, hwnd, &mut HashMap::new())
+    {
         AsyncPositionState::Drained => {
             submissions.remove(&window_id);
             false
@@ -1692,6 +1737,7 @@ struct AsyncPositionSubmission {
 
 // Expire pending work so windows that clamp or reject placement resume normal handling.
 const ASYNC_POSITION_PENDING_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+const RESPONSIVE_OWNER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 static ASYNC_POSITIONS: Mutex<Option<HashMap<WindowId, AsyncPositionSubmission>>> =
     Mutex::new(None);
 static QUEUED_RECOVERIES: Mutex<Option<HashMap<WindowId, AsyncPositionSubmission>>> =

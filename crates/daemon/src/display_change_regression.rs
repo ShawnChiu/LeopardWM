@@ -214,8 +214,7 @@ fn test_deferred_replay_survives_a_pending_landing() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let owner =
-        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let owner = PlacementOwner::spawn();
     let (mut state, _) = pending_landing_recheck_state(&owner);
     state.deferred_moved_or_resized.insert(owner.window_id);
     state.applying_layout = true;
@@ -240,8 +239,7 @@ fn test_deferred_landing_provenance_survives_suppression_and_another_correction(
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let pending =
-        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let pending = PlacementOwner::spawn();
     let correction = OffscreenResizeOwner::new();
     let (mut state, _) = pending_landing_recheck_state(&pending);
     state.workspaces.get_mut(&1).unwrap()[0]
@@ -305,15 +303,53 @@ fn test_deferred_landing_provenance_survives_suppression_and_another_correction(
 }
 
 #[test]
-fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
+fn test_deferred_landing_corrects_responsive_non_draining_owner_promptly() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let owner =
         PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
     let (mut state, placements) = pending_landing_recheck_state(&owner);
-    let submitted_by = Instant::now();
+    let landing_at = Instant::now();
     let before = state.physical_request_seq;
+    let mut corrections = 0;
+    while landing_at.elapsed() < Duration::from_secs(2) {
+        state.moved_or_resized_suppression.clear();
+        if state.recheck_deferred_window_moves() {
+            corrections += 1;
+            break;
+        }
+        assert_eq!(state.physical_request_seq, before);
+        assert!(!state
+            .window_move_recheck_attempts
+            .contains_key(&owner.window_id));
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        corrections, 1,
+        "responsive owner was not corrected within 2 s"
+    );
+    assert!(landing_at.elapsed() < Duration::from_secs(1));
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+    state.moved_or_resized_suppression.clear();
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+}
+
+#[test]
+fn test_deferred_landing_keeps_blocked_owner_pending_after_short_wait() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner = PlacementOwner::spawn();
+    let (mut state, _) = pending_landing_recheck_state(&owner);
+    let before = state.physical_request_seq;
+    let original_rect = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id);
+    thread::sleep(Duration::from_millis(350));
     for _ in 0..3 {
         assert!(leopardwm_platform_win32::pending_async_position(
             owner.window_id
@@ -324,22 +360,13 @@ fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
         assert!(!state
             .window_move_recheck_attempts
             .contains_key(&owner.window_id));
-        thread::sleep(Duration::from_millis(600));
+        assert!(state.deferred_physical_landings.contains(&owner.window_id));
+        assert_eq!(
+            leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+            original_rect
+        );
+        thread::sleep(Duration::from_millis(100));
     }
-    thread::sleep(Duration::from_millis(10_300).saturating_sub(submitted_by.elapsed()));
-    assert!(!leopardwm_platform_win32::pending_async_position(
-        owner.window_id
-    ));
-    assert!(state.deferred_physical_landings.contains(&owner.window_id));
-    assert!(state.recheck_deferred_window_moves());
-    assert_eq!(state.physical_request_seq, before + 1);
-    assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
-        Some(placements[0].rect)
-    );
-    state.moved_or_resized_suppression.clear();
-    assert!(!state.recheck_deferred_window_moves());
-    assert_eq!(state.physical_request_seq, before + 1);
 }
 
 #[test]
