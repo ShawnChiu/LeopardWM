@@ -13449,6 +13449,87 @@ fn test_visible_replay_renews_old_one_shot_attempt_and_bounds_its_immediate_repe
     assert_eq!(owner.rect().width, 200);
 }
 
+fn consume_visible_recheck_landing(
+    state: &mut AppState,
+    owner: &OffscreenResizeOwner,
+    measurement_deferred: bool,
+    failed: bool,
+    readable: bool,
+) {
+    let dispatched =
+        state.apply_physical_projection(vec![leopardwm_core_layout::WindowPlacement {
+            window_id: owner.hwnd,
+            rect: Rect::new(0, 0, 300, 560),
+            visibility: leopardwm_core_layout::Visibility::Visible,
+            column_index: 0,
+        }]);
+    let (request_id, invalidation_id) = state.physical_request_ids();
+    state.consume_physical_landings(
+        request_id,
+        invalidation_id,
+        &[leopardwm_platform_win32::PlacementLanding {
+            window_id: owner.hwnd,
+            requested_rect: dispatched[0].rect,
+            requested_visibility: leopardwm_core_layout::Visibility::Visible,
+            actual_visible_rect: readable.then(|| owner.rect()),
+            actual_outer_rect: readable.then(|| owner.rect()),
+            failed,
+            unreadable: !readable && !measurement_deferred,
+            measurement_deferred,
+        }],
+        &[],
+    );
+}
+
+#[test]
+fn test_deferred_landing_is_superseded_or_cleared_on_unmanage() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner = OffscreenResizeOwner::new();
+    for replacement in [
+        Some((false, false, true)),
+        Some((false, false, false)),
+        Some((true, true, false)),
+        None,
+    ] {
+        let mut state = visible_resize_recheck_state(owner.hwnd);
+        owner.resize(0, 200);
+        consume_visible_recheck_landing(&mut state, &owner, true, false, false);
+        assert!(state.deferred_physical_landings.contains(&owner.hwnd));
+        if let Some((deferred, failed, readable)) = replacement {
+            consume_visible_recheck_landing(&mut state, &owner, deferred, failed, readable);
+        } else {
+            state.take_managed_lifetime_token(owner.hwnd);
+        }
+        assert!(!state.deferred_physical_landings.contains(&owner.hwnd));
+        state.moved_or_resized_suppression.clear();
+        let before = state.physical_request_seq;
+        assert!(!state.recheck_deferred_window_moves());
+        assert_eq!(state.physical_request_seq, before);
+        assert_eq!(owner.rect().width, 200);
+    }
+}
+
+#[test]
+fn test_deferred_landing_without_move_event_is_rechecked_once() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner = OffscreenResizeOwner::new();
+    let mut state = visible_resize_recheck_state(owner.hwnd);
+    owner.resize(0, 200);
+    consume_visible_recheck_landing(&mut state, &owner, true, false, false);
+    state.moved_or_resized_suppression.clear();
+    let before = state.physical_request_seq;
+    assert!(state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert_eq!(owner.rect(), Rect::new(0, 0, 300, 560));
+    state.moved_or_resized_suppression.clear();
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+}
+
 #[test]
 fn test_deferred_visible_moves_issue_at_most_one_placement_per_tick() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK

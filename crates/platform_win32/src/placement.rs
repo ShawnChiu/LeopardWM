@@ -1542,7 +1542,7 @@ fn async_position_state(
     }
 }
 
-fn pending_async_position(window_id: WindowId) -> bool {
+pub fn pending_async_position(window_id: WindowId) -> bool {
     let now = std::time::Instant::now();
     let mut guard = lock_async_positions();
     let Some(submissions) = guard.as_mut() else {

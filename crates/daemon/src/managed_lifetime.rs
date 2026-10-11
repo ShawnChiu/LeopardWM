@@ -150,6 +150,7 @@ impl AppState {
     pub(crate) fn take_managed_lifetime_token(&mut self, hwnd: u64) -> Option<u64> {
         self.window_move_recheck_attempts.remove(&hwnd);
         self.deferred_moved_or_resized.remove(&hwnd);
+        self.deferred_physical_landings.remove(&hwnd);
         self.size_ignored_windows.remove(&hwnd);
         self.pending_maximized_admission_restores.remove(&hwnd);
         self.post_admission_maximize_restore_eligible.remove(&hwnd);

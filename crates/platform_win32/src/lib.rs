@@ -76,9 +76,9 @@ pub use placement::{
     dwm_cloak_window, dwm_uncloak_all, dwm_uncloak_window, forget_offscreen_placement,
     get_window_frame_insets, get_window_invisible_insets, get_window_style_bits,
     is_placement_cloaked, is_placement_parked, mark_ghost_cloaked, offscreen_placement_matches,
-    park_window_for_placement, set_dwm_transitions_disabled, unmark_ghost_cloaked,
-    visible_rect_to_frame_rect, ApplyPlacementsResult, HeightViolation, PlacementCache,
-    PlacementLanding, WidthViolation,
+    park_window_for_placement, pending_async_position, set_dwm_transitions_disabled,
+    unmark_ghost_cloaked, visible_rect_to_frame_rect, ApplyPlacementsResult, HeightViolation,
+    PlacementCache, PlacementLanding, WidthViolation,
 };
 pub use system::{
     are_animations_enabled, get_system_highlight_color_bgr, is_high_contrast_enabled,

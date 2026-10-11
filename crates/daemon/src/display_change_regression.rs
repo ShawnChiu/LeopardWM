@@ -47,6 +47,15 @@ impl PlacementOwner {
     }
 
     fn spawn_with(rect: Rect, min_width: i32, parked_maximized: bool) -> Self {
+        Self::spawn_with_message_mode(rect, min_width, parked_maximized, false)
+    }
+
+    fn spawn_with_message_mode(
+        rect: Rect,
+        min_width: i32,
+        parked_maximized: bool,
+        sent_messages_only: bool,
+    ) -> Self {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release, resume) = mpsc::channel();
         let (pumping_tx, pumping) = mpsc::channel();
@@ -96,7 +105,24 @@ impl PlacementOwner {
             ready_tx
                 .send((hwnd.0 as usize as u64, GetCurrentThreadId()))
                 .unwrap();
-            let _ = resume.recv_timeout(Duration::from_secs(20));
+            if sent_messages_only {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while resume.try_recv().is_err() && Instant::now() < deadline {
+                    let mut message = MSG::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                        &mut message,
+                        None,
+                        WM_QUIT,
+                        WM_QUIT,
+                        windows::Win32::UI::WindowsAndMessaging::PEEK_MESSAGE_REMOVE_TYPE(
+                            windows::Win32::UI::WindowsAndMessaging::QS_SENDMESSAGE.0 << 16,
+                        ),
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+            } else {
+                let _ = resume.recv_timeout(Duration::from_secs(20));
+            }
             pumping_tx.send(()).unwrap();
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
@@ -158,6 +184,62 @@ fn placement_state(window_ids: &[u64]) -> AppState {
             .insert(hwnd, make_test_window_info(hwnd));
     }
     state
+}
+
+#[test]
+fn test_deferred_landing_waits_for_async_expiry_before_correcting() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let mut state = placement_state(&[owner.window_id]);
+    let placements = state.workspaces[&1][0].compute_placements_animated(state.layout_viewport(1));
+    let placements = state.apply_physical_projection(placements);
+    let start = Instant::now();
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    let landing =
+        leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
+            .unwrap();
+    assert!(landing.landings[0].measurement_deferred);
+    assert!(!landing.landings[0].failed);
+    let (request_id, invalidation_id) = state.physical_request_ids();
+    state.consume_physical_landings(request_id, invalidation_id, &landing.landings, &[]);
+    assert!(state.deferred_physical_landings.contains(&owner.window_id));
+    let before = state.physical_request_seq;
+    for _ in 0..3 {
+        assert!(leopardwm_platform_win32::pending_async_position(
+            owner.window_id
+        ));
+        state.moved_or_resized_suppression.clear();
+        assert!(!state.recheck_deferred_window_moves());
+        assert_eq!(state.physical_request_seq, before);
+        assert!(!state
+            .window_move_recheck_attempts
+            .contains_key(&owner.window_id));
+        thread::sleep(Duration::from_millis(600));
+    }
+    thread::sleep(Duration::from_millis(10_100).saturating_sub(start.elapsed()));
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    assert!(state.deferred_physical_landings.contains(&owner.window_id));
+    assert!(state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+    state.moved_or_resized_suppression.clear();
+    assert!(!state.recheck_deferred_window_moves());
+    assert_eq!(state.physical_request_seq, before + 1);
 }
 
 #[test]

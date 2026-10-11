@@ -2632,8 +2632,7 @@ async fn handle_tray_event(ctx: &mut EventLoopCtx<'_>, tray_event: tray::TrayEve
     }
 }
 
-/// Check eventless focus disappearance and deferred moves after placement
-/// feedback suppression ends.
+/// Check eventless focus disappearance, deferred landings and suppressed moves.
 fn spawn_periodic_ticker(event_tx: &mpsc::Sender<DaemonEvent>) {
     let tx = event_tx.clone();
     tokio::spawn(async move {
@@ -2648,7 +2647,7 @@ fn spawn_periodic_ticker(event_tx: &mpsc::Sender<DaemonEvent>) {
     });
 }
 
-/// Prune vanished tracked focus, replay suppressed moves and re-check off-screen drift,
+/// Prune vanished tracked focus, re-check deferred landings, suppressed moves and off-screen drift,
 /// and start the animation worker when either check changes the layout.
 async fn handle_periodic_check(ctx: &mut EventLoopCtx<'_>) {
     let mut state = ctx.state.lock().await;

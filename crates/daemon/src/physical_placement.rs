@@ -704,6 +704,7 @@ impl AppState {
             let Some(entry) = confirmed.get_mut(window_id) else {
                 continue;
             };
+            self.deferred_physical_landings.remove(window_id);
             let Some(landing) = landings_by_id.get(window_id) else {
                 warn!(
                     "Physical placement of window {} is unconfirmed: no readback",
@@ -728,6 +729,7 @@ impl AppState {
                 None
             };
             if !entry.confirmed && landing.measurement_deferred && !landing.failed {
+                self.deferred_physical_landings.insert(*window_id);
                 debug!(
                     "Physical placement of window {} is unconfirmed until its queued async frames apply; re-checking on a later pass",
                     window_id

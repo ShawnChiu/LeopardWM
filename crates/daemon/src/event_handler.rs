@@ -1511,6 +1511,7 @@ impl AppState {
         // entries for windows that no longer exist.
         self.last_placed_layout_rects.remove(&hwnd);
         self.deferred_moved_or_resized.remove(&hwnd);
+        self.deferred_physical_landings.remove(&hwnd);
         self.size_ignored_windows.remove(&hwnd);
         self.window_move_recheck_attempts.remove(&hwnd);
         leopardwm_platform_win32::forget_offscreen_placement(hwnd);
@@ -3493,10 +3494,11 @@ impl AppState {
         }
     }
 
-    /// Replay suppressed moves once placement feedback settles, and re-check off-screen drift.
+    /// Re-check deferred landings, replay suppressed moves and re-check off-screen drift.
     pub(crate) fn recheck_deferred_window_moves(&mut self) -> bool {
         let mut checked = false;
         let mut deferred = std::mem::take(&mut self.deferred_moved_or_resized);
+        deferred.extend(self.deferred_physical_landings.iter().copied());
         deferred.extend(
             self.window_move_recheck_attempts
                 .keys()
@@ -3513,6 +3515,7 @@ impl AppState {
                 return true;
             }
             self.window_move_recheck_attempts.remove(hwnd);
+            self.deferred_physical_landings.remove(hwnd);
             false
         });
         let mut deferred = deferred.into_iter();
@@ -3523,6 +3526,12 @@ impl AppState {
                 .and_then(|(monitor_id, ws_idx)| self.workspaces.get(&monitor_id)?.get(ws_idx));
             if visibility.is_none() || workspace.is_none_or(|ws| ws.is_minimized(hwnd)) {
                 self.window_move_recheck_attempts.remove(&hwnd);
+                self.deferred_physical_landings.remove(&hwnd);
+                continue;
+            }
+            if self.deferred_physical_landings.contains(&hwnd)
+                && leopardwm_platform_win32::pending_async_position(hwnd)
+            {
                 continue;
             }
             if self.applying_layout
@@ -3532,6 +3541,7 @@ impl AppState {
                 self.deferred_moved_or_resized.insert(hwnd);
                 continue;
             }
+            self.deferred_physical_landings.remove(&hwnd);
             let before = self.physical_request_seq;
             self.on_window_moved_or_resized(hwnd, true);
             if self.physical_request_seq != before {
