@@ -84,22 +84,23 @@ pub(super) fn is_marked(window_id: WindowId) -> bool {
 
 pub(super) fn pending(window_id: WindowId) -> bool {
     let state = lock();
-    state.in_flight.is_some_and(|(id, _)| id == window_id)
-        || state
-            .slots
-            .get(&window_id)
-            .is_some_and(|slot| slot.correction.is_some())
+    match state.slots.get(&window_id) {
+        Some(slot) => {
+            state.in_flight == Some((window_id, slot.lifetime)) || slot.correction.is_some()
+        }
+        None => state.in_flight.is_some_and(|(id, _)| id == window_id),
+    }
 }
 
 pub(super) fn seal(entry: &DeferEntry) -> bool {
     let window_id = entry.window_id;
     let mut state = lock();
-    if !state.slots.contains_key(&window_id) {
+    let Some(lifetime) = state.slots.get(&window_id).map(|slot| slot.lifetime) else {
         return false;
-    }
+    };
     state.next_generation += 1;
     let generation = state.next_generation;
-    let in_flight = state.in_flight.is_some_and(|(id, _)| id == window_id);
+    let in_flight = state.in_flight == Some((window_id, lifetime));
     if let Some(slot) = state.slots.get_mut(&window_id) {
         slot.generation = generation;
         slot.pending = None;
@@ -315,4 +316,58 @@ fn finish(
     }
     state.in_flight = None;
     WAKE.notify_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::placement::InsetSource;
+    use leopardwm_core_layout::Visibility;
+    use windows::Win32::Foundation::HWND;
+
+    #[test]
+    fn reused_window_landing_does_not_inherit_old_in_flight_work() {
+        let window_id = u64::MAX;
+        mark(window_id);
+        let lifetime = lock().slots[&window_id].lifetime;
+        lock().in_flight = Some((window_id, lifetime));
+        let old_pending = pending(window_id);
+        forget(window_id);
+        mark(window_id);
+        let pending_before_landing = pending(window_id);
+        let entry = DeferEntry {
+            hwnd: HWND::default(),
+            window_id,
+            x: 100,
+            y: 100,
+            w: 320,
+            h: 240,
+            layout_w: 320,
+            layout_h: 240,
+            insets: (0, 0, 0, 0),
+            inset_source: InsetSource::Fresh,
+            inset_generation: 0,
+            visibility: Visibility::Visible,
+            flags: SET_WINDOW_POS_FLAGS::default(),
+            column_index: 0,
+            offscreen_rect: None,
+        };
+        let deferred = seal(&entry);
+        finish(window_id, lifetime, lifetime, None, true, None);
+        let pending_after_return = pending(window_id);
+        forget(window_id);
+        assert!(old_pending, "same-lifetime native work must remain pending");
+        assert!(
+            !deferred,
+            "old-lifetime work incorrectly deferred the new landing"
+        );
+        assert!(
+            !pending_before_landing,
+            "old-lifetime work blocked the new window's pending query"
+        );
+        assert!(
+            !pending_after_return,
+            "old-lifetime completion stranded the new landing"
+        );
+    }
 }
