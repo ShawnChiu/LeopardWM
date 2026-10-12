@@ -401,6 +401,7 @@ fn worker_loop(
             }
             WorkerCommand::Frame(request) => {
                 let frame_start = Instant::now();
+                placement_cache.prepare_frame();
 
                 // A queued frame must not place windows or update ghost thumbnails
                 // after either physical invalidation or a newer physical dispatch.

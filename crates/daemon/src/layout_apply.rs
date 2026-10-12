@@ -417,6 +417,7 @@ impl AppState {
     pub(crate) fn begin_shutdown_or_revert(&mut self) -> Vec<std::thread::JoinHandle<()>> {
         self.resume_deferred_apply_worker_recovery();
         self.apply_worker_cancelled.store(true, Ordering::SeqCst);
+        leopardwm_platform_win32::stop_placement_mover();
         self.apply_epoch.fetch_add(1, Ordering::SeqCst);
         let pending_apply_workers = std::mem::take(&mut self.pending_apply_workers);
         self.clear_matching_ignore_lifetime_tokens();

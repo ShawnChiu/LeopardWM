@@ -1,6 +1,6 @@
 use super::*;
 use leopardwm_core_layout::{Visibility, WindowPlacement};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,6 +32,10 @@ unsafe extern "system" fn placement_owner_proc(
         let control = GetPropW(hwnd, w!("LeopardWMFixtureMoveControl")).0;
         if !control.is_null() {
             let control = &*(control as *const MoveControl);
+            let delay = control.move_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                thread::sleep(Duration::from_millis(delay));
+            }
             if control.block_next.swap(false, Ordering::SeqCst) {
                 let released = control.released.lock().unwrap();
                 control.entered.store(true, Ordering::SeqCst);
@@ -62,6 +66,7 @@ unsafe extern "system" fn placement_owner_proc(
 #[derive(Default)]
 struct MoveControl {
     block_next: AtomicBool,
+    move_delay_ms: AtomicU64,
     entered: AtomicBool,
     pause_pump: AtomicBool,
     pump_paused: AtomicBool,
@@ -297,7 +302,169 @@ fn classify_non_draining_owner(owner: &PlacementOwner) -> (AppState, Vec<WindowP
 }
 
 #[test]
+fn test_marked_mover_serves_both_slow_owners_during_continuous_frames() {
+    if run_in_placement_test_process("tests::display_change_regression::test_marked_mover_serves_both_slow_owners_during_continuous_frames") { return; }
+    let first =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let second =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&first);
+    let (_, second_placements) = classify_non_draining_owner(&second);
+    placements.extend(second_placements);
+    for owner in [&first, &second] {
+        owner.control.moves.lock().unwrap().clear();
+        owner.control.move_delay_ms.store(40, Ordering::SeqCst);
+    }
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        for placement in &mut placements {
+            placement.rect.x += 1;
+        }
+        leopardwm_platform_win32::apply_placements(
+            &placements,
+            &state.platform_config,
+            Some(&mut cache),
+            false,
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(4));
+    }
+    for owner in [&first, &second] {
+        owner.control.move_delay_ms.store(0, Ordering::SeqCst);
+        assert!(
+            owner.control.moves.lock().unwrap().len() >= 3,
+            "one slow owner was starved of intermediate frames"
+        );
+    }
+}
+
+#[test]
+fn test_visibility_recovery_stops_pending_and_late_mover_frames() {
+    if run_in_placement_test_process("tests::display_change_regression::test_visibility_recovery_stops_pending_and_late_mover_frames") { return; }
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    let before = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id).unwrap();
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    placements[0].rect.x = leopardwm_platform_win32::MOVE_OFFSCREEN_SENTINEL_COORD;
+    placements[0].visibility = Visibility::OffScreenLeft;
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_fixture(
+        || owner.control.entered.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    placements[0].rect = Rect::new(240, 48, 160, 120);
+    placements[0].visibility = Visibility::Visible;
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    let started = Instant::now();
+    leopardwm_platform_win32::dwm_uncloak_all();
+    leopardwm_platform_win32::restore_windows_moved_offscreen(&[owner.window_id]).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "recovery waited for a held mover call"
+    );
+    placements[0].rect.x = 360;
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    owner.control.release();
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(2)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(before),
+        "a delayed mover frame undid visibility recovery"
+    );
+    let moves = owner.control.moves.lock().unwrap();
+    assert!(
+        !moves.contains(&(240, 48)),
+        "pending frame survived recovery"
+    );
+    assert!(
+        !moves.contains(&(360, 48)),
+        "mover accepted a frame after recovery"
+    );
+}
+
+#[test]
+fn test_frame_prepared_before_landing_cannot_move_after_landing() {
+    if run_in_placement_test_process("tests::display_change_regression::test_frame_prepared_before_landing_cannot_move_after_landing") { return; }
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    let fresh =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (_, mut fresh_placements) = classify_non_draining_owner(&fresh);
+    fresh_placements[0].rect.x += 300;
+    let mut stale_cache = leopardwm_platform_win32::PlacementCache::new();
+    stale_cache.prepare_frame();
+    let mut stale = placements.clone();
+    stale[0].rect.x += 100;
+    placements[0].rect.x += 200;
+    let landing =
+        leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
+            .unwrap();
+    assert!(!landing.landings[0].measurement_deferred);
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    leopardwm_platform_win32::apply_placements(
+        &stale,
+        &state.platform_config,
+        Some(&mut stale_cache),
+        false,
+    )
+    .unwrap();
+    // A fresh owner's delivered frame fences the FIFO without a sleep-based absence assertion.
+    let mut fresh_cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &fresh_placements,
+        &state.platform_config,
+        Some(&mut fresh_cache),
+        false,
+    )
+    .unwrap();
+    let delivered = wait_for_fixture(
+        || {
+            leopardwm_platform_win32::get_window_chrome_rect(fresh.window_id)
+                == Some(fresh_placements[0].rect)
+        },
+        Duration::from_secs(2),
+    );
+    let stale_entered = owner.control.entered.load(Ordering::SeqCst);
+    owner.control.release();
+    assert!(
+        !stale_entered,
+        "a frame prepared before the seal entered the mover"
+    );
+    assert!(delivered);
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+}
+
+#[test]
 fn test_non_draining_owner_receives_animation_frames_without_blocking_caller() {
+    if run_in_placement_test_process("tests::display_change_regression::test_non_draining_owner_receives_animation_frames_without_blocking_caller") { return; }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -359,6 +526,11 @@ fn test_non_draining_owner_receives_animation_frames_without_blocking_caller() {
 
 #[test]
 fn test_marked_owner_lands_without_latest_async_drain_wait() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_marked_owner_lands_without_latest_async_drain_wait",
+    ) {
+        return;
+    }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -414,15 +586,19 @@ fn test_marked_owner_lands_without_latest_async_drain_wait() {
         },
         Duration::from_secs(2)
     ));
-    assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
-        Some(placements[0].rect),
+    assert!(
+        wait_for_fixture(
+            || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+                == Some(placements[0].rect),
+            Duration::from_secs(2),
+        ),
         "a matching synchronous frame must not discard the pre-classification queue fence"
     );
 }
 
 #[test]
 fn test_marked_landing_seals_stale_frame_and_defers_in_flight_move() {
+    if run_in_placement_test_process("tests::display_change_regression::test_marked_landing_seals_stale_frame_and_defers_in_flight_move") { return; }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -490,6 +666,7 @@ fn test_marked_landing_seals_stale_frame_and_defers_in_flight_move() {
 
 #[test]
 fn test_non_draining_mover_drops_targets_when_owner_stops_answering() {
+    if run_in_placement_test_process("tests::display_change_regression::test_non_draining_mover_drops_targets_when_owner_stops_answering") { return; }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -574,6 +751,7 @@ fn test_non_draining_mover_drops_targets_when_owner_stops_answering() {
 
 #[test]
 fn test_managed_departure_forgets_queued_move_fallback_and_pending_frame() {
+    if run_in_placement_test_process("tests::display_change_regression::test_managed_departure_forgets_queued_move_fallback_and_pending_frame") { return; }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -652,6 +830,11 @@ fn test_managed_departure_forgets_queued_move_fallback_and_pending_frame() {
 
 #[test]
 fn test_unmarked_owner_keeps_async_animation_delivery() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_unmarked_owner_keeps_async_animation_delivery",
+    ) {
+        return;
+    }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());

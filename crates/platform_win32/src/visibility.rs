@@ -312,6 +312,7 @@ fn emergency_primary_work_area() -> Option<Rect> {
 /// Best-effort tray Quit recovery. The caller must independently enforce `deadline`:
 /// shell, DWM, tracing, and style calls can block even though window moves are asynchronous.
 pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::Instant) {
+    crate::placement::stop_placement_mover();
     let Ok(_dpi) = RecoveryDpiContext::enter() else {
         return;
     };
@@ -331,6 +332,52 @@ pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::I
     }
     crate::window_style::emergency_restore_maximizebox(window_ids, deadline);
     emergency_sentinel_pass(window_ids, &work_area, work_areas.as_deref());
+}
+
+pub(crate) fn recover_after_placement_mover(window_id: WindowId, before: Option<RECT>) {
+    crate::placement::dwm_uncloak_window(window_id);
+    let Ok(_dpi) = RecoveryDpiContext::enter() else {
+        return;
+    };
+    let Ok(primary) = get_primary_monitor() else {
+        return;
+    };
+    let Ok(hwnd) = window_id_to_hwnd(window_id) else {
+        return;
+    };
+    let work_areas = recovery_work_areas().unwrap_or_else(|| vec![primary.work_area]);
+    let before = before.map(|r| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top));
+    let restored =
+        if let Some(before) = before.filter(|r| work_areas.iter().any(|area| r.intersects(area))) {
+            before
+        } else {
+            let mut current = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut current) }.is_err() {
+                return;
+            }
+            compute_restore_rect_from_offscreen(
+                &Rect::new(
+                    current.left,
+                    current.top,
+                    current.right - current.left,
+                    current.bottom - current.top,
+                ),
+                &primary.work_area,
+            )
+        };
+    if let Err(error) = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            restored.x,
+            restored.y,
+            restored.width,
+            restored.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } {
+        tracing::warn!(window_id, %error, "Could not recover a late placement mover call");
+    }
 }
 
 /// Restore one window from MoveOffScreen sentinel coordinates to the primary monitor.
@@ -386,6 +433,7 @@ where
 /// Returns the number of restored windows or queued restores. If any window restore
 /// fails, this returns an aggregated error after attempting all windows.
 pub fn restore_windows_moved_offscreen(window_ids: &[WindowId]) -> Result<usize, Win32Error> {
+    crate::placement::stop_placement_mover();
     if window_ids.is_empty() {
         return Ok(0);
     }
@@ -489,6 +537,7 @@ fn restore_all_windows_moved_offscreen() -> OffscreenRecovery {
 /// This helper is panic-safe and best-effort, making it suitable for panic
 /// hooks where daemon state may be unavailable or poisoned.
 pub fn restore_all_windows_moved_offscreen_best_effort() -> usize {
+    crate::placement::stop_placement_mover();
     let recovery = restore_all_windows_moved_offscreen();
     if let Some(error) = recovery.error {
         eprintln!(
@@ -522,6 +571,9 @@ pub fn uncloak_all_visible_windows() {
 /// Each window uses 50% of the work-area height with approximately 4:3 width
 /// and 30px offsets. Off-screen windows are first restored, then cascaded.
 pub fn cascade_windows(window_ids: &[WindowId]) -> Result<(), Win32Error> {
+    for &window_id in window_ids {
+        crate::placement::seal_placement_mover(window_id)?;
+    }
     let work_area =
         get_primary_monitor().map_or(Rect::new(0, 0, 1920, 1080), |monitor| monitor.work_area);
     cascade_windows_with(

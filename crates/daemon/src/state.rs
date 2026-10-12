@@ -1746,6 +1746,7 @@ pub(crate) fn merged_cleanup_window_ids(
 }
 
 pub(crate) fn run_visibility_recovery_pass(managed_window_ids: &[u64], context_label: &str) {
+    leopardwm_platform_win32::stop_placement_mover();
     use leopardwm_platform_win32::{
         enumerate_windows, restore_windows_moved_offscreen, uncloak_all_managed_windows,
     };
