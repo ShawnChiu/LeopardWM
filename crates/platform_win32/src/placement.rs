@@ -1550,7 +1550,7 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
     let mut deferrals = AsyncPositionDeferrals::default();
     for entry in entries {
         if !entry.flags.contains(SWP_ASYNCWINDOWPOS) {
-            let in_flight = mover::seal(entry.window_id);
+            let in_flight = mover::seal(entry);
             if in_flight
                 || (mover::is_marked(entry.window_id) && !cached_placement_owner_answer(entry.hwnd))
             {

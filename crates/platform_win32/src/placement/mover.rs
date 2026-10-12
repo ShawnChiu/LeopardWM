@@ -1,4 +1,4 @@
-use super::{cached_placement_owner_answer, DeferEntry};
+use super::{cached_placement_owner_answer, placement_owner_answers, DeferEntry};
 use crate::window_id_to_hwnd;
 use leopardwm_core_layout::WindowId;
 use std::collections::{HashMap, VecDeque};
@@ -22,6 +22,7 @@ struct Target {
 struct Slot {
     lifetime: u64,
     pending: Option<Target>,
+    landing: Option<Target>,
     generation: u64,
     cancelled: u64,
 }
@@ -62,6 +63,7 @@ pub(super) fn mark(window_id: WindowId) {
         Slot {
             lifetime,
             pending: None,
+            landing: None,
             generation: lifetime,
             cancelled: 0,
         },
@@ -76,19 +78,29 @@ pub(super) fn in_flight(window_id: WindowId) -> bool {
     lock().in_flight.is_some_and(|(id, _)| id == window_id)
 }
 
-pub(super) fn seal(window_id: WindowId) -> bool {
+pub(super) fn seal(entry: &DeferEntry) -> bool {
+    let window_id = entry.window_id;
     let mut state = lock();
     if !state.slots.contains_key(&window_id) {
         return false;
     }
     state.next_generation += 1;
     let generation = state.next_generation;
+    let in_flight = state.in_flight.is_some_and(|(id, _)| id == window_id);
     if let Some(slot) = state.slots.get_mut(&window_id) {
         slot.generation = generation;
         slot.pending = None;
+        slot.landing = in_flight.then_some(Target {
+            x: entry.x,
+            y: entry.y,
+            w: entry.w,
+            h: entry.h,
+            flags: entry.flags & !SWP_ASYNCWINDOWPOS,
+            generation,
+        });
     }
     state.ready.retain(|&id| id != window_id);
-    state.in_flight.is_some_and(|(id, _)| id == window_id)
+    in_flight
 }
 
 pub(super) fn forget(window_id: WindowId) {
@@ -109,6 +121,7 @@ pub(super) fn cancel(window_ids: Option<&[WindowId]>) {
             slot.generation = generation;
             slot.cancelled = slot.generation;
             slot.pending = None;
+            slot.landing = None;
         }
     }
     while state.in_flight.is_some_and(|(id, _)| affected(id)) {
@@ -173,6 +186,8 @@ fn run() {
                     .unwrap_or_else(crate::recover_poisoned_mutex);
             }
         };
+        let mut before = None;
+        let mut moved = false;
         if let Ok(hwnd) = window_id_to_hwnd(window_id) {
             let answered = cached_placement_owner_answer(hwnd);
             let current = {
@@ -182,10 +197,11 @@ fn run() {
                 })
             };
             if answered && current {
-                let mut before = RECT::default();
-                let before = unsafe { GetWindowRect(hwnd, &mut before) }
+                let mut rect = RECT::default();
+                before = unsafe { GetWindowRect(hwnd, &mut rect) }
                     .ok()
-                    .map(|()| before);
+                    .map(|()| rect);
+                moved = true;
                 // A probe-to-hang race can stall this one mover, never the animation worker.
                 let result = unsafe {
                     SetWindowPos(
@@ -201,21 +217,85 @@ fn run() {
                 if let Err(error) = result {
                     tracing::debug!(window_id, %error, "Placement mover could not apply frame");
                 }
-                let recover = {
-                    let mut state = lock();
-                    state.in_flight = None;
-                    WAKE.notify_all();
-                    state.slots.get(&window_id).is_some_and(|slot| {
-                        slot.lifetime == lifetime && slot.cancelled > target.generation
-                    })
-                };
-                if recover {
-                    // A cancelled call may return after recovery has already run.
-                    crate::visibility::recover_after_placement_mover(window_id, before);
-                }
             }
         }
-        lock().in_flight = None;
-        WAKE.notify_all();
+        finish(window_id, lifetime, target.generation, before, moved);
+    }
+}
+
+fn finish(
+    window_id: WindowId,
+    lifetime: u64,
+    mut generation: u64,
+    before: Option<RECT>,
+    mut moved: bool,
+) {
+    loop {
+        let correction = {
+            let mut state = lock();
+            let correction = state
+                .slots
+                .get(&window_id)
+                .filter(|slot| slot.lifetime == lifetime)
+                .and_then(|slot| {
+                    if let Some(landing) =
+                        slot.landing.filter(|target| target.generation > generation)
+                    {
+                        Some((landing.generation, Some(landing)))
+                    } else if moved
+                        && slot.cancelled > generation
+                        && slot.generation == slot.cancelled
+                    {
+                        Some((slot.generation, None))
+                    } else {
+                        None
+                    }
+                });
+            if correction.is_none() {
+                state.in_flight = None;
+                WAKE.notify_all();
+                return;
+            }
+            correction.unwrap()
+        };
+        let (next_generation, landing) = correction;
+        let Ok(hwnd) = window_id_to_hwnd(window_id) else {
+            generation = next_generation;
+            continue;
+        };
+        let answered = placement_owner_answers(hwnd, 50);
+        let current = lock()
+            .slots
+            .get(&window_id)
+            .is_some_and(|slot| slot.lifetime == lifetime && slot.generation == next_generation);
+        if !current {
+            continue;
+        }
+        if answered {
+            if let Some(target) = landing {
+                moved = true;
+                if let Err(error) = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        target.x,
+                        target.y,
+                        target.w,
+                        target.h,
+                        target.flags,
+                    )
+                } {
+                    tracing::warn!(window_id, %error, "Could not complete deferred placement landing");
+                }
+            } else {
+                crate::visibility::recover_after_placement_mover(window_id, before);
+            }
+        } else {
+            tracing::warn!(
+                window_id,
+                "Skipping late placement correction: owner did not answer"
+            );
+        }
+        generation = next_generation;
     }
 }

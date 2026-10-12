@@ -628,6 +628,13 @@ fn test_cascade_accepts_in_flight_mover_and_recovers_late_offscreen_move() {
     let work_area = leopardwm_platform_win32::get_primary_monitor()
         .unwrap()
         .work_area;
+    let cascade_height = (work_area.height as f64 * 0.5) as i32;
+    let cascade_rect = Rect::new(
+        work_area.x,
+        work_area.y,
+        (cascade_height as f64 * 1.33) as i32,
+        cascade_height,
+    );
     placements[0].rect.x = leopardwm_platform_win32::MOVE_OFFSCREEN_SENTINEL_COORD;
     placements[0].visibility = Visibility::OffScreenLeft;
     owner.control.block_next.store(true, Ordering::SeqCst);
@@ -654,10 +661,64 @@ fn test_cascade_accepts_in_flight_mover_and_recovers_late_offscreen_move() {
     assert!(
         wait_for_fixture(
             || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
-                .is_some_and(|rect| rect.intersects(&work_area)),
+                == Some(cascade_rect),
             Duration::from_secs(2)
         ),
-        "late mover frame left released window offscreen"
+        "late mover frame did not converge on the cascade rectangle"
+    );
+}
+
+#[test]
+fn test_newer_landing_supersedes_cancelled_in_flight_move() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_newer_landing_supersedes_cancelled_in_flight_move",
+    ) {
+        return;
+    }
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    let barrier =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (_, mut barrier_placements) = classify_non_draining_owner(&barrier);
+    placements[0].rect.x += 100;
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_fixture(
+        || owner.control.entered.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    leopardwm_platform_win32::stop_placement_mover();
+    placements[0].rect.x += 200;
+    let landing =
+        leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
+            .unwrap();
+    assert!(landing.landings[0].measurement_deferred);
+    owner.control.release();
+    barrier_placements[0].rect.x += 300;
+    leopardwm_platform_win32::apply_placements(
+        &barrier_placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_fixture(
+        || leopardwm_platform_win32::get_window_chrome_rect(barrier.window_id)
+            == Some(barrier_placements[0].rect),
+        Duration::from_secs(2)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect),
+        "cancel-only undo overwrote the newer authoritative landing"
     );
 }
 
@@ -851,7 +912,10 @@ fn test_marked_landing_seals_stale_frame_and_defers_in_flight_move() {
         Duration::from_secs(2)
     ));
     state.moved_or_resized_suppression.clear();
-    assert!(state.recheck_deferred_window_moves());
+    assert!(
+        !state.recheck_deferred_window_moves(),
+        "the mover-completed landing should not need another layout apply"
+    );
     assert_eq!(
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
         Some(placements[0].rect)

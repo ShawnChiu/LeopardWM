@@ -345,13 +345,6 @@ pub(crate) fn recover_after_placement_mover(window_id: WindowId, before: Option<
     let Ok(hwnd) = window_id_to_hwnd(window_id) else {
         return;
     };
-    if !crate::placement::placement_owner_answers(hwnd, 50) {
-        tracing::warn!(
-            window_id,
-            "Skipping late placement recovery: owner did not answer"
-        );
-        return;
-    }
     let work_areas = recovery_work_areas().unwrap_or_else(|| vec![primary.work_area]);
     let before = before.map(|r| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top));
     let restored =
