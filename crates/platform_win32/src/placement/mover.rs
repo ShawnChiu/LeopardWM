@@ -19,10 +19,18 @@ struct Target {
     generation: u64,
 }
 
+#[derive(Clone, Copy)]
+struct Correction {
+    target: Option<Target>,
+    generation: u64,
+    before: Option<RECT>,
+    deadline: Option<Instant>,
+}
+
 struct Slot {
     lifetime: u64,
     pending: Option<Target>,
-    landing: Option<Target>,
+    correction: Option<Correction>,
     generation: u64,
     cancelled: u64,
 }
@@ -63,7 +71,7 @@ pub(super) fn mark(window_id: WindowId) {
         Slot {
             lifetime,
             pending: None,
-            landing: None,
+            correction: None,
             generation: lifetime,
             cancelled: 0,
         },
@@ -74,8 +82,13 @@ pub(super) fn is_marked(window_id: WindowId) -> bool {
     lock().slots.contains_key(&window_id)
 }
 
-pub(super) fn in_flight(window_id: WindowId) -> bool {
-    lock().in_flight.is_some_and(|(id, _)| id == window_id)
+pub(super) fn pending(window_id: WindowId) -> bool {
+    let state = lock();
+    state.in_flight.is_some_and(|(id, _)| id == window_id)
+        || state
+            .slots
+            .get(&window_id)
+            .is_some_and(|slot| slot.correction.is_some())
 }
 
 pub(super) fn seal(entry: &DeferEntry) -> bool {
@@ -90,13 +103,18 @@ pub(super) fn seal(entry: &DeferEntry) -> bool {
     if let Some(slot) = state.slots.get_mut(&window_id) {
         slot.generation = generation;
         slot.pending = None;
-        slot.landing = in_flight.then_some(Target {
-            x: entry.x,
-            y: entry.y,
-            w: entry.w,
-            h: entry.h,
-            flags: entry.flags & !SWP_ASYNCWINDOWPOS,
+        slot.correction = in_flight.then_some(Correction {
+            target: Some(Target {
+                x: entry.x,
+                y: entry.y,
+                w: entry.w,
+                h: entry.h,
+                flags: entry.flags & !SWP_ASYNCWINDOWPOS,
+                generation,
+            }),
             generation,
+            before: None,
+            deadline: None,
         });
     }
     state.ready.retain(|&id| id != window_id);
@@ -121,7 +139,7 @@ pub(super) fn cancel(window_ids: Option<&[WindowId]>) {
             slot.generation = generation;
             slot.cancelled = slot.generation;
             slot.pending = None;
-            slot.landing = None;
+            slot.correction = None;
         }
     }
     while state.in_flight.is_some_and(|(id, _)| affected(id)) {
@@ -145,7 +163,6 @@ pub(super) fn submit(entry: &DeferEntry, generation: Option<u64>) {
         return;
     }
     let generation = slot.generation;
-    let enqueue = slot.pending.is_none();
     slot.pending = Some(Target {
         x: entry.x,
         y: entry.y,
@@ -154,7 +171,7 @@ pub(super) fn submit(entry: &DeferEntry, generation: Option<u64>) {
         flags: entry.flags & !SWP_ASYNCWINDOWPOS,
         generation,
     });
-    if enqueue {
+    if !state.ready.contains(&entry.window_id) {
         state.ready.push_back(entry.window_id);
     }
     if !state.started {
@@ -171,131 +188,131 @@ pub(super) fn submit(entry: &DeferEntry, generation: Option<u64>) {
 
 fn run() {
     loop {
-        let (window_id, lifetime, target) = {
+        let (window_id, lifetime, target, correction) = {
             let mut state = lock();
             loop {
                 if let Some(id) = state.ready.pop_front() {
                     let slot = state.slots.get_mut(&id).unwrap();
-                    let target = slot.pending.take().unwrap();
+                    let correction = slot.correction.take().map(|mut correction| {
+                        correction
+                            .deadline
+                            .get_or_insert_with(|| Instant::now() + Duration::from_secs(2));
+                        correction
+                    });
+                    let target = if correction.is_some() {
+                        None
+                    } else {
+                        slot.pending.take()
+                    };
                     let lifetime = slot.lifetime;
                     state.in_flight = Some((id, lifetime));
-                    break (id, lifetime, target);
+                    break (id, lifetime, target, correction);
                 }
                 state = WAKE
                     .wait(state)
                     .unwrap_or_else(crate::recover_poisoned_mutex);
             }
         };
+        let generation =
+            correction.map_or_else(|| target.unwrap().generation, |work| work.generation);
         let mut before = None;
         let mut moved = false;
-        if let Ok(hwnd) = window_id_to_hwnd(window_id) {
-            let answered = cached_placement_owner_answer(hwnd);
-            let current = {
-                let state = lock();
-                state.slots.get(&window_id).is_some_and(|slot| {
-                    slot.lifetime == lifetime && slot.generation == target.generation
-                })
+        let mut retry = None;
+        if let Some(work) = correction.filter(|work| {
+            work.deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        }) {
+            tracing::warn!(
+                window_id,
+                generation = work.generation,
+                "Dropping expired placement correction"
+            );
+        } else if let Ok(hwnd) = window_id_to_hwnd(window_id) {
+            let answered = if correction.is_some() {
+                placement_owner_answers(hwnd, 50)
+            } else {
+                cached_placement_owner_answer(hwnd)
             };
-            if answered && current {
+            if answered {
                 let mut rect = RECT::default();
                 before = unsafe { GetWindowRect(hwnd, &mut rect) }
                     .ok()
                     .map(|()| rect);
+            }
+            let is_current = || {
+                lock()
+                    .slots
+                    .get(&window_id)
+                    .is_some_and(|slot| slot.lifetime == lifetime && slot.generation == generation)
+            };
+            if is_current() && answered {
                 moved = true;
                 // A probe-to-hang race can stall this one mover, never the animation worker.
-                let result = unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        None,
-                        target.x,
-                        target.y,
-                        target.w,
-                        target.h,
-                        target.flags,
-                    )
-                };
-                if let Err(error) = result {
-                    tracing::debug!(window_id, %error, "Placement mover could not apply frame");
+                if let Some(target) = correction.and_then(|work| work.target).or(target) {
+                    if let Err(error) = unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            None,
+                            target.x,
+                            target.y,
+                            target.w,
+                            target.h,
+                            target.flags,
+                        )
+                    } {
+                        tracing::warn!(window_id, %error, "Placement mover could not apply target");
+                    }
+                } else {
+                    crate::visibility::recover_after_placement_mover(
+                        window_id,
+                        correction.unwrap().before,
+                        is_current,
+                    );
                 }
+            } else if is_current() {
+                retry = correction;
             }
         }
-        finish(window_id, lifetime, target.generation, before, moved);
+        finish(window_id, lifetime, generation, before, moved, retry);
     }
 }
 
 fn finish(
     window_id: WindowId,
     lifetime: u64,
-    mut generation: u64,
+    generation: u64,
     before: Option<RECT>,
-    mut moved: bool,
+    moved: bool,
+    retry: Option<Correction>,
 ) {
-    loop {
-        let correction = {
-            let mut state = lock();
-            let correction = state
-                .slots
-                .get(&window_id)
-                .filter(|slot| slot.lifetime == lifetime)
-                .and_then(|slot| {
-                    if let Some(landing) =
-                        slot.landing.filter(|target| target.generation > generation)
-                    {
-                        Some((landing.generation, Some(landing)))
-                    } else if moved
-                        && slot.cancelled > generation
-                        && slot.generation == slot.cancelled
-                    {
-                        Some((slot.generation, None))
-                    } else {
-                        None
-                    }
+    let mut state = lock();
+    let has_work = state
+        .slots
+        .get_mut(&window_id)
+        .filter(|slot| slot.lifetime == lifetime)
+        .map(|slot| {
+            if slot.generation == generation {
+                slot.correction = retry;
+            } else if slot.correction.is_none()
+                && moved
+                && slot.cancelled > generation
+                && slot.generation == slot.cancelled
+            {
+                slot.correction = Some(Correction {
+                    target: None,
+                    generation: slot.generation,
+                    before,
+                    deadline: None,
                 });
-            if correction.is_none() {
-                state.in_flight = None;
-                WAKE.notify_all();
-                return;
             }
-            correction.unwrap()
-        };
-        let (next_generation, landing) = correction;
-        let Ok(hwnd) = window_id_to_hwnd(window_id) else {
-            generation = next_generation;
-            continue;
-        };
-        let answered = placement_owner_answers(hwnd, 50);
-        let current = lock()
-            .slots
-            .get(&window_id)
-            .is_some_and(|slot| slot.lifetime == lifetime && slot.generation == next_generation);
-        if !current {
-            continue;
+            slot.correction.is_some() || slot.pending.is_some()
+        });
+    if let Some(has_work) = has_work {
+        state.ready.retain(|&id| id != window_id);
+        if has_work {
+            state.ready.push_back(window_id);
         }
-        if answered {
-            if let Some(target) = landing {
-                moved = true;
-                if let Err(error) = unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        None,
-                        target.x,
-                        target.y,
-                        target.w,
-                        target.h,
-                        target.flags,
-                    )
-                } {
-                    tracing::warn!(window_id, %error, "Could not complete deferred placement landing");
-                }
-            } else {
-                crate::visibility::recover_after_placement_mover(window_id, before);
-            }
-        } else {
-            tracing::warn!(
-                window_id,
-                "Skipping late placement correction: owner did not answer"
-            );
-        }
-        generation = next_generation;
     }
+    state.in_flight = None;
+    WAKE.notify_all();
 }

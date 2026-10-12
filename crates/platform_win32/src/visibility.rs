@@ -334,8 +334,11 @@ pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::I
     emergency_sentinel_pass(window_ids, &work_area, work_areas.as_deref());
 }
 
-pub(crate) fn recover_after_placement_mover(window_id: WindowId, before: Option<RECT>) {
-    crate::placement::dwm_uncloak_window(window_id);
+pub(crate) fn recover_after_placement_mover(
+    window_id: WindowId,
+    before: Option<RECT>,
+    is_current: impl Fn() -> bool,
+) {
     let Ok(_dpi) = RecoveryDpiContext::enter() else {
         return;
     };
@@ -365,6 +368,13 @@ pub(crate) fn recover_after_placement_mover(window_id: WindowId, before: Option<
                 &primary.work_area,
             )
         };
+    if !is_current() {
+        return;
+    }
+    crate::placement::dwm_uncloak_window(window_id);
+    if !is_current() {
+        return;
+    }
     if let Err(error) = unsafe {
         SetWindowPos(
             hwnd,

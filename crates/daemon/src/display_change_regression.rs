@@ -41,7 +41,13 @@ unsafe extern "system" fn placement_owner_proc(
                 control.entered.store(true, Ordering::SeqCst);
                 let (_released, _timeout) = control
                     .wake
-                    .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+                    .wait_timeout_while(
+                        released,
+                        Duration::from_millis(
+                            control.hold_timeout_ms.load(Ordering::SeqCst).max(5000),
+                        ),
+                        |released| !*released,
+                    )
                     .unwrap();
             }
         }
@@ -70,6 +76,7 @@ unsafe extern "system" fn placement_owner_proc(
 struct MoveControl {
     block_next: AtomicBool,
     move_delay_ms: AtomicU64,
+    hold_timeout_ms: AtomicU64,
     entered: AtomicBool,
     pause_pump: AtomicBool,
     pause_after_move: AtomicBool,
@@ -614,9 +621,14 @@ fn test_late_cancelled_move_skips_undo_when_owner_stops_answering() {
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
         Some(placements[0].rect)
     );
-    assert!(!leopardwm_platform_win32::pending_async_position(
-        owner.window_id
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(3)
     ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
 }
 
 #[test]
@@ -668,6 +680,194 @@ fn test_cascade_accepts_in_flight_mover_and_recovers_late_offscreen_move() {
     );
 }
 
+fn cascade_probe_retry_case(resume: bool) {
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    let barrier =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (_, mut barrier_placements) = classify_non_draining_owner(&barrier);
+    let work_area = leopardwm_platform_win32::get_primary_monitor()
+        .unwrap()
+        .work_area;
+    let height = (work_area.height as f64 * 0.5) as i32;
+    let cascade_rect = Rect::new(
+        work_area.x,
+        work_area.y,
+        (height as f64 * 1.33) as i32,
+        height,
+    );
+    placements[0].rect.x = leopardwm_platform_win32::MOVE_OFFSCREEN_SENTINEL_COORD;
+    placements[0].visibility = Visibility::OffScreenLeft;
+    owner.control.hold_timeout_ms.store(10000, Ordering::SeqCst);
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    owner.control.pause_after_move.store(true, Ordering::SeqCst);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_fixture(
+        || owner.control.entered.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    leopardwm_platform_win32::cascade_windows(&[owner.window_id]).unwrap();
+    owner.control.release();
+    assert!(wait_for_fixture(
+        || owner.control.pump_paused.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    for _ in 0..2 {
+        barrier_placements[0].rect.x += 100;
+        leopardwm_platform_win32::apply_placements(
+            &barrier_placements,
+            &state.platform_config,
+            Some(&mut cache),
+            false,
+        )
+        .unwrap();
+        assert!(
+            wait_for_fixture(
+                || leopardwm_platform_win32::get_window_chrome_rect(barrier.window_id)
+                    == Some(barrier_placements[0].rect),
+                Duration::from_secs(1)
+            ),
+            "correction retry blocked another owner"
+        );
+    }
+    if resume {
+        owner.control.pause_pump.store(false, Ordering::SeqCst);
+        assert!(
+            wait_for_fixture(
+                || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+                    == Some(cascade_rect),
+                Duration::from_secs(3)
+            ),
+            "cascade landing was discarded after a missed correction probe"
+        );
+    } else {
+        assert!(
+            leopardwm_platform_win32::pending_async_position(owner.window_id),
+            "correction was dropped on its first missed probe"
+        );
+        let stalled = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id);
+        let moves = owner.control.moves.lock().unwrap().len();
+        assert!(
+            wait_for_fixture(
+                || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+                Duration::from_secs(3)
+            ),
+            "correction did not expire within its retry bound"
+        );
+        assert_eq!(
+            leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+            stalled
+        );
+        assert_eq!(
+            owner.control.moves.lock().unwrap().len(),
+            moves,
+            "non-answering owner was moved"
+        );
+        owner.control.pause_pump.store(false, Ordering::SeqCst);
+        barrier_placements[0].rect.x += 100;
+        leopardwm_platform_win32::apply_placements(
+            &barrier_placements,
+            &state.platform_config,
+            Some(&mut cache),
+            false,
+        )
+        .unwrap();
+        assert!(wait_for_fixture(
+            || leopardwm_platform_win32::get_window_chrome_rect(barrier.window_id)
+                == Some(barrier_placements[0].rect),
+            Duration::from_secs(1)
+        ));
+        assert_eq!(
+            leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+            stalled,
+            "expired correction ran after owner resumed"
+        );
+    }
+}
+
+#[test]
+fn test_cascade_correction_retries_after_missed_probe() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_cascade_correction_retries_after_missed_probe",
+    ) {
+        return;
+    }
+    cascade_probe_retry_case(true);
+}
+
+#[test]
+fn test_cascade_correction_expires_without_blocking_other_owners() {
+    if run_in_placement_test_process("tests::display_change_regression::test_cascade_correction_expires_without_blocking_other_owners") { return; }
+    cascade_probe_retry_case(false);
+}
+
+#[test]
+fn test_slow_landing_corrections_share_fifo_with_other_owner_frames() {
+    if run_in_placement_test_process("tests::display_change_regression::test_slow_landing_corrections_share_fifo_with_other_owner_frames") { return; }
+    let first =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let second =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut landings) = classify_non_draining_owner(&first);
+    let (_, mut frames) = classify_non_draining_owner(&second);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    first.control.block_next.store(true, Ordering::SeqCst);
+    landings[0].rect.x += 100;
+    leopardwm_platform_win32::apply_placements(
+        &landings,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_fixture(
+        || first.control.entered.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    landings[0].rect.x += 100;
+    leopardwm_platform_win32::apply_placements(&landings, &state.platform_config, None, true)
+        .unwrap();
+    first.control.move_delay_ms.store(100, Ordering::SeqCst);
+    second.control.moves.lock().unwrap().clear();
+    let config = state.platform_config.clone();
+    let churn = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            landings[0].rect.x += 1;
+            leopardwm_platform_win32::apply_placements(&landings, &config, None, true).unwrap();
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+    first.control.release();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        frames[0].rect.x += 1;
+        leopardwm_platform_win32::apply_placements(
+            &frames,
+            &state.platform_config,
+            Some(&mut cache),
+            false,
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(4));
+    }
+    let served = second.control.moves.lock().unwrap().len();
+    churn.join().unwrap();
+    first.control.move_delay_ms.store(0, Ordering::SeqCst);
+    assert!(
+        served >= 3,
+        "slow correction churn starved the other owner's frames: {served}"
+    );
+}
+
 #[test]
 fn test_newer_landing_supersedes_cancelled_in_flight_move() {
     if run_in_placement_test_process(
@@ -714,6 +914,10 @@ fn test_newer_landing_supersedes_cancelled_in_flight_move() {
         || leopardwm_platform_win32::get_window_chrome_rect(barrier.window_id)
             == Some(barrier_placements[0].rect),
         Duration::from_secs(2)
+    ));
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(3)
     ));
     assert_eq!(
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),

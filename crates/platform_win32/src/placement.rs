@@ -1737,7 +1737,7 @@ fn async_position_state_with_owner_probe(
 }
 
 pub fn pending_async_position(window_id: WindowId) -> bool {
-    if mover::in_flight(window_id) {
+    if mover::pending(window_id) {
         return true;
     }
     let snapshot = lock_async_positions()
