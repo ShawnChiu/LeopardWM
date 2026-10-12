@@ -247,18 +247,13 @@ pub(crate) fn emergency_uncloak_tracked(window_ids: &[WindowId]) {
     }
 }
 
-pub(crate) fn seal_placement_mover(window_id: WindowId) -> Result<(), Win32Error> {
-    if mover::seal(window_id) {
-        return Err(Win32Error::SetPositionFailed(format!(
-            "Window {window_id} still has a placement mover call in flight"
-        )));
-    }
-    Ok(())
+pub(crate) fn cancel_window_placement_moves(window_ids: &[WindowId]) {
+    mover::cancel(Some(window_ids));
 }
 
-/// Stop queued-move fallback before visibility recovery, with a bounded in-flight wait.
+/// Cancel queued-move fallback before visibility recovery, with a bounded in-flight wait.
 pub fn stop_placement_mover() {
-    mover::stop();
+    mover::cancel(None);
 }
 
 /// Force-uncloak every tracked window from both sets. Called during
@@ -396,7 +391,7 @@ pub(crate) fn lock_cloak_set_tests() -> std::sync::MutexGuard<'static, ()> {
 pub struct PlacementCache {
     positions: HashMap<WindowId, (Rect, Visibility)>,
     insets: HashMap<WindowId, (i32, i32, i32, i32)>,
-    mover_epoch: u64,
+    mover_generations: HashMap<WindowId, u64>,
     frame_prepared: bool,
 }
 
@@ -411,18 +406,20 @@ impl PlacementCache {
         Self {
             positions: HashMap::new(),
             insets: HashMap::new(),
-            mover_epoch: mover::epoch(),
+            mover_generations: mover::generations(),
             frame_prepared: false,
         }
     }
 
     /// Sample the landing fence before the caller checks whether its frame is stale.
     pub fn prepare_frame(&mut self) {
-        let epoch = mover::epoch();
-        if self.mover_epoch != epoch {
-            self.clear();
+        let generations = mover::generations();
+        for (&id, &generation) in &self.mover_generations {
+            if generations.get(&id) != Some(&generation) {
+                self.positions.remove(&id);
+            }
         }
-        self.mover_epoch = epoch;
+        self.mover_generations = generations;
         self.frame_prepared = true;
     }
 
@@ -599,9 +596,9 @@ fn apply_placements_inner(
     queued_endpoints: &mut HashMap<WindowId, (i32, i32, i32, i32)>,
     owner_deferrals: &OwnerDeferrals,
 ) -> Result<ApplyPlacementsResult, Win32Error> {
-    let frame_epoch = cache
+    let frame_generations = cache
         .as_ref()
-        .map_or_else(mover::epoch, |cache| cache.mover_epoch);
+        .map_or_else(mover::generations, |cache| cache.mover_generations.clone());
     if let Ok(mut records) = OFFSCREEN_PLACEMENTS.lock() {
         for p in placements {
             if p.visibility == Visibility::Visible {
@@ -674,7 +671,7 @@ fn apply_placements_inner(
         cache.is_none() && post_animation_landing,
         &async_deferrals,
         queued_endpoints,
-        frame_epoch,
+        &frame_generations,
     );
     if let Ok(mut records) = OFFSCREEN_PLACEMENTS.lock() {
         for entry in &entries {
@@ -1267,7 +1264,7 @@ struct OwnerDeferrals {
     unresponsive: HashSet<WindowId>,
 }
 
-fn placement_owner_answers(hwnd: HWND, timeout_ms: u32) -> bool {
+pub(crate) fn placement_owner_answers(hwnd: HWND, timeout_ms: u32) -> bool {
     unsafe {
         SendMessageTimeoutW(
             hwnd,
@@ -1424,7 +1421,7 @@ fn position_entries(entries: &[DeferEntry], post_animation_landing: bool) -> (u3
         post_animation_landing,
         &pending,
         &mut queued_endpoints,
-        mover::epoch(),
+        &mover::generations(),
     )
 }
 
@@ -1433,14 +1430,14 @@ fn position_entries_for_pending(
     post_animation_landing: bool,
     pending: &AsyncPositionDeferrals,
     queued_endpoints: &mut HashMap<WindowId, (i32, i32, i32, i32)>,
-    frame_epoch: u64,
+    frame_generations: &HashMap<WindowId, u64>,
 ) -> (u32, HashSet<u64>) {
     position_entries_with_pending(
         entries,
         post_animation_landing,
         pending,
         queued_endpoints,
-        frame_epoch,
+        frame_generations,
         |entry| unsafe {
             SetWindowPos(
                 entry.hwnd,
@@ -1473,7 +1470,7 @@ where
         post_animation_landing,
         &AsyncPositionDeferrals::default(),
         &mut queued_endpoints,
-        mover::epoch(),
+        &mover::generations(),
         queue_endpoint,
         position_batch,
     )
@@ -1484,7 +1481,7 @@ fn position_entries_with_pending<Q, P>(
     post_animation_landing: bool,
     deferrals: &AsyncPositionDeferrals,
     queued_endpoints: &mut HashMap<WindowId, (i32, i32, i32, i32)>,
-    frame_epoch: u64,
+    frame_generations: &HashMap<WindowId, u64>,
     mut queue_endpoint: Q,
     position_batch: P,
 ) -> (u32, HashSet<u64>)
@@ -1495,7 +1492,7 @@ where
     let mut failures = HashSet::new();
     for entry in entries {
         if entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::is_marked(entry.window_id) {
-            mover::submit(entry, frame_epoch);
+            mover::submit(entry, frame_generations.get(&entry.window_id).copied());
             continue;
         }
         let endpoint_target = (entry.x, entry.y, entry.w, entry.h);
@@ -4012,7 +4009,7 @@ mod tests {
             true,
             &AsyncPositionDeferrals::default(),
             &mut queued_endpoints,
-            mover::epoch(),
+            &mover::generations(),
             |entry| {
                 queued.push(entry.window_id);
                 if entry.window_id == 10 {
@@ -4034,7 +4031,7 @@ mod tests {
             true,
             &AsyncPositionDeferrals::default(),
             &mut queued_endpoints,
-            mover::epoch(),
+            &mover::generations(),
             |entry| {
                 queued.push(entry.window_id);
                 Ok(())
@@ -4053,7 +4050,7 @@ mod tests {
             true,
             &AsyncPositionDeferrals::default(),
             &mut queued_endpoints,
-            mover::epoch(),
+            &mover::generations(),
             |entry| {
                 queued.push(entry.window_id);
                 Ok(())

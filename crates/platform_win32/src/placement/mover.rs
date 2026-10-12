@@ -16,23 +16,23 @@ struct Target {
     w: i32,
     h: i32,
     flags: SET_WINDOW_POS_FLAGS,
-    epoch: u64,
+    generation: u64,
 }
 
 struct Slot {
     lifetime: u64,
     pending: Option<Target>,
+    generation: u64,
+    cancelled: u64,
 }
 
 #[derive(Default)]
 struct State {
     slots: HashMap<WindowId, Slot>,
     ready: VecDeque<WindowId>,
-    next_lifetime: u64,
-    epoch: u64,
+    next_generation: u64,
     in_flight: Option<(WindowId, u64)>,
     started: bool,
-    stopped: bool,
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));
@@ -42,8 +42,12 @@ fn lock() -> std::sync::MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(crate::recover_poisoned_mutex)
 }
 
-pub(super) fn epoch() -> u64 {
-    lock().epoch
+pub(super) fn generations() -> HashMap<WindowId, u64> {
+    lock()
+        .slots
+        .iter()
+        .map(|(&id, slot)| (id, slot.generation))
+        .collect()
 }
 
 pub(super) fn mark(window_id: WindowId) {
@@ -51,13 +55,15 @@ pub(super) fn mark(window_id: WindowId) {
     if state.slots.contains_key(&window_id) {
         return;
     }
-    state.next_lifetime += 1;
-    let lifetime = state.next_lifetime;
+    state.next_generation += 1;
+    let lifetime = state.next_generation;
     state.slots.insert(
         window_id,
         Slot {
             lifetime,
             pending: None,
+            generation: lifetime,
+            cancelled: 0,
         },
     );
 }
@@ -72,8 +78,13 @@ pub(super) fn in_flight(window_id: WindowId) -> bool {
 
 pub(super) fn seal(window_id: WindowId) -> bool {
     let mut state = lock();
-    state.epoch += 1;
+    if !state.slots.contains_key(&window_id) {
+        return false;
+    }
+    state.next_generation += 1;
+    let generation = state.next_generation;
     if let Some(slot) = state.slots.get_mut(&window_id) {
+        slot.generation = generation;
         slot.pending = None;
     }
     state.ready.retain(|&id| id != window_id);
@@ -86,17 +97,21 @@ pub(super) fn forget(window_id: WindowId) {
     state.ready.retain(|&id| id != window_id);
 }
 
-pub(super) fn stop() {
+pub(super) fn cancel(window_ids: Option<&[WindowId]>) {
     let deadline = Instant::now() + Duration::from_millis(100);
     let mut state = lock();
-    state.stopped = true;
-    state.epoch += 1;
-    state.ready.clear();
-    for slot in state.slots.values_mut() {
-        slot.pending = None;
+    let affected = |id: WindowId| window_ids.is_none_or(|ids| ids.contains(&id));
+    state.ready.retain(|&id| !affected(id));
+    state.next_generation += 1;
+    let generation = state.next_generation;
+    for (&id, slot) in &mut state.slots {
+        if affected(id) {
+            slot.generation = generation;
+            slot.cancelled = slot.generation;
+            slot.pending = None;
+        }
     }
-    WAKE.notify_all();
-    while state.in_flight.is_some() {
+    while state.in_flight.is_some_and(|(id, _)| affected(id)) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
@@ -108,14 +123,15 @@ pub(super) fn stop() {
     }
 }
 
-pub(super) fn submit(entry: &DeferEntry, epoch: u64) {
+pub(super) fn submit(entry: &DeferEntry, generation: Option<u64>) {
     let mut state = lock();
-    if state.stopped || state.epoch != epoch {
-        return;
-    }
     let Some(slot) = state.slots.get_mut(&entry.window_id) else {
         return;
     };
+    if Some(slot.generation) != generation {
+        return;
+    }
+    let generation = slot.generation;
     let enqueue = slot.pending.is_none();
     slot.pending = Some(Target {
         x: entry.x,
@@ -123,7 +139,7 @@ pub(super) fn submit(entry: &DeferEntry, epoch: u64) {
         w: entry.w,
         h: entry.h,
         flags: entry.flags & !SWP_ASYNCWINDOWPOS,
-        epoch,
+        generation,
     });
     if enqueue {
         state.ready.push_back(entry.window_id);
@@ -145,9 +161,6 @@ fn run() {
         let (window_id, lifetime, target) = {
             let mut state = lock();
             loop {
-                if state.stopped {
-                    return;
-                }
                 if let Some(id) = state.ready.pop_front() {
                     let slot = state.slots.get_mut(&id).unwrap();
                     let target = slot.pending.take().unwrap();
@@ -164,12 +177,9 @@ fn run() {
             let answered = cached_placement_owner_answer(hwnd);
             let current = {
                 let state = lock();
-                !state.stopped
-                    && state.epoch == target.epoch
-                    && state
-                        .slots
-                        .get(&window_id)
-                        .is_some_and(|slot| slot.lifetime == lifetime)
+                state.slots.get(&window_id).is_some_and(|slot| {
+                    slot.lifetime == lifetime && slot.generation == target.generation
+                })
             };
             if answered && current {
                 let mut before = RECT::default();
@@ -192,15 +202,15 @@ fn run() {
                     tracing::debug!(window_id, %error, "Placement mover could not apply frame");
                 }
                 let recover = {
-                    let state = lock();
-                    state.stopped
-                        && state
-                            .slots
-                            .get(&window_id)
-                            .is_some_and(|slot| slot.lifetime == lifetime)
+                    let mut state = lock();
+                    state.in_flight = None;
+                    WAKE.notify_all();
+                    state.slots.get(&window_id).is_some_and(|slot| {
+                        slot.lifetime == lifetime && slot.cancelled > target.generation
+                    })
                 };
                 if recover {
-                    // A call that outlives stop's bounded wait must finish with visibility recovery.
+                    // A cancelled call may return after recovery has already run.
                     crate::visibility::recover_after_placement_mover(window_id, before);
                 }
             }

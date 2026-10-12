@@ -345,6 +345,13 @@ pub(crate) fn recover_after_placement_mover(window_id: WindowId, before: Option<
     let Ok(hwnd) = window_id_to_hwnd(window_id) else {
         return;
     };
+    if !crate::placement::placement_owner_answers(hwnd, 50) {
+        tracing::warn!(
+            window_id,
+            "Skipping late placement recovery: owner did not answer"
+        );
+        return;
+    }
     let work_areas = recovery_work_areas().unwrap_or_else(|| vec![primary.work_area]);
     let before = before.map(|r| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top));
     let restored =
@@ -571,9 +578,7 @@ pub fn uncloak_all_visible_windows() {
 /// Each window uses 50% of the work-area height with approximately 4:3 width
 /// and 30px offsets. Off-screen windows are first restored, then cascaded.
 pub fn cascade_windows(window_ids: &[WindowId]) -> Result<(), Win32Error> {
-    for &window_id in window_ids {
-        crate::placement::seal_placement_mover(window_id)?;
-    }
+    crate::placement::cancel_window_placement_moves(window_ids);
     let work_area =
         get_primary_monitor().map_or(Rect::new(0, 0, 1920, 1080), |monitor| monitor.work_area);
     cascade_windows_with(
@@ -694,7 +699,9 @@ where
                 }
             }
             for landing in result.landings {
-                if (landing.failed || landing.unreadable) && is_live(landing.window_id) {
+                if (landing.failed || (landing.unreadable && !landing.measurement_deferred))
+                    && is_live(landing.window_id)
+                {
                     failures.push(format!(
                         "window {} could not be {} after cascade",
                         landing.window_id,
