@@ -454,7 +454,11 @@ fn test_frame_prepared_before_landing_cannot_move_after_landing() {
     let landing =
         leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
             .unwrap();
-    assert!(!landing.landings[0].measurement_deferred);
+    assert!(landing.landings[0].measurement_deferred);
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(2)
+    ));
     owner.control.block_next.store(true, Ordering::SeqCst);
     leopardwm_platform_win32::apply_placements(
         &stale,
@@ -927,6 +931,64 @@ fn test_newer_landing_supersedes_cancelled_in_flight_move() {
 }
 
 #[test]
+fn test_slow_marked_owner_never_blocks_initial_apply_frames_or_landing() {
+    if run_in_placement_test_process("tests::display_change_regression::test_slow_marked_owner_never_blocks_initial_apply_frames_or_landing") { return; }
+    let slow = PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&slow);
+    let normal = PlacementOwner::spawn();
+    normal.resume();
+    let mut normal_placement = placements[0].clone();
+    normal_placement.window_id = normal.window_id;
+    placements.push(normal_placement);
+    slow.control.move_delay_ms.store(150, Ordering::SeqCst);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    for phase in 0..3 {
+        for placement in &mut placements {
+            placement.rect.x += 100;
+        }
+        let started = Instant::now();
+        let result = leopardwm_platform_win32::apply_placements(
+            &placements,
+            &state.platform_config,
+            (phase == 1).then_some(&mut cache),
+            phase == 2,
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(75),
+            "phase {phase} apply blocked on the marked owner: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            wait_for_fixture(
+                || leopardwm_platform_win32::get_window_chrome_rect(normal.window_id)
+                    == Some(placements[1].rect),
+                Duration::from_millis(50)
+            ),
+            "phase {phase} normal window was delayed by the marked owner"
+        );
+        if phase != 1 {
+            assert!(
+                result
+                    .landings
+                    .iter()
+                    .find(|landing| landing.window_id == slow.window_id)
+                    .unwrap()
+                    .measurement_deferred
+            );
+        }
+    }
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(slow.window_id),
+        Duration::from_secs(3)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(slow.window_id),
+        Some(placements[0].rect)
+    );
+}
+
+#[test]
 fn test_non_draining_owner_receives_animation_frames_without_blocking_caller() {
     if run_in_placement_test_process("tests::display_change_regression::test_non_draining_owner_receives_animation_frames_without_blocking_caller") { return; }
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
@@ -1023,10 +1085,14 @@ fn test_marked_owner_lands_without_latest_async_drain_wait() {
         leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
             .unwrap();
     assert!(
-        !landing.landings[0].measurement_deferred,
-        "marked landing still waits for the latest async post"
+        landing.landings[0].measurement_deferred,
+        "marked landing must not move on the apply thread"
     );
     assert!(started.elapsed() < Duration::from_millis(200));
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_millis(200)
+    ));
     assert_eq!(
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
         Some(placements[0].rect)
@@ -1456,6 +1522,10 @@ fn test_deferred_landing_corrects_responsive_non_draining_owner_promptly() {
     );
     assert!(landing_at.elapsed() < Duration::from_secs(1));
     assert_eq!(state.physical_request_seq, before + 1);
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_millis(200)
+    ));
     assert_eq!(
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
         Some(placements[0].rect)
@@ -1521,7 +1591,11 @@ fn test_deferred_landing_preserves_latest_endpoint_when_owner_drains_later() {
         false,
     )
     .unwrap();
-    assert!(!correction.landings[0].measurement_deferred);
+    assert!(correction.landings[0].measurement_deferred);
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_millis(200)
+    ));
     assert_eq!(
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
         Some(placements[0].rect)

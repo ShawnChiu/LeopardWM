@@ -104,7 +104,7 @@ pub(super) fn seal(entry: &DeferEntry) -> bool {
     if let Some(slot) = state.slots.get_mut(&window_id) {
         slot.generation = generation;
         slot.pending = None;
-        slot.correction = in_flight.then_some(Correction {
+        slot.correction = Some(Correction {
             target: Some(Target {
                 x: entry.x,
                 y: entry.y,
@@ -119,7 +119,11 @@ pub(super) fn seal(entry: &DeferEntry) -> bool {
         });
     }
     state.ready.retain(|&id| id != window_id);
-    in_flight
+    if !in_flight {
+        state.ready.push_back(window_id);
+    }
+    start(&mut state);
+    true
 }
 
 pub(super) fn forget(window_id: WindowId) {
@@ -175,6 +179,10 @@ pub(super) fn submit(entry: &DeferEntry, generation: Option<u64>) {
     if !state.ready.contains(&entry.window_id) {
         state.ready.push_back(entry.window_id);
     }
+    start(&mut state);
+}
+
+fn start(state: &mut State) {
     if !state.started {
         match std::thread::Builder::new()
             .name("placement-mover".into())
@@ -352,14 +360,29 @@ mod tests {
             column_index: 0,
             offscreen_rect: None,
         };
+        let previously_started = lock().started;
+        lock().started = true;
         let deferred = seal(&entry);
         finish(window_id, lifetime, lifetime, None, true, None);
+        let (queued, new_lifetime, generation) = {
+            let mut state = lock();
+            let queued = state.ready.pop_front() == Some(window_id);
+            let slot = state.slots.get_mut(&window_id).unwrap();
+            slot.correction.take();
+            let lifetime = slot.lifetime;
+            let generation = slot.generation;
+            state.in_flight = Some((window_id, lifetime));
+            (queued, lifetime, generation)
+        };
+        finish(window_id, new_lifetime, generation, None, true, None);
         let pending_after_return = pending(window_id);
         forget(window_id);
+        lock().started = previously_started;
         assert!(old_pending, "same-lifetime native work must remain pending");
+        assert!(deferred, "marked landing must run on the mover");
         assert!(
-            !deferred,
-            "old-lifetime work incorrectly deferred the new landing"
+            queued,
+            "old-lifetime work stranded the new landing off the FIFO"
         );
         assert!(
             !pending_before_landing,

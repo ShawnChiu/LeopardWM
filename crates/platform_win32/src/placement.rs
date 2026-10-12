@@ -303,13 +303,20 @@ fn mark_placement_parked(window_id: WindowId) {
 }
 
 /// Park a window at the placement sentinel and record that placement owns its
-/// return-to-layout recovery. The logical park is rolled back if the physical
-/// move fails, so visible maximized recovery never infers ownership from raw
-/// coordinates.
+/// return-to-layout recovery. Marked owners are parked through the mover.
+/// Unmarked parks roll back on physical failure; visible maximized recovery
+/// never infers ownership from raw coordinates.
 pub fn park_window_for_placement(window_id: WindowId) -> Result<(), Win32Error> {
     let hwnd = window_id_to_hwnd(window_id)?;
     mark_placement_parked(window_id);
     apply_cloak_state(window_id);
+    let sentinel = crate::MOVE_OFFSCREEN_SENTINEL_COORD;
+    let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    if mover::seal(&DeferEntry::position_only(
+        hwnd, window_id, sentinel, sentinel, flags,
+    )) {
+        return Ok(());
+    }
     let moved = unsafe {
         SetWindowPos(
             hwnd,
@@ -535,9 +542,37 @@ struct DeferEntry {
     offscreen_rect: Option<Rect>,
 }
 
+impl DeferEntry {
+    fn position_only(
+        hwnd: HWND,
+        window_id: WindowId,
+        x: i32,
+        y: i32,
+        flags: SET_WINDOW_POS_FLAGS,
+    ) -> Self {
+        Self {
+            hwnd,
+            window_id,
+            x,
+            y,
+            w: 0,
+            h: 0,
+            layout_w: 0,
+            layout_h: 0,
+            insets: (0, 0, 0, 0),
+            inset_source: InsetSource::Fresh,
+            inset_generation: 0,
+            visibility: Visibility::Visible,
+            flags: flags | SWP_NOSIZE,
+            column_index: usize::MAX,
+            offscreen_rect: None,
+        }
+    }
+}
+
 /// Apply window placements from the layout engine.
 ///
-/// Visible windows are positioned immediately via SetWindowPos.
+/// Unmarked visible windows are positioned immediately via SetWindowPos.
 /// Off-screen windows are moved to sentinel coordinates far off-screen.
 ///
 /// When `cache` is provided, placements whose rect and visibility match the
@@ -620,9 +655,8 @@ fn apply_placements_inner(
         return Ok(empty_result);
     }
 
-    // Animation frames (cache present) use async positioning so hung windows
-    // don't stall the vsync-driven animation loop. Landing passes (no cache)
-    // stay synchronous for precise final placement.
+    // Unmarked frames use async positioning; unmarked landings stay synchronous.
+    // Marked owners receive both through the mover so they cannot stall either pass.
     let async_flag = if cache.is_some() {
         SWP_ASYNCWINDOWPOS
     } else {
@@ -984,6 +1018,9 @@ fn skip_visible_tiled_maximized(
         && placement.column_index != usize::MAX
         && is_zoomed;
     if skip {
+        let generation = cache
+            .as_ref()
+            .and_then(|cache| cache.mover_generations.get(&placement.window_id).copied());
         if let Some(cache) = cache {
             cache.positions.remove(&placement.window_id);
         }
@@ -994,7 +1031,8 @@ fn skip_visible_tiled_maximized(
         // releasing that cloak. SWP_NOSIZE deliberately preserves maximized
         // dimensions and does not restore ordinary visible maximized windows.
         let pending = is_placement_parked(placement.window_id)
-            && (owner_pending
+            && (mover::is_marked(placement.window_id)
+                || owner_pending
                 || (async_flag == SET_WINDOW_POS_FLAGS(0)
                     && pending_async_position(placement.window_id)));
         let recovery =
@@ -1002,6 +1040,20 @@ fn skip_visible_tiled_maximized(
                 let Ok(hwnd) = window_id_to_hwnd(placement.window_id) else {
                     return false;
                 };
+                if mover::is_marked(placement.window_id) {
+                    let entry = DeferEntry::position_only(
+                        hwnd,
+                        placement.window_id,
+                        placement.rect.x,
+                        placement.rect.y,
+                        flags,
+                    );
+                    if async_flag.contains(SWP_ASYNCWINDOWPOS) {
+                        mover::submit(&entry, generation);
+                        return true;
+                    }
+                    return mover::seal(&entry);
+                }
                 unsafe {
                     SetWindowPos(hwnd, None, placement.rect.x, placement.rect.y, 0, 0, flags)
                         .is_ok()
@@ -1355,6 +1407,9 @@ fn probe_placement_owners(
         .map(|placement| placement.window_id)
         .chain(omitted)
     {
+        if mover::is_marked(window_id) {
+            continue;
+        }
         let was_marked = marked.contains(&window_id);
         if !display_change && !was_marked {
             continue;
@@ -1520,8 +1575,7 @@ where
     let synchronous_entries: Vec<_> = entries
         .iter()
         .filter(|entry| {
-            !deferrals.pending.contains(&entry.window_id)
-                && !(entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::is_marked(entry.window_id))
+            !deferrals.pending.contains(&entry.window_id) && !mover::is_marked(entry.window_id)
         })
         .cloned()
         .collect();
@@ -1548,16 +1602,6 @@ struct AsyncPositionDeferrals {
 
 fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPositionDeferrals {
     let mut deferrals = AsyncPositionDeferrals::default();
-    for entry in entries {
-        if !entry.flags.contains(SWP_ASYNCWINDOWPOS) {
-            let in_flight = mover::seal(entry);
-            if in_flight
-                || (mover::is_marked(entry.window_id) && !cached_placement_owner_answer(entry.hwnd))
-            {
-                deferrals.pending.insert(entry.window_id);
-            }
-        }
-    }
     let snapshots: Vec<_> = {
         let guard = lock_async_positions();
         entries
@@ -1593,29 +1637,34 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
         })
         .collect();
     let mut guard = lock_async_positions();
-    let Some(submissions) = guard.as_mut() else {
-        return deferrals;
-    };
-    for (window_id, snapshot, state) in states {
-        let Some(current) = submissions.get(&window_id) else {
-            continue;
-        };
-        if Some(*current) != snapshot {
-            deferrals.pending.insert(window_id);
-            continue;
-        }
-        match state {
-            AsyncPositionState::Drained => {
-                submissions.remove(&window_id);
-            }
-            AsyncPositionState::Pending => {
+    if let Some(submissions) = guard.as_mut() {
+        for (window_id, snapshot, state) in states {
+            let Some(current) = submissions.get(&window_id) else {
+                continue;
+            };
+            if Some(*current) != snapshot {
                 deferrals.pending.insert(window_id);
+                continue;
             }
-            AsyncPositionState::ProbeExpired => {
-                mover::mark(window_id);
-                deferrals.probe_expired.insert(window_id);
+            match state {
+                AsyncPositionState::Drained => {
+                    submissions.remove(&window_id);
+                }
+                AsyncPositionState::Pending => {
+                    deferrals.pending.insert(window_id);
+                }
+                AsyncPositionState::ProbeExpired => {
+                    mover::mark(window_id);
+                    deferrals.probe_expired.insert(window_id);
+                }
+                AsyncPositionState::Expired => {}
             }
-            AsyncPositionState::Expired => {}
+        }
+    }
+    drop(guard);
+    for entry in entries {
+        if !entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::seal(entry) {
+            deferrals.pending.insert(entry.window_id);
         }
     }
     deferrals
