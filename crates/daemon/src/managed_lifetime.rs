@@ -148,6 +148,7 @@ impl AppState {
 
     /// Drop the recorded lifetime and its admission time together.
     pub(crate) fn take_managed_lifetime_token(&mut self, hwnd: u64) -> Option<u64> {
+        leopardwm_platform_win32::clear_suspected_oversize(hwnd);
         self.window_move_recheck_attempts.remove(&hwnd);
         self.deferred_moved_or_resized.remove(&hwnd);
         self.deferred_physical_landings.remove(&hwnd);

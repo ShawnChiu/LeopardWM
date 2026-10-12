@@ -1,6 +1,7 @@
 use super::*;
 use leopardwm_core_layout::{Visibility, WindowPlacement};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::w;
@@ -28,13 +29,53 @@ unsafe extern "system" fn placement_owner_proc(
         return LRESULT(0);
     }
     if message == WM_WINDOWPOSCHANGING {
+        let control = GetPropW(hwnd, w!("LeopardWMFixtureMoveControl")).0;
+        if !control.is_null() {
+            let control = &*(control as *const MoveControl);
+            if control.block_next.swap(false, Ordering::SeqCst) {
+                let released = control.released.lock().unwrap();
+                control.entered.store(true, Ordering::SeqCst);
+                let (_released, _timeout) = control
+                    .wake
+                    .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+                    .unwrap();
+            }
+        }
         let position = &mut *(lparam.0 as *mut WINDOWPOS);
         if !position.flags.contains(SWP_NOSIZE) {
             let min_width = GetPropW(hwnd, w!("LeopardWMFixtureMinWidth")).0 as usize as i32;
             position.cx = position.cx.max(min_width);
         }
     }
-    DefWindowProcW(hwnd, message, wparam, lparam)
+    let result = DefWindowProcW(hwnd, message, wparam, lparam);
+    if message == windows::Win32::UI::WindowsAndMessaging::WM_WINDOWPOSCHANGED {
+        let control = GetPropW(hwnd, w!("LeopardWMFixtureMoveControl")).0;
+        if !control.is_null() {
+            let control = &*(control as *const MoveControl);
+            let position = &*(lparam.0 as *const WINDOWPOS);
+            control.moves.lock().unwrap().push((position.x, position.y));
+        }
+    }
+    result
+}
+
+#[derive(Default)]
+struct MoveControl {
+    block_next: AtomicBool,
+    entered: AtomicBool,
+    pause_pump: AtomicBool,
+    pump_paused: AtomicBool,
+    moves: Mutex<Vec<(i32, i32)>>,
+    released: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl MoveControl {
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.wake.notify_all();
+        self.pause_pump.store(false, Ordering::SeqCst);
+    }
 }
 
 struct PlacementOwner {
@@ -43,6 +84,7 @@ struct PlacementOwner {
     release: mpsc::Sender<()>,
     pumping: mpsc::Receiver<()>,
     join: Option<thread::JoinHandle<()>>,
+    control: Arc<MoveControl>,
 }
 
 impl PlacementOwner {
@@ -67,6 +109,8 @@ impl PlacementOwner {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release, resume) = mpsc::channel();
         let (pumping_tx, pumping) = mpsc::channel();
+        let control = Arc::new(MoveControl::default());
+        let owner_control = Arc::clone(&control);
         let join = thread::spawn(move || unsafe {
             let hwnd = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
@@ -85,6 +129,12 @@ impl PlacementOwner {
                 None,
                 None,
                 None,
+            )
+            .unwrap();
+            SetPropW(
+                hwnd,
+                w!("LeopardWMFixtureMoveControl"),
+                Some(HANDLE(Arc::as_ptr(&owner_control) as *mut _)),
             )
             .unwrap();
             if min_width > 0 || sent_messages_only {
@@ -116,6 +166,12 @@ impl PlacementOwner {
             if sent_messages_only {
                 let deadline = Instant::now() + Duration::from_secs(20);
                 while resume.try_recv().is_err() && Instant::now() < deadline {
+                    if owner_control.pause_pump.load(Ordering::SeqCst) {
+                        owner_control.pump_paused.store(true, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    owner_control.pump_paused.store(false, Ordering::SeqCst);
                     let mut message = MSG::default();
                     let _ = windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
                         &mut message,
@@ -145,6 +201,7 @@ impl PlacementOwner {
             release,
             pumping,
             join: Some(join),
+            control,
         }
     }
 
@@ -156,6 +213,8 @@ impl PlacementOwner {
 
 impl Drop for PlacementOwner {
     fn drop(&mut self) {
+        self.control.release();
+        leopardwm_platform_win32::clear_suspected_oversize(self.window_id);
         let _ = self.release.send(());
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
@@ -215,6 +274,414 @@ fn pending_landing_recheck_state(owner: &PlacementOwner) -> (AppState, Vec<Windo
     state.consume_physical_landings(request_id, invalidation_id, &landing.landings, &[]);
     assert!(state.deferred_physical_landings.contains(&owner.window_id));
     (state, placements)
+}
+
+fn wait_for_fixture(mut ready: impl FnMut() -> bool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !ready() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
+fn classify_non_draining_owner(owner: &PlacementOwner) -> (AppState, Vec<WindowPlacement>) {
+    let (state, placements) = pending_landing_recheck_state(owner);
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(2),
+    ));
+    (state, placements)
+}
+
+#[test]
+fn test_non_draining_owner_receives_animation_frames_without_blocking_caller() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    placements[0].rect.x += 100;
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    let started = Instant::now();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert!(
+        wait_for_fixture(
+            || owner.control.entered.load(Ordering::SeqCst),
+            Duration::from_secs(2)
+        ),
+        "animation frame never reached the non-draining owner"
+    );
+    placements[0].rect.x += 100;
+    let superseded_origin = (placements[0].rect.x, placements[0].rect.y);
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    placements[0].rect.x += 100;
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    owner.control.release();
+    assert!(wait_for_fixture(
+        || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+            == Some(placements[0].rect),
+        Duration::from_secs(2)
+    ));
+    assert!(
+        !owner
+            .control
+            .moves
+            .lock()
+            .unwrap()
+            .contains(&superseded_origin),
+        "superseded pending frame was applied"
+    );
+}
+
+#[test]
+fn test_marked_owner_lands_without_latest_async_drain_wait() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    wait_for_fixture(
+        || {
+            leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+                == Some(placements[0].rect)
+                && !leopardwm_platform_win32::pending_async_position(owner.window_id)
+        },
+        Duration::from_millis(150),
+    );
+    placements[0].rect.x += 100;
+    let started = Instant::now();
+    let landing =
+        leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
+            .unwrap();
+    assert!(
+        !landing.landings[0].measurement_deferred,
+        "marked landing still waits for the latest async post"
+    );
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+    let hwnd = HWND(owner.window_id as usize as *mut _);
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(hwnd),
+            windows::Win32::UI::WindowsAndMessaging::WM_APP + 42,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .unwrap();
+    }
+    owner.resume();
+    assert!(wait_for_fixture(
+        || unsafe {
+            !GetPropW(hwnd, w!("LeopardWMFixtureQueueDrained"))
+                .0
+                .is_null()
+        },
+        Duration::from_secs(2)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect),
+        "a matching synchronous frame must not discard the pre-classification queue fence"
+    );
+}
+
+#[test]
+fn test_marked_landing_seals_stale_frame_and_defers_in_flight_move() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (mut state, mut placements) = classify_non_draining_owner(&owner);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    placements[0].rect.x += 100;
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(
+        wait_for_fixture(
+            || owner.control.entered.load(Ordering::SeqCst),
+            Duration::from_secs(2)
+        ),
+        "frame did not enter the synchronous mover"
+    );
+    assert!(leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    placements[0].rect.x += 100;
+    let stale_origin = (placements[0].rect.x, placements[0].rect.y);
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    placements[0].rect.x -= 200;
+    let started = Instant::now();
+    let landing =
+        leopardwm_platform_win32::apply_placements(&placements, &state.platform_config, None, true)
+            .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "landing waited for the mover"
+    );
+    assert!(landing.landings[0].measurement_deferred);
+    let (request, invalidation) = state.physical_request_ids();
+    state.consume_physical_landings(request, invalidation, &landing.landings, &[]);
+    owner.control.release();
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(2)
+    ));
+    state.moved_or_resized_suppression.clear();
+    assert!(state.recheck_deferred_window_moves());
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(placements[0].rect)
+    );
+    assert!(
+        !owner.control.moves.lock().unwrap().contains(&stale_origin),
+        "sealed frame was applied after landing"
+    );
+    assert!(!state.deferred_physical_landings.contains(&owner.window_id));
+}
+
+#[test]
+fn test_non_draining_mover_drops_targets_when_owner_stops_answering() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, mut placements) = classify_non_draining_owner(&owner);
+    let before = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id);
+    owner.control.pause_pump.store(true, Ordering::SeqCst);
+    assert!(wait_for_fixture(
+        || owner.control.pump_paused.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    let hwnd = HWND(owner.window_id as usize as *mut _);
+    assert!(wait_for_fixture(
+        || unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+                windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG
+                    | windows::Win32::UI::WindowsAndMessaging::SMTO_BLOCK,
+                10,
+                None,
+            )
+            .0 == 0
+        },
+        Duration::from_secs(1)
+    ));
+    // Let the successful owner-answer cache expire before submitting this frame.
+    let expires = Instant::now() + Duration::from_millis(260);
+    assert!(wait_for_fixture(
+        || Instant::now() >= expires,
+        Duration::from_secs(1)
+    ));
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    placements[0].rect.x += 100;
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(
+        wait_for_fixture(
+            || leopardwm_platform_win32::pending_async_position(owner.window_id),
+            Duration::from_secs(2)
+        ),
+        "mover never started the unanswered owner probe"
+    );
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(2)
+    ));
+    owner.control.pause_pump.store(false, Ordering::SeqCst);
+    assert!(wait_for_fixture(
+        || !owner.control.pump_paused.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    let barrier = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG
+                | windows::Win32::UI::WindowsAndMessaging::SMTO_BLOCK,
+            100,
+            None,
+        )
+        .0
+    };
+    assert_ne!(barrier, 0, "mover blocked on a non-answering owner");
+    assert!(!owner.control.entered.load(Ordering::SeqCst));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        before
+    );
+}
+
+#[test]
+fn test_managed_departure_forgets_queued_move_fallback_and_pending_frame() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (mut state, mut placements) = classify_non_draining_owner(&owner);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    placements[0].rect.x += 100;
+    let first_target = placements[0].rect;
+    owner.control.block_next.store(true, Ordering::SeqCst);
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(wait_for_fixture(
+        || owner.control.entered.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    placements[0].rect.x += 100;
+    let forgotten_origin = (placements[0].rect.x, placements[0].rect.y);
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    state.take_managed_lifetime_token(owner.window_id);
+    assert!(
+        leopardwm_platform_win32::pending_async_position(owner.window_id),
+        "forgetting must not hide an already executing call"
+    );
+    owner.control.release();
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(2)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(first_target)
+    );
+    assert!(!owner
+        .control
+        .moves
+        .lock()
+        .unwrap()
+        .contains(&forgotten_origin));
+    placements[0].rect.x += 100;
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(
+        leopardwm_platform_win32::pending_async_position(owner.window_id),
+        "new lifetime inherited the queued-move fallback"
+    );
+    let landing = leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(landing.landings[0].measurement_deferred);
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(first_target)
+    );
+}
+
+#[test]
+fn test_unmarked_owner_keeps_async_animation_delivery() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owner = PlacementOwner::spawn();
+    let state = placement_state(&[owner.window_id]);
+    let placements = state.workspaces[&1][0].compute_placements_animated(state.layout_viewport(1));
+    let before = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id);
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    let started = Instant::now();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        before
+    );
+    assert!(leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    owner.resume();
+    assert!(wait_for_fixture(
+        || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+            == Some(placements[0].rect),
+        Duration::from_secs(2)
+    ));
 }
 
 #[test]

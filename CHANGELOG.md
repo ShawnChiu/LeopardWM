@@ -7,6 +7,7 @@ All notable changes to LeopardWM will be documented in this file.
 ### Fixes
 
 - **Windows whose apps never apply queued moves, such as Wargaming Game Center, no longer stay out of their tiles after windows scroll or resize.** LeopardWM now re-checks them and moves them back into their tiles within about a second.
+- **These windows now slide with the other windows during scrolls instead of jumping into place afterwards.**
 
 ## 0.3.1
 

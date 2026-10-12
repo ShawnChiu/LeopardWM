@@ -1,5 +1,7 @@
 //! Window placement application via SetWindowPos / DeferWindowPos.
 
+mod mover;
+
 use crate::types::{PlatformConfig, Win32Error};
 use crate::window_id_to_hwnd;
 use leopardwm_core_layout::{Rect, Visibility, WindowId, WindowPlacement};
@@ -1448,7 +1450,15 @@ where
 {
     let mut failures = HashSet::new();
     for entry in entries {
+        if entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::is_marked(entry.window_id) {
+            mover::submit(entry);
+            continue;
+        }
         let endpoint_target = (entry.x, entry.y, entry.w, entry.h);
+        if mover::is_marked(entry.window_id) && !deferrals.probe_expired.contains(&entry.window_id)
+        {
+            continue;
+        }
         if !(post_animation_landing
             || deferrals.pending.contains(&entry.window_id)
             || deferrals.probe_expired.contains(&entry.window_id))
@@ -1468,7 +1478,10 @@ where
     // A pending owner-thread move must not be overtaken by this pass's synchronous batch.
     let synchronous_entries: Vec<_> = entries
         .iter()
-        .filter(|entry| !deferrals.pending.contains(&entry.window_id))
+        .filter(|entry| {
+            !deferrals.pending.contains(&entry.window_id)
+                && !(entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::is_marked(entry.window_id))
+        })
         .cloned()
         .collect();
     let batch_failures = position_batch(&synchronous_entries);
@@ -1493,6 +1506,17 @@ struct AsyncPositionDeferrals {
 }
 
 fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPositionDeferrals {
+    let mut deferrals = AsyncPositionDeferrals::default();
+    for entry in entries {
+        if !entry.flags.contains(SWP_ASYNCWINDOWPOS) {
+            let in_flight = mover::seal(entry.window_id);
+            if in_flight
+                || (mover::is_marked(entry.window_id) && !cached_placement_owner_answer(entry.hwnd))
+            {
+                deferrals.pending.insert(entry.window_id);
+            }
+        }
+    }
     let snapshots: Vec<_> = {
         let guard = lock_async_positions();
         entries
@@ -1510,17 +1534,23 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
         .into_iter()
         .map(|(window_id, hwnd, submission)| {
             let state = submission.map_or(AsyncPositionState::Pending, |submission| {
-                async_position_state_with_owner_probe(
-                    submission,
-                    observed_async_position(hwnd),
-                    std::time::Instant::now(),
-                    probe_owners.then_some(hwnd),
-                )
+                let observed = observed_async_position(hwnd);
+                if mover::is_marked(window_id) {
+                    // Synchronous frames can match the old endpoint without draining its queue.
+                    // Retain that backlog's fence until this window is forgotten.
+                    AsyncPositionState::ProbeExpired
+                } else {
+                    async_position_state_with_owner_probe(
+                        submission,
+                        observed,
+                        std::time::Instant::now(),
+                        probe_owners.then_some(hwnd),
+                    )
+                }
             });
             (window_id, submission, state)
         })
         .collect();
-    let mut deferrals = AsyncPositionDeferrals::default();
     let mut guard = lock_async_positions();
     let Some(submissions) = guard.as_mut() else {
         return deferrals;
@@ -1541,6 +1571,7 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
                 deferrals.pending.insert(window_id);
             }
             AsyncPositionState::ProbeExpired => {
+                mover::mark(window_id);
                 deferrals.probe_expired.insert(window_id);
             }
             AsyncPositionState::Expired => {}
@@ -1665,6 +1696,9 @@ fn async_position_state_with_owner_probe(
 }
 
 pub fn pending_async_position(window_id: WindowId) -> bool {
+    if mover::in_flight(window_id) {
+        return true;
+    }
     let snapshot = lock_async_positions()
         .as_ref()
         .and_then(|submissions| submissions.get(&window_id))
@@ -1674,8 +1708,11 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
     };
     let hwnd = window_id_to_hwnd(window_id).ok();
     let current = hwnd.and_then(observed_async_position);
-    let state =
-        async_position_state_with_owner_probe(snapshot, current, std::time::Instant::now(), hwnd);
+    let state = if mover::is_marked(window_id) {
+        AsyncPositionState::ProbeExpired
+    } else {
+        async_position_state_with_owner_probe(snapshot, current, std::time::Instant::now(), hwnd)
+    };
     let mut guard = lock_async_positions();
     let Some(submissions) = guard.as_mut() else {
         return false;
@@ -1692,7 +1729,11 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
             false
         }
         AsyncPositionState::Pending => true,
-        AsyncPositionState::Expired | AsyncPositionState::ProbeExpired => false,
+        AsyncPositionState::ProbeExpired => {
+            mover::mark(window_id);
+            false
+        }
+        AsyncPositionState::Expired => false,
     }
 }
 
@@ -1901,6 +1942,7 @@ pub fn clear_suspected_oversize(window_id: WindowId) {
         map.remove(&window_id);
     }
     clear_async_position(window_id);
+    mover::forget(window_id);
 }
 
 const VISIBLE_SIZE_TOLERANCE: i32 = 2;
