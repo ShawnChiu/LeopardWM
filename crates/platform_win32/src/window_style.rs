@@ -769,7 +769,11 @@ pub(crate) fn emergency_restore_maximizebox(window_ids: &[WindowId], deadline: s
                     0,
                     0,
                     SWP_FRAMECHANGED
-                        | SWP_ASYNCWINDOWPOS
+                        | if crate::placement::is_marked_placement_owner(id) {
+                            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0)
+                        } else {
+                            SWP_ASYNCWINDOWPOS
+                        }
                         | SWP_NOMOVE
                         | SWP_NOSIZE
                         | SWP_NOZORDER

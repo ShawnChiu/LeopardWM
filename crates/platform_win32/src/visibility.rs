@@ -59,7 +59,7 @@ fn move_window_offscreen_with_flags(
         MOVE_OFFSCREEN_SENTINEL_COORD,
         MOVE_OFFSCREEN_SENTINEL_COORD,
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-    )? {
+    ) {
         return Ok(true);
     }
     unsafe {
@@ -215,8 +215,6 @@ fn restore_window_if_offscreen_to_work_area(
         }
         if owner_wait {
             crate::placement::record_queued_owner_rect(window_id, &restore_rect);
-        } else {
-            crate::placement::fence_marked_recovery(hwnd, window_id, &restore_rect)?;
         }
     }
 
@@ -285,7 +283,13 @@ fn emergency_sentinel_pass(window_ids: &[WindowId], work_area: &Rect, work_areas
                 restored.y,
                 restored.width,
                 restored.height,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+                SWP_NOZORDER
+                    | SWP_NOACTIVATE
+                    | if crate::placement::is_marked_placement_owner(id) {
+                        SET_WINDOW_POS_FLAGS(0)
+                    } else {
+                        SWP_ASYNCWINDOWPOS
+                    },
             )
             .is_ok()
                 && owner_wait
@@ -398,10 +402,6 @@ pub(crate) fn recover_after_placement_mover(
         )
     } {
         tracing::warn!(window_id, %error, "Could not recover a late placement mover call");
-    } else if is_current() {
-        if let Err(error) = crate::placement::fence_marked_recovery(hwnd, window_id, &restored) {
-            tracing::warn!(window_id, %error, "Could not fence a late placement mover recovery");
-        }
     }
 }
 

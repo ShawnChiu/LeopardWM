@@ -512,36 +512,12 @@ fn test_workspace_park_supersedes_queued_marked_landing() {
         leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&parked),
         "older queued landing restored parked window: {parked:?}"
     );
-    owner.resume();
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(HWND(owner.window_id as usize as *mut _)),
-            windows::Win32::UI::WindowsAndMessaging::WM_APP + 42,
-            WPARAM(0),
-            LPARAM(0),
-        )
-        .unwrap();
-    }
-    assert!(wait_for_fixture(
-        || unsafe {
-            !GetPropW(
-                HWND(owner.window_id as usize as *mut _),
-                w!("LeopardWMFixtureQueueDrained"),
-            )
-            .0
-            .is_null()
-        },
-        Duration::from_secs(2)
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
     ));
-    assert!(
-        leopardwm_platform_win32::is_move_offscreen_sentinel_rect(
-            &leopardwm_platform_win32::get_window_chrome_rect(owner.window_id).unwrap()
-        ),
-        "late async queue restored parked window"
-    );
 }
 
-fn parked_owner_release_drains_to_target(cascade: bool) {
+fn parked_owner_release_reaches_target(cascade: bool) {
     let _desktop = FixtureDesktop::enter();
     let owner =
         PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
@@ -584,50 +560,87 @@ fn parked_owner_release_drains_to_target(cascade: bool) {
     assert!(!leopardwm_platform_win32::is_move_offscreen_sentinel_rect(
         &target
     ));
-    owner.resume();
-    let hwnd = HWND(owner.window_id as usize as *mut _);
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(hwnd),
-            windows::Win32::UI::WindowsAndMessaging::WM_APP + 42,
-            WPARAM(0),
-            LPARAM(0),
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+}
+
+#[test]
+fn test_marked_park_reaches_recovery_target_without_posted_drain() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_marked_park_reaches_recovery_target_without_posted_drain",
+    ) {
+        return;
+    }
+    parked_owner_release_reaches_target(false);
+}
+
+#[test]
+fn test_marked_park_reaches_cascade_target_without_posted_drain() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_marked_park_reaches_cascade_target_without_posted_drain",
+    ) {
+        return;
+    }
+    parked_owner_release_reaches_target(true);
+}
+
+#[test]
+fn test_marked_owner_recovers_twice_without_draining_posted_moves() {
+    if run_in_placement_test_process("tests::display_change_regression::test_marked_owner_recovers_twice_without_draining_posted_moves") { return; }
+    let _desktop = FixtureDesktop::enter();
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let (state, placements) = classify_non_draining_owner(&owner);
+    let work_area = leopardwm_platform_win32::get_primary_monitor()
+        .unwrap()
+        .work_area;
+    let restored = Rect::new(
+        work_area.x,
+        work_area.y,
+        placements[0].rect.width,
+        placements[0].rect.height,
+    );
+    for cycle in 0..2 {
+        leopardwm_platform_win32::apply_placements(
+            &placements,
+            &state.platform_config,
+            None,
+            false,
         )
         .unwrap();
+        assert!(wait_for_fixture(
+            || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+            Duration::from_secs(3)
+        ));
+        assert_eq!(
+            leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+            Some(placements[0].rect)
+        );
+        leopardwm_platform_win32::move_window_offscreen(owner.window_id).unwrap();
+        assert!(wait_for_fixture(
+            || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+            Duration::from_secs(3)
+        ));
+        let started = Instant::now();
+        assert_eq!(
+            leopardwm_platform_win32::restore_windows_moved_offscreen(&[owner.window_id]).unwrap(),
+            1
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(75),
+            "cycle {cycle} recovery blocked: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+            Some(restored),
+            "cycle {cycle} recovery waited for posted-message drain"
+        );
+        assert!(!leopardwm_platform_win32::pending_async_position(
+            owner.window_id
+        ));
     }
-    assert!(wait_for_fixture(
-        || unsafe {
-            !GetPropW(hwnd, w!("LeopardWMFixtureQueueDrained"))
-                .0
-                .is_null()
-        },
-        Duration::from_secs(2)
-    ));
-    assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
-        Some(target),
-        "retained posted moves displaced the released owner after queue drain (cascade={cascade})"
-    );
-}
-
-#[test]
-fn test_marked_parking_fence_drains_to_recovery_target() {
-    if run_in_placement_test_process(
-        "tests::display_change_regression::test_marked_parking_fence_drains_to_recovery_target",
-    ) {
-        return;
-    }
-    parked_owner_release_drains_to_target(false);
-}
-
-#[test]
-fn test_marked_parking_fence_drains_to_cascade_target() {
-    if run_in_placement_test_process(
-        "tests::display_change_regression::test_marked_parking_fence_drains_to_cascade_target",
-    ) {
-        return;
-    }
-    parked_owner_release_drains_to_target(true);
 }
 
 #[test]
@@ -1438,33 +1451,9 @@ fn test_marked_owner_lands_without_latest_async_drain_wait() {
         leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
         Some(placements[0].rect)
     );
-    let hwnd = HWND(owner.window_id as usize as *mut _);
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-            Some(hwnd),
-            windows::Win32::UI::WindowsAndMessaging::WM_APP + 42,
-            WPARAM(0),
-            LPARAM(0),
-        )
-        .unwrap();
-    }
-    owner.resume();
-    assert!(wait_for_fixture(
-        || unsafe {
-            !GetPropW(hwnd, w!("LeopardWMFixtureQueueDrained"))
-                .0
-                .is_null()
-        },
-        Duration::from_secs(2)
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
     ));
-    assert!(
-        wait_for_fixture(
-            || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
-                == Some(placements[0].rect),
-            Duration::from_secs(2),
-        ),
-        "a matching synchronous frame must not discard the pre-classification queue fence"
-    );
 }
 
 #[test]
@@ -1923,18 +1912,20 @@ fn test_deferred_landing_waits_for_latest_async_submission() {
 }
 
 #[test]
-fn test_deferred_landing_preserves_latest_endpoint_when_owner_drains_later() {
+fn test_deferred_recheck_corrects_pre_mark_moves_after_posted_drain() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let owner =
         PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
-    let (state, mut placements) = pending_landing_recheck_state(&owner);
+    let (mut state, _) = pending_landing_recheck_state(&owner);
     thread::sleep(Duration::from_millis(350));
     assert!(!leopardwm_platform_win32::pending_async_position(
         owner.window_id
     ));
-    placements[0].rect.x += 100;
+    state.monitors.get_mut(&1).unwrap().work_area.x += 100;
+    let placements = state.workspaces[&1][0].compute_placements_animated(state.layout_viewport(1));
+    let placements = state.apply_physical_projection(placements);
     let correction = leopardwm_platform_win32::apply_placements(
         &placements,
         &state.platform_config,
@@ -1943,6 +1934,8 @@ fn test_deferred_landing_preserves_latest_endpoint_when_owner_drains_later() {
     )
     .unwrap();
     assert!(correction.landings[0].measurement_deferred);
+    let (request, invalidation) = state.physical_request_ids();
+    state.consume_physical_landings(request, invalidation, &correction.landings, &[]);
     assert!(wait_for_fixture(
         || !leopardwm_platform_win32::pending_async_position(owner.window_id),
         Duration::from_millis(200)
@@ -1974,11 +1967,16 @@ fn test_deferred_landing_preserves_latest_endpoint_when_owner_drains_later() {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
-        Some(placements[0].rect),
-        "old queued frames must not overtake the latest endpoint"
+    state.moved_or_resized_suppression.clear();
+    state.deferred_moved_or_resized.insert(owner.window_id);
+    assert!(state.recheck_deferred_window_moves());
+    assert!(
+        wait_for_fixture(
+            || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+                == Some(placements[0].rect),
+            Duration::from_secs(2),
+        ),
+        "deferred recheck did not correct late pre-mark posted moves"
     );
 }
 

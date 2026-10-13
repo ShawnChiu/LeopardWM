@@ -312,7 +312,7 @@ pub fn park_window_for_placement(window_id: WindowId) -> Result<(), Win32Error> 
     apply_cloak_state(window_id);
     let sentinel = crate::MOVE_OFFSCREEN_SENTINEL_COORD;
     let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
-    if seal_marked_position(hwnd, window_id, sentinel, sentinel, flags)? {
+    if seal_marked_position(hwnd, window_id, sentinel, sentinel, flags) {
         return Ok(());
     }
     let moved = unsafe {
@@ -348,58 +348,17 @@ pub(crate) fn seal_marked_position(
     x: i32,
     y: i32,
     flags: SET_WINDOW_POS_FLAGS,
-) -> Result<bool, Win32Error> {
+) -> bool {
     if !mover::is_marked(window_id) {
-        return Ok(false);
+        return false;
     }
     let entry = DeferEntry::position_only(hwnd, window_id, x, y, flags);
-    let queued = mover::seal(&entry);
-    let retained_async = lock_async_positions()
-        .as_ref()
-        .is_some_and(|positions| positions.contains_key(&window_id));
-    if queued && retained_async {
-        // A retained async backlog must end at the new authoritative park too.
-        unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, entry.flags | SWP_ASYNCWINDOWPOS) }.map_err(
-            |error| {
-                Win32Error::SetPositionFailed(format!(
-                    "Failed to fence parked window {window_id}: {error}"
-                ))
-            },
-        )?;
-        record_async_position(&entry);
-    }
-    Ok(true)
+    mover::seal(&entry);
+    true
 }
 
-pub(crate) fn fence_marked_recovery(
-    hwnd: HWND,
-    window_id: WindowId,
-    rect: &Rect,
-) -> Result<(), Win32Error> {
-    let retained_async = lock_async_positions()
-        .as_ref()
-        .is_some_and(|positions| positions.contains_key(&window_id));
-    if !retained_async || !mover::is_marked(window_id) {
-        return Ok(());
-    }
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            None,
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-        )
-    }
-    .map_err(|error| {
-        Win32Error::SetPositionFailed(format!(
-            "Failed to fence recovered window {window_id}: {error}"
-        ))
-    })?;
-    record_queued_owner_rect(window_id, rect);
-    Ok(())
+pub(crate) fn is_marked_placement_owner(window_id: WindowId) -> bool {
+    mover::is_marked(window_id)
 }
 
 /// Whether placement, rather than ghost animation, owns an off-screen park.
@@ -1120,7 +1079,7 @@ fn skip_visible_tiled_maximized(
             });
         *async_recovery = recovery == ParkedRecoveryOutcome::Succeeded && pending;
         *failed_recovery = recovery == ParkedRecoveryOutcome::Failed;
-        if *async_recovery {
+        if *async_recovery && !mover::is_marked(placement.window_id) {
             record_queued_recovery(placement.window_id, placement.rect.x, placement.rect.y);
             if owner_pending {
                 record_async_coordinates(
@@ -1605,17 +1564,13 @@ where
 {
     let mut failures = HashSet::new();
     for entry in entries {
-        if entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::is_marked(entry.window_id) {
-            mover::submit(entry, frame_generations.get(&entry.window_id).copied());
+        if mover::is_marked(entry.window_id) {
+            if entry.flags.contains(SWP_ASYNCWINDOWPOS) {
+                mover::submit(entry, frame_generations.get(&entry.window_id).copied());
+            }
             continue;
         }
         let endpoint_target = (entry.x, entry.y, entry.w, entry.h);
-        if mover::is_marked(entry.window_id)
-            && (!deferrals.probe_expired.contains(&entry.window_id)
-                || !deferrals.pending.contains(&entry.window_id))
-        {
-            continue;
-        }
         if !(post_animation_landing
             || deferrals.pending.contains(&entry.window_id)
             || deferrals.probe_expired.contains(&entry.window_id))
@@ -1682,8 +1637,6 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
             let state = submission.map_or(AsyncPositionState::Pending, |submission| {
                 let observed = observed_async_position(hwnd);
                 if mover::is_marked(window_id) {
-                    // Synchronous frames can match the old endpoint without draining its queue.
-                    // Retain that backlog's fence until this window is forgotten.
                     AsyncPositionState::ProbeExpired
                 } else {
                     async_position_state_with_owner_probe(
@@ -1716,6 +1669,7 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
                 }
                 AsyncPositionState::ProbeExpired => {
                     mover::mark(window_id);
+                    submissions.remove(&window_id);
                     deferrals.probe_expired.insert(window_id);
                 }
                 AsyncPositionState::Expired => {}
@@ -1723,6 +1677,9 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
         }
     }
     drop(guard);
+    for window_id in &deferrals.probe_expired {
+        clear_async_position(*window_id);
+    }
     for entry in entries {
         if !entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::seal(entry) {
             deferrals.pending.insert(entry.window_id);
@@ -1763,6 +1720,9 @@ fn record_async_coordinates(
     size: Option<(i32, i32)>,
     wait_for_owner: bool,
 ) {
+    if mover::is_marked(window_id) {
+        return;
+    }
     let now = std::time::Instant::now();
     let mut guard = lock_async_positions();
     let submissions = guard.get_or_insert_with(HashMap::new);
@@ -1882,6 +1842,8 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
         AsyncPositionState::Pending => true,
         AsyncPositionState::ProbeExpired => {
             mover::mark(window_id);
+            drop(guard);
+            clear_async_position(window_id);
             false
         }
         AsyncPositionState::Expired => false,
@@ -1889,6 +1851,9 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
 }
 
 pub(crate) fn owner_wait_target(window_id: WindowId, current: &Rect) -> Option<Rect> {
+    if mover::is_marked(window_id) {
+        return None;
+    }
     let submission = lock_async_positions()
         .as_ref()
         .and_then(|submissions| submissions.get(&window_id))

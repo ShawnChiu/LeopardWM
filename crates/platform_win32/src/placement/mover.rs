@@ -65,6 +65,8 @@ pub(super) fn mark(window_id: WindowId) {
     if state.slots.contains_key(&window_id) {
         return;
     }
+    // Pre-mark posted moves may still land late; the mover target and daemon recheck
+    // correct that drift without posting further async moves to this owner.
     state.next_generation += 1;
     let lifetime = state.next_generation;
     state.slots.insert(
