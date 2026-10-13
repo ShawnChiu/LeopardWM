@@ -482,6 +482,22 @@ where
 /// Returns the number of restored windows or queued restores. If any window restore
 /// fails, this returns an aggregated error after attempting all windows.
 pub fn restore_windows_moved_offscreen(window_ids: &[WindowId]) -> Result<usize, Win32Error> {
+    restore_offscreen_windows(window_ids, None)
+}
+
+/// Restore unmarked windows, uncloak managed state, then restore marked windows.
+/// Counts and aggregated errors follow `restore_windows_moved_offscreen`.
+pub fn restore_windows_moved_offscreen_and_uncloak_managed(
+    window_ids: &[WindowId],
+    managed_window_ids: &[WindowId],
+) -> Result<usize, Win32Error> {
+    restore_offscreen_windows(window_ids, Some(managed_window_ids))
+}
+
+fn restore_offscreen_windows(
+    window_ids: &[WindowId],
+    mut managed_window_ids: Option<&[WindowId]>,
+) -> Result<usize, Win32Error> {
     crate::placement::stop_placement_mover();
     if window_ids.is_empty() {
         return Ok(0);
@@ -494,8 +510,18 @@ pub fn restore_windows_moved_offscreen(window_ids: &[WindowId]) -> Result<usize,
         window_ids,
         &primary.work_area,
         work_areas.as_deref(),
-        restore_window_if_offscreen_to_work_area,
+        |window_id, work_area, work_areas| {
+            if crate::placement::is_marked_placement_owner(window_id) {
+                if let Some(managed_window_ids) = managed_window_ids.take() {
+                    uncloak_managed_window_state(managed_window_ids);
+                }
+            }
+            restore_window_if_offscreen_to_work_area(window_id, work_area, work_areas)
+        },
     );
+    if let Some(managed_window_ids) = managed_window_ids {
+        uncloak_managed_window_state(managed_window_ids);
+    }
 
     if !failures.is_empty() {
         return Err(combine_operation_failures(
@@ -507,11 +533,7 @@ pub fn restore_windows_moved_offscreen(window_ids: &[WindowId]) -> Result<usize,
     Ok(restored_count)
 }
 
-/// Restore managed windows to their visible positions, best-effort.
-///
-/// Resets border colors and restores windows parked at MoveOffScreen
-/// sentinel coordinates. Logs warnings for failures but never panics.
-pub fn uncloak_all_managed_windows(window_ids: &[WindowId]) {
+fn uncloak_managed_window_state(window_ids: &[WindowId]) {
     crate::dwm_uncloak_all();
 
     for &wid in window_ids {
@@ -520,7 +542,14 @@ pub fn uncloak_all_managed_windows(window_ids: &[WindowId]) {
         }
         let _ = reset_window_border_color(wid);
     }
+}
 
+/// Restore managed windows to their visible positions, best-effort.
+///
+/// Resets border colors and restores windows parked at MoveOffScreen
+/// sentinel coordinates. Logs warnings for failures but never panics.
+pub fn uncloak_all_managed_windows(window_ids: &[WindowId]) {
+    uncloak_managed_window_state(window_ids);
     if let Err(e) = restore_windows_moved_offscreen(window_ids) {
         tracing::warn!(
             "MoveOffScreen shutdown recovery had one or more failures: {}",
@@ -641,6 +670,9 @@ pub fn cascade_windows(window_ids: &[WindowId]) -> Result<(), Win32Error> {
         window_ids,
         work_area,
         || {
+            for &window_id in window_ids {
+                crate::placement::dwm_uncloak_window(window_id);
+            }
             let recovery = restore_all_windows_moved_offscreen(true);
             tracing::info!(
                 restored_count = recovery.restored_count,

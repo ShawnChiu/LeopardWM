@@ -644,6 +644,66 @@ fn test_marked_owner_recovers_twice_without_draining_posted_moves() {
 }
 
 #[test]
+fn test_visibility_recovery_uncloaks_unmarked_owner_before_marked_move_blocks() {
+    if run_in_placement_test_process("tests::display_change_regression::test_visibility_recovery_uncloaks_unmarked_owner_before_marked_move_blocks") { return; }
+    let _desktop = FixtureDesktop::enter();
+    let marked =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let unmarked =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    classify_non_draining_owner(&marked);
+    leopardwm_platform_win32::move_window_offscreen(marked.window_id).unwrap();
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(marked.window_id),
+        Duration::from_secs(3)
+    ));
+    leopardwm_platform_win32::park_window_for_placement(unmarked.window_id).unwrap();
+    assert!(leopardwm_platform_win32::is_placement_cloaked(
+        unmarked.window_id
+    ));
+    marked.control.block_next.store(true, Ordering::SeqCst);
+    let ids = [marked.window_id, unmarked.window_id];
+    let desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) } as usize;
+    let (done_tx, done_rx) = mpsc::channel();
+    let recovery = thread::spawn(move || {
+        assert_ne!(unsafe { SetThreadDesktop(desktop as *mut _) }, 0);
+        crate::state::run_visibility_recovery_pass(&ids, "placement test");
+        done_tx.send(()).unwrap();
+    });
+    let blocked = wait_for_fixture(
+        || marked.control.entered.load(Ordering::SeqCst),
+        Duration::from_secs(2),
+    );
+    let unmarked_restored = leopardwm_platform_win32::get_window_chrome_rect(unmarked.window_id)
+        .is_some_and(|rect| !leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&rect));
+    let unmarked_uncloaked = !leopardwm_platform_win32::is_placement_cloaked(unmarked.window_id);
+    let still_running = done_rx.try_recv().is_err();
+    marked.control.release();
+    let completed = done_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+    recovery.join().unwrap();
+    assert!(
+        blocked,
+        "marked owner did not block inside the native move after answering the probe"
+    );
+    assert!(
+        still_running,
+        "recovery finished before the blocked-call observation"
+    );
+    assert!(
+        completed,
+        "recovery did not finish after releasing its owned move gate"
+    );
+    assert!(
+        unmarked_restored,
+        "unmarked owner remained parked while marked move blocked"
+    );
+    assert!(
+        unmarked_uncloaked,
+        "unmarked owner remained cloaked while marked move blocked"
+    );
+}
+
+#[test]
 fn test_emergency_recovery_skips_hung_marked_owner_after_unmarked_work() {
     if run_in_placement_test_process("tests::display_change_regression::test_emergency_recovery_skips_hung_marked_owner_after_unmarked_work") { return; }
     let _desktop = FixtureDesktop::enter();

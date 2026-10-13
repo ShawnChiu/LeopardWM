@@ -1748,7 +1748,8 @@ pub(crate) fn merged_cleanup_window_ids(
 pub(crate) fn run_visibility_recovery_pass(managed_window_ids: &[u64], context_label: &str) {
     leopardwm_platform_win32::stop_placement_mover();
     use leopardwm_platform_win32::{
-        enumerate_windows, restore_windows_moved_offscreen, uncloak_all_managed_windows,
+        enumerate_windows, restore_windows_moved_offscreen_and_uncloak_managed,
+        uncloak_all_managed_windows,
     };
     use tracing::warn;
 
@@ -1764,7 +1765,10 @@ pub(crate) fn run_visibility_recovery_pass(managed_window_ids: &[u64], context_l
     };
     let recovery_window_ids = merged_cleanup_window_ids(managed_window_ids, &discovered_window_ids);
 
-    match restore_windows_moved_offscreen(&recovery_window_ids) {
+    match restore_windows_moved_offscreen_and_uncloak_managed(
+        &recovery_window_ids,
+        managed_window_ids,
+    ) {
         Ok(restored) => {
             if restored > 0 {
                 info!(

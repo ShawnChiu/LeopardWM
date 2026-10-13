@@ -89,7 +89,8 @@ pub use visibility::{
     cascade_windows, emergency_restore_windows, is_move_offscreen_sentinel_position,
     is_move_offscreen_sentinel_rect, move_window_offscreen, position_window,
     queue_window_offscreen, restore_all_windows_moved_offscreen_best_effort,
-    restore_window_moved_offscreen, restore_windows_moved_offscreen, uncloak_all_managed_windows,
+    restore_window_moved_offscreen, restore_windows_moved_offscreen,
+    restore_windows_moved_offscreen_and_uncloak_managed, uncloak_all_managed_windows,
     uncloak_all_visible_windows,
 };
 pub use window_identity::{
