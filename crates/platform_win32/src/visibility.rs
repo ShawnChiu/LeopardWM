@@ -215,6 +215,8 @@ fn restore_window_if_offscreen_to_work_area(
         }
         if owner_wait {
             crate::placement::record_queued_owner_rect(window_id, &restore_rect);
+        } else {
+            crate::placement::fence_marked_recovery(hwnd, window_id, &restore_rect)?;
         }
     }
 
@@ -396,6 +398,10 @@ pub(crate) fn recover_after_placement_mover(
         )
     } {
         tracing::warn!(window_id, %error, "Could not recover a late placement mover call");
+    } else if is_current() {
+        if let Err(error) = crate::placement::fence_marked_recovery(hwnd, window_id, &restored) {
+            tracing::warn!(window_id, %error, "Could not fence a late placement mover recovery");
+        }
     }
 }
 

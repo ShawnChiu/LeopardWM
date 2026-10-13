@@ -14,6 +14,68 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn CreateDesktopW(
+        name: *const u16,
+        device: *const u16,
+        mode: *const std::ffi::c_void,
+        flags: u32,
+        access: u32,
+        attributes: *const std::ffi::c_void,
+    ) -> *mut std::ffi::c_void;
+    fn GetThreadDesktop(thread: u32) -> *mut std::ffi::c_void;
+    fn SetThreadDesktop(desktop: *mut std::ffi::c_void) -> i32;
+    fn CloseDesktop(desktop: *mut std::ffi::c_void) -> i32;
+}
+
+struct FixtureDesktop {
+    original: usize,
+    desktop: usize,
+}
+
+impl FixtureDesktop {
+    fn enter() -> Self {
+        let name: Vec<u16> = format!("LeopardWM-placement-test-{}", std::process::id())
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            let original = GetThreadDesktop(GetCurrentThreadId());
+            let desktop = CreateDesktopW(
+                name.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0x10000000,
+                std::ptr::null(),
+            );
+            assert!(
+                !desktop.is_null(),
+                "could not create isolated fixture desktop"
+            );
+            assert_ne!(
+                SetThreadDesktop(desktop),
+                0,
+                "could not enter fixture desktop"
+            );
+            Self {
+                original: original as usize,
+                desktop: desktop as usize,
+            }
+        }
+    }
+}
+
+impl Drop for FixtureDesktop {
+    fn drop(&mut self) {
+        unsafe {
+            assert_ne!(SetThreadDesktop(self.original as *mut _), 0);
+            assert_ne!(CloseDesktop(self.desktop as *mut _), 0);
+        }
+    }
+}
+
 unsafe extern "system" fn placement_owner_proc(
     hwnd: HWND,
     message: u32,
@@ -127,7 +189,9 @@ impl PlacementOwner {
         let (pumping_tx, pumping) = mpsc::channel();
         let control = Arc::new(MoveControl::default());
         let owner_control = Arc::clone(&control);
+        let desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) } as usize;
         let join = thread::spawn(move || unsafe {
+            assert_ne!(SetThreadDesktop(desktop as *mut _), 0);
             let hwnd = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 w!("STATIC"),
@@ -475,6 +539,95 @@ fn test_workspace_park_supersedes_queued_marked_landing() {
         ),
         "late async queue restored parked window"
     );
+}
+
+fn parked_owner_release_drains_to_target(cascade: bool) {
+    let _desktop = FixtureDesktop::enter();
+    let owner =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    classify_non_draining_owner(&owner);
+    leopardwm_platform_win32::move_window_offscreen(owner.window_id).unwrap();
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(3)
+    ));
+    assert!(leopardwm_platform_win32::is_move_offscreen_sentinel_rect(
+        &leopardwm_platform_win32::get_window_chrome_rect(owner.window_id).unwrap()
+    ));
+    let target = if cascade {
+        let work_area = leopardwm_platform_win32::get_primary_monitor()
+            .unwrap()
+            .work_area;
+        let height = (work_area.height as f64 * 0.5) as i32;
+        leopardwm_platform_win32::cascade_windows(&[owner.window_id]).unwrap();
+        Rect::new(
+            work_area.x,
+            work_area.y,
+            (height as f64 * 1.33) as i32,
+            height,
+        )
+    } else {
+        assert_eq!(
+            leopardwm_platform_win32::restore_windows_moved_offscreen(&[owner.window_id]).unwrap(),
+            1
+        );
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id).unwrap()
+    };
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        Duration::from_secs(3)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(target)
+    );
+    assert!(!leopardwm_platform_win32::is_move_offscreen_sentinel_rect(
+        &target
+    ));
+    owner.resume();
+    let hwnd = HWND(owner.window_id as usize as *mut _);
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(hwnd),
+            windows::Win32::UI::WindowsAndMessaging::WM_APP + 42,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .unwrap();
+    }
+    assert!(wait_for_fixture(
+        || unsafe {
+            !GetPropW(hwnd, w!("LeopardWMFixtureQueueDrained"))
+                .0
+                .is_null()
+        },
+        Duration::from_secs(2)
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id),
+        Some(target),
+        "retained posted moves displaced the released owner after queue drain (cascade={cascade})"
+    );
+}
+
+#[test]
+fn test_marked_parking_fence_drains_to_recovery_target() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_marked_parking_fence_drains_to_recovery_target",
+    ) {
+        return;
+    }
+    parked_owner_release_drains_to_target(false);
+}
+
+#[test]
+fn test_marked_parking_fence_drains_to_cascade_target() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_marked_parking_fence_drains_to_cascade_target",
+    ) {
+        return;
+    }
+    parked_owner_release_drains_to_target(true);
 }
 
 #[test]

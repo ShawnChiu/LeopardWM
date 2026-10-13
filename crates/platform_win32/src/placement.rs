@@ -371,6 +371,37 @@ pub(crate) fn seal_marked_position(
     Ok(true)
 }
 
+pub(crate) fn fence_marked_recovery(
+    hwnd: HWND,
+    window_id: WindowId,
+    rect: &Rect,
+) -> Result<(), Win32Error> {
+    let retained_async = lock_async_positions()
+        .as_ref()
+        .is_some_and(|positions| positions.contains_key(&window_id));
+    if !retained_async || !mover::is_marked(window_id) {
+        return Ok(());
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        )
+    }
+    .map_err(|error| {
+        Win32Error::SetPositionFailed(format!(
+            "Failed to fence recovered window {window_id}: {error}"
+        ))
+    })?;
+    record_queued_owner_rect(window_id, rect);
+    Ok(())
+}
+
 /// Whether placement, rather than ghost animation, owns an off-screen park.
 pub fn is_placement_parked(window_id: WindowId) -> bool {
     global_cloaked_contains(window_id)
