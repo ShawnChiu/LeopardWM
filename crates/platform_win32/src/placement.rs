@@ -312,9 +312,7 @@ pub fn park_window_for_placement(window_id: WindowId) -> Result<(), Win32Error> 
     apply_cloak_state(window_id);
     let sentinel = crate::MOVE_OFFSCREEN_SENTINEL_COORD;
     let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
-    if mover::seal(&DeferEntry::position_only(
-        hwnd, window_id, sentinel, sentinel, flags,
-    )) {
+    if seal_marked_position(hwnd, window_id, sentinel, sentinel, flags)? {
         return Ok(());
     }
     let moved = unsafe {
@@ -342,6 +340,35 @@ pub fn park_window_for_placement(window_id: WindowId) -> Result<(), Win32Error> 
         )));
     }
     Ok(())
+}
+
+pub(crate) fn seal_marked_position(
+    hwnd: HWND,
+    window_id: WindowId,
+    x: i32,
+    y: i32,
+    flags: SET_WINDOW_POS_FLAGS,
+) -> Result<bool, Win32Error> {
+    if !mover::is_marked(window_id) {
+        return Ok(false);
+    }
+    let entry = DeferEntry::position_only(hwnd, window_id, x, y, flags);
+    let queued = mover::seal(&entry);
+    let retained_async = lock_async_positions()
+        .as_ref()
+        .is_some_and(|positions| positions.contains_key(&window_id));
+    if queued && retained_async {
+        // A retained async backlog must end at the new authoritative park too.
+        unsafe { SetWindowPos(hwnd, None, x, y, 0, 0, entry.flags | SWP_ASYNCWINDOWPOS) }.map_err(
+            |error| {
+                Win32Error::SetPositionFailed(format!(
+                    "Failed to fence parked window {window_id}: {error}"
+                ))
+            },
+        )?;
+        record_async_position(&entry);
+    }
+    Ok(true)
 }
 
 /// Whether placement, rather than ghost animation, owns an off-screen park.
@@ -827,6 +854,7 @@ fn apply_placements_inner(
                     && e.w > 1
                     && !failed_window_ids.contains(&e.window_id)
                     && !async_deferrals.pending.contains(&e.window_id)
+                    && !mover::is_marked(e.window_id)
             })
             .map(|e| NudgeTarget {
                 hwnd: e.hwnd,
@@ -1551,7 +1579,9 @@ where
             continue;
         }
         let endpoint_target = (entry.x, entry.y, entry.w, entry.h);
-        if mover::is_marked(entry.window_id) && !deferrals.probe_expired.contains(&entry.window_id)
+        if mover::is_marked(entry.window_id)
+            && (!deferrals.probe_expired.contains(&entry.window_id)
+                || !deferrals.pending.contains(&entry.window_id))
         {
             continue;
         }

@@ -9,7 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetWindowPos, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Target {
     x: i32,
     y: i32,
@@ -31,6 +31,7 @@ struct Slot {
     lifetime: u64,
     pending: Option<Target>,
     correction: Option<Correction>,
+    completed: Option<(Target, RECT)>,
     generation: u64,
     cancelled: u64,
 }
@@ -72,6 +73,7 @@ pub(super) fn mark(window_id: WindowId) {
             lifetime,
             pending: None,
             correction: None,
+            completed: None,
             generation: lifetime,
             cancelled: 0,
         },
@@ -86,7 +88,9 @@ pub(super) fn pending(window_id: WindowId) -> bool {
     let state = lock();
     match state.slots.get(&window_id) {
         Some(slot) => {
-            state.in_flight == Some((window_id, slot.lifetime)) || slot.correction.is_some()
+            state.in_flight == Some((window_id, slot.lifetime))
+                || slot.correction.is_some()
+                || slot.pending.is_some()
         }
         None => state.in_flight.is_some_and(|(id, _)| id == window_id),
     }
@@ -94,24 +98,43 @@ pub(super) fn pending(window_id: WindowId) -> bool {
 
 pub(super) fn seal(entry: &DeferEntry) -> bool {
     let window_id = entry.window_id;
+    let mut rect = RECT::default();
+    let observed = unsafe { GetWindowRect(entry.hwnd, &mut rect) }
+        .ok()
+        .map(|()| rect);
     let mut state = lock();
-    let Some(lifetime) = state.slots.get(&window_id).map(|slot| slot.lifetime) else {
+    let Some(slot) = state.slots.get(&window_id) else {
         return false;
     };
+    let lifetime = slot.lifetime;
+    let target = Target {
+        x: entry.x,
+        y: entry.y,
+        w: entry.w,
+        h: entry.h,
+        flags: entry.flags & !SWP_ASYNCWINDOWPOS,
+        generation: slot.generation,
+    };
+    if state.in_flight != Some((window_id, lifetime))
+        && slot.pending.is_none()
+        && slot.correction.is_none()
+        && slot
+            .completed
+            .is_some_and(|(completed, rect)| completed == target && observed == Some(rect))
+    {
+        return false;
+    }
     state.next_generation += 1;
     let generation = state.next_generation;
     let in_flight = state.in_flight == Some((window_id, lifetime));
     if let Some(slot) = state.slots.get_mut(&window_id) {
         slot.generation = generation;
         slot.pending = None;
+        slot.completed = None;
         slot.correction = Some(Correction {
             target: Some(Target {
-                x: entry.x,
-                y: entry.y,
-                w: entry.w,
-                h: entry.h,
-                flags: entry.flags & !SWP_ASYNCWINDOWPOS,
                 generation,
+                ..target
             }),
             generation,
             before: None,
@@ -145,6 +168,7 @@ pub(super) fn cancel(window_ids: Option<&[WindowId]>) {
             slot.cancelled = slot.generation;
             slot.pending = None;
             slot.correction = None;
+            slot.completed = None;
         }
     }
     while state.in_flight.is_some_and(|(id, _)| affected(id)) {
@@ -168,6 +192,7 @@ pub(super) fn submit(entry: &DeferEntry, generation: Option<u64>) {
         return;
     }
     let generation = slot.generation;
+    slot.completed = None;
     slot.pending = Some(Target {
         x: entry.x,
         y: entry.y,
@@ -227,6 +252,7 @@ fn run() {
         let mut before = None;
         let mut moved = false;
         let mut retry = None;
+        let mut completed = None;
         if let Some(work) = correction.filter(|work| {
             work.deadline
                 .is_some_and(|deadline| Instant::now() >= deadline)
@@ -270,6 +296,11 @@ fn run() {
                         )
                     } {
                         tracing::warn!(window_id, %error, "Placement mover could not apply target");
+                    } else if correction.is_some() {
+                        let mut rect = RECT::default();
+                        completed = unsafe { GetWindowRect(hwnd, &mut rect) }
+                            .ok()
+                            .map(|()| (target, rect));
                     }
                 } else {
                     crate::visibility::recover_after_placement_mover(
@@ -282,7 +313,9 @@ fn run() {
                 retry = correction;
             }
         }
-        finish(window_id, lifetime, generation, before, moved, retry);
+        finish(
+            window_id, lifetime, generation, before, moved, retry, completed,
+        );
     }
 }
 
@@ -293,6 +326,7 @@ fn finish(
     before: Option<RECT>,
     moved: bool,
     retry: Option<Correction>,
+    completed: Option<(Target, RECT)>,
 ) {
     let mut state = lock();
     let has_work = state
@@ -302,6 +336,7 @@ fn finish(
         .map(|slot| {
             if slot.generation == generation {
                 slot.correction = retry;
+                slot.completed = completed;
             } else if slot.correction.is_none()
                 && moved
                 && slot.cancelled > generation
@@ -363,7 +398,7 @@ mod tests {
         let previously_started = lock().started;
         lock().started = true;
         let deferred = seal(&entry);
-        finish(window_id, lifetime, lifetime, None, true, None);
+        finish(window_id, lifetime, lifetime, None, true, None, None);
         let (queued, new_lifetime, generation) = {
             let mut state = lock();
             let queued = state.ready.pop_front() == Some(window_id);
@@ -374,7 +409,7 @@ mod tests {
             state.in_flight = Some((window_id, lifetime));
             (queued, lifetime, generation)
         };
-        finish(window_id, new_lifetime, generation, None, true, None);
+        finish(window_id, new_lifetime, generation, None, true, None, None);
         let pending_after_return = pending(window_id);
         forget(window_id);
         lock().started = previously_started;

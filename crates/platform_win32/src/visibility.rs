@@ -34,25 +34,34 @@ pub fn is_move_offscreen_sentinel_rect(rect: &Rect) -> bool {
 /// Move a single window to the off-screen sentinel position.
 /// Used by workspace switching to hide inactive workspace windows.
 pub fn move_window_offscreen(window_id: WindowId) -> Result<(), Win32Error> {
-    move_window_offscreen_with_flags(window_id, SET_WINDOW_POS_FLAGS(0))
+    move_window_offscreen_with_flags(window_id, SET_WINDOW_POS_FLAGS(0)).map(|_| ())
 }
 
 pub fn queue_window_offscreen(window_id: WindowId) -> Result<(), Win32Error> {
-    // Always mark wait_for_owner: the event loop cannot block; a cache-less apply's owner probe clears it.
-    move_window_offscreen_with_flags(window_id, SWP_ASYNCWINDOWPOS)?;
-    crate::placement::record_queued_owner_position(
-        window_id,
-        MOVE_OFFSCREEN_SENTINEL_COORD,
-        MOVE_OFFSCREEN_SENTINEL_COORD,
-    );
+    if !move_window_offscreen_with_flags(window_id, SWP_ASYNCWINDOWPOS)? {
+        crate::placement::record_queued_owner_position(
+            window_id,
+            MOVE_OFFSCREEN_SENTINEL_COORD,
+            MOVE_OFFSCREEN_SENTINEL_COORD,
+        );
+    }
     Ok(())
 }
 
 fn move_window_offscreen_with_flags(
     window_id: WindowId,
     extra_flags: SET_WINDOW_POS_FLAGS,
-) -> Result<(), Win32Error> {
+) -> Result<bool, Win32Error> {
     let hwnd = window_id_to_hwnd(window_id)?;
+    if crate::placement::seal_marked_position(
+        hwnd,
+        window_id,
+        MOVE_OFFSCREEN_SENTINEL_COORD,
+        MOVE_OFFSCREEN_SENTINEL_COORD,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+    )? {
+        return Ok(true);
+    }
     unsafe {
         if let Err(e) = SetWindowPos(
             hwnd,
@@ -69,7 +78,7 @@ fn move_window_offscreen_with_flags(
             )));
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Synchronously move and resize a window to `rect` AND raise it to the

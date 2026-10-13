@@ -3549,9 +3549,21 @@ impl AppState {
                 }
                 continue;
             }
-            self.deferred_physical_landings.remove(&hwnd);
+            let finalize_landing = self.deferred_physical_landings.contains(&hwnd)
+                && !leopardwm_platform_win32::pending_async_position(hwnd);
             let before = self.physical_request_seq;
-            self.on_window_moved_or_resized(hwnd, true);
+            if finalize_landing {
+                self.last_placed_layout_rects.remove(&hwnd);
+                if let Err(error) = self.apply_layout() {
+                    warn!(
+                        "Failed to finalize deferred placement of window {}: {}",
+                        hwnd, error
+                    );
+                }
+            } else {
+                self.deferred_physical_landings.remove(&hwnd);
+                self.on_window_moved_or_resized(hwnd, true);
+            }
             if self.physical_request_seq != before {
                 checked = true;
                 self.deferred_moved_or_resized
