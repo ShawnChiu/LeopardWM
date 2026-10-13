@@ -746,6 +746,8 @@ pub(crate) fn emergency_restore_maximizebox(window_ids: &[WindowId], deadline: s
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_ASYNCWINDOWPOS,
         SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     };
+    let mut entries = entries;
+    entries.sort_by_key(|&(id, _)| crate::placement::is_marked_placement_owner(id));
     for (id, identity) in entries {
         if std::time::Instant::now() >= deadline {
             break;
@@ -760,7 +762,13 @@ pub(crate) fn emergency_restore_maximizebox(window_ids: &[WindowId], deadline: s
             let style = GetWindowLongW(hwnd, GWL_STYLE);
             const MAXIMIZEBOX: i32 = 0x0001_0000;
             if style & MAXIMIZEBOX == 0 {
+                if !crate::placement::can_recover_placement_owner(id, hwnd, Some(deadline)) {
+                    continue;
+                }
                 SetWindowLongW(hwnd, GWL_STYLE, style | MAXIMIZEBOX);
+                if !crate::placement::can_recover_placement_owner(id, hwnd, Some(deadline)) {
+                    continue;
+                }
                 let _ = SetWindowPos(
                     hwnd,
                     None,
@@ -803,10 +811,11 @@ pub fn restore_maximizebox_panic_recovery() {
         }
         (window_ids, *in_flight)
     };
-    let window_ids: Vec<_> = window_ids
+    let mut window_ids: Vec<_> = window_ids
         .into_iter()
         .filter(|entry| Some(*entry) != in_flight)
         .collect();
+    window_ids.sort_by_key(|&(id, _)| crate::placement::is_marked_placement_owner(id));
 
     if window_ids.is_empty() {
         return;
@@ -817,7 +826,12 @@ pub fn restore_maximizebox_panic_recovery() {
         window_ids.len()
     );
 
+    let mut recovered_unmarked = false;
     for &(wid, identity) in &window_ids {
+        if !recovered_unmarked && crate::placement::is_marked_placement_owner(wid) {
+            crate::visibility::uncloak_unmarked_windows_for_recovery();
+            recovered_unmarked = true;
+        }
         // Direct Win32 call — don't use restore_maximizebox since tracking set is already drained
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
@@ -837,7 +851,13 @@ pub fn restore_maximizebox_panic_recovery() {
             const WS_MAXIMIZEBOX_VAL: i32 = 0x0001_0000;
             if (style & WS_MAXIMIZEBOX_VAL) == 0 {
                 let new_style = style | WS_MAXIMIZEBOX_VAL;
+                if !crate::placement::can_recover_placement_owner(wid, hwnd, None) {
+                    continue;
+                }
                 SetWindowLongW(hwnd, GWL_STYLE, new_style);
+                if !crate::placement::can_recover_placement_owner(wid, hwnd, None) {
+                    continue;
+                }
                 let _ = SetWindowPos(
                     hwnd,
                     None,

@@ -361,6 +361,27 @@ pub(crate) fn is_marked_placement_owner(window_id: WindowId) -> bool {
     mover::is_marked(window_id)
 }
 
+pub(crate) fn can_recover_placement_owner(
+    window_id: WindowId,
+    hwnd: HWND,
+    deadline: Option<std::time::Instant>,
+) -> bool {
+    if !mover::is_marked(window_id) {
+        return true;
+    }
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        return false;
+    }
+    if !placement_owner_answers(hwnd, 50) {
+        tracing::warn!(
+            window_id,
+            "Skipping recovery of unresponsive marked placement owner"
+        );
+        return false;
+    }
+    deadline.is_none_or(|deadline| std::time::Instant::now() < deadline)
+}
+
 /// Whether placement, rather than ghost animation, owns an off-screen park.
 pub fn is_placement_parked(window_id: WindowId) -> bool {
     global_cloaked_contains(window_id)

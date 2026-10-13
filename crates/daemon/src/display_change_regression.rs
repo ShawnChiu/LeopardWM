@@ -644,6 +644,68 @@ fn test_marked_owner_recovers_twice_without_draining_posted_moves() {
 }
 
 #[test]
+fn test_emergency_recovery_skips_hung_marked_owner_after_unmarked_work() {
+    if run_in_placement_test_process("tests::display_change_regression::test_emergency_recovery_skips_hung_marked_owner_after_unmarked_work") { return; }
+    let _desktop = FixtureDesktop::enter();
+    let hung = PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let unmarked =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    let responsive =
+        PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
+    classify_non_draining_owner(&hung);
+    classify_non_draining_owner(&responsive);
+    for owner in [&hung, &unmarked, &responsive] {
+        leopardwm_platform_win32::move_window_offscreen(owner.window_id).unwrap();
+        assert!(wait_for_fixture(
+            || !leopardwm_platform_win32::pending_async_position(owner.window_id),
+            Duration::from_secs(3)
+        ));
+    }
+    unmarked.resume();
+    hung.control.pause_pump.store(true, Ordering::SeqCst);
+    assert!(wait_for_fixture(
+        || hung.control.pump_paused.load(Ordering::SeqCst),
+        Duration::from_secs(2)
+    ));
+    let ids = [hung.window_id, unmarked.window_id, responsive.window_id];
+    let desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) } as usize;
+    let (done_tx, done_rx) = mpsc::channel();
+    let started = Instant::now();
+    let recovery = thread::spawn(move || {
+        assert_ne!(unsafe { SetThreadDesktop(desktop as *mut _) }, 0);
+        leopardwm_platform_win32::emergency_restore_windows(
+            &ids,
+            Instant::now() + Duration::from_secs(2),
+        );
+        done_tx.send(()).unwrap();
+    });
+    let returned = done_rx.recv_timeout(Duration::from_millis(800)).is_ok();
+    let elapsed = started.elapsed();
+    let unmarked_restored = wait_for_fixture(
+        || {
+            leopardwm_platform_win32::get_window_chrome_rect(unmarked.window_id).is_some_and(
+                |rect| !leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&rect),
+            )
+        },
+        Duration::from_millis(100),
+    );
+    let responsive_restored =
+        leopardwm_platform_win32::get_window_chrome_rect(responsive.window_id)
+            .is_some_and(|rect| !leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&rect));
+    let hung_skipped = leopardwm_platform_win32::get_window_chrome_rect(hung.window_id)
+        .is_some_and(|rect| leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&rect));
+    hung.control.release();
+    recovery.join().unwrap();
+    assert!(returned, "emergency recovery blocked on hung marked owner for {elapsed:?}; unmarked restored={unmarked_restored}");
+    assert!(unmarked_restored, "unmarked parked owner was not restored");
+    assert!(
+        responsive_restored,
+        "responsive marked owner was not restored"
+    );
+    assert!(hung_skipped, "hung marked owner was not skipped");
+}
+
+#[test]
 fn test_workspace_park_of_slow_marked_owner_returns_promptly() {
     if run_in_placement_test_process("tests::display_change_regression::test_workspace_park_of_slow_marked_owner_returns_promptly") { return; }
     let owner =
@@ -1912,7 +1974,7 @@ fn test_deferred_landing_waits_for_latest_async_submission() {
 }
 
 #[test]
-fn test_deferred_recheck_corrects_pre_mark_moves_after_posted_drain() {
+fn test_active_tiling_recheck_corrects_pre_mark_moves_after_posted_drain() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());

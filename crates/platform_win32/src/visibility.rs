@@ -196,6 +196,9 @@ fn restore_window_if_offscreen_to_work_area(
             SET_WINDOW_POS_FLAGS(0)
         };
 
+        if !crate::placement::can_recover_placement_owner(window_id, hwnd, None) {
+            return Ok(false);
+        }
         if let Err(e) = SetWindowPos(
             hwnd,
             None,
@@ -250,8 +253,17 @@ impl Drop for RecoveryDpiContext {
     }
 }
 
-fn emergency_sentinel_pass(window_ids: &[WindowId], work_area: &Rect, work_areas: Option<&[Rect]>) {
+fn emergency_sentinel_pass(
+    window_ids: &[WindowId],
+    work_area: &Rect,
+    work_areas: Option<&[Rect]>,
+    deadline: std::time::Instant,
+) {
     for &id in window_ids {
+        if crate::placement::is_marked_placement_owner(id) && std::time::Instant::now() >= deadline
+        {
+            break;
+        }
         let Ok(hwnd) = window_id_to_hwnd(id) else {
             continue;
         };
@@ -276,6 +288,9 @@ fn emergency_sentinel_pass(window_ids: &[WindowId], work_area: &Rect, work_areas
                 continue;
             }
             let restored = compute_restore_rect_from_offscreen(&current, work_area);
+            if !crate::placement::can_recover_placement_owner(id, hwnd, Some(deadline)) {
+                continue;
+            }
             if SetWindowPos(
                 hwnd,
                 None,
@@ -325,7 +340,7 @@ fn emergency_primary_work_area() -> Option<Rect> {
 }
 
 /// Best-effort tray Quit recovery. The caller must independently enforce `deadline`:
-/// shell, DWM, tracing, and style calls can block even though window moves are asynchronous.
+/// shell, DWM, tracing, style calls, and marked moves after a successful probe can block.
 pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::Instant) {
     crate::placement::stop_placement_mover();
     let Ok(_dpi) = RecoveryDpiContext::enter() else {
@@ -335,7 +350,11 @@ pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::I
         return;
     };
     let work_areas = recovery_work_areas();
-    emergency_sentinel_pass(window_ids, &work_area, work_areas.as_deref());
+    let (marked, unmarked): (Vec<_>, Vec<_>) = window_ids
+        .iter()
+        .copied()
+        .partition(|&id| crate::placement::is_marked_placement_owner(id));
+    emergency_sentinel_pass(&unmarked, &work_area, work_areas.as_deref(), deadline);
     tracing::warn!("Tray Quit fallback fired: shutdown did not complete before its deadline");
     crate::placement::emergency_uncloak_tracked(window_ids);
     if let Some(stopped) = crate::taskbar::emergency_disconnect() {
@@ -345,8 +364,11 @@ pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::I
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
-    crate::window_style::emergency_restore_maximizebox(window_ids, deadline);
-    emergency_sentinel_pass(window_ids, &work_area, work_areas.as_deref());
+    crate::window_style::emergency_restore_maximizebox(&unmarked, deadline);
+    emergency_sentinel_pass(&unmarked, &work_area, work_areas.as_deref(), deadline);
+    emergency_sentinel_pass(&marked, &work_area, work_areas.as_deref(), deadline);
+    crate::window_style::emergency_restore_maximizebox(&marked, deadline);
+    emergency_sentinel_pass(&marked, &work_area, work_areas.as_deref(), deadline);
 }
 
 pub(crate) fn recover_after_placement_mover(
@@ -428,7 +450,9 @@ where
     let mut restored_count: usize = 0;
     let mut failures: Vec<String> = Vec::new();
 
-    for &window_id in window_ids {
+    let mut window_ids = window_ids.to_vec();
+    window_ids.sort_by_key(|&id| crate::placement::is_marked_placement_owner(id));
+    for window_id in window_ids {
         match restore_one(window_id, work_area, work_areas) {
             Ok(true) => restored_count += 1,
             Ok(false) => {}
@@ -515,7 +539,7 @@ struct OffscreenRecovery {
     error: Option<Win32Error>,
 }
 
-fn restore_all_windows_moved_offscreen() -> OffscreenRecovery {
+fn restore_all_windows_moved_offscreen(include_marked: bool) -> OffscreenRecovery {
     let _dpi = match RecoveryDpiContext::enter() {
         Ok(context) => context,
         Err(error) => {
@@ -534,7 +558,12 @@ fn restore_all_windows_moved_offscreen() -> OffscreenRecovery {
             }
         }
     };
-    let collection = collect_all_top_level_window_ids();
+    let mut collection = collect_all_top_level_window_ids();
+    if !include_marked {
+        collection
+            .window_ids
+            .retain(|&id| !crate::placement::is_marked_placement_owner(id));
+    }
     let work_areas = recovery_work_areas();
     let (restored_count, mut failures) = restore_windows_moved_offscreen_with_work_area(
         &collection.window_ids,
@@ -563,7 +592,7 @@ fn restore_all_windows_moved_offscreen() -> OffscreenRecovery {
 /// hooks where daemon state may be unavailable or poisoned.
 pub fn restore_all_windows_moved_offscreen_best_effort() -> usize {
     crate::placement::stop_placement_mover();
-    let recovery = restore_all_windows_moved_offscreen();
+    let recovery = restore_all_windows_moved_offscreen(true);
     if let Some(error) = recovery.error {
         eprintln!(
             "[leopardwm] Emergency MoveOffScreen restore had a failure: {}",
@@ -577,6 +606,15 @@ pub fn restore_all_windows_moved_offscreen_best_effort() -> usize {
         );
     }
     recovery.restored_count
+}
+
+pub(crate) fn uncloak_unmarked_windows_for_recovery() {
+    crate::placement::stop_placement_mover();
+    crate::dwm_uncloak_all();
+    let recovery = restore_all_windows_moved_offscreen(false);
+    if let Some(error) = recovery.error {
+        eprintln!("[leopardwm] Unmarked window recovery had a failure: {error}");
+    }
 }
 
 /// Restore all visible windows on the system, best-effort.
@@ -603,7 +641,7 @@ pub fn cascade_windows(window_ids: &[WindowId]) -> Result<(), Win32Error> {
         window_ids,
         work_area,
         || {
-            let recovery = restore_all_windows_moved_offscreen();
+            let recovery = restore_all_windows_moved_offscreen(true);
             tracing::info!(
                 restored_count = recovery.restored_count,
                 partial = recovery.error.is_some(),
