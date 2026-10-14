@@ -471,6 +471,147 @@ fn test_completed_mover_minimum_width_reports_direct_landing_feedback() {
     assert_eq!(direct_result.width_violations.len(), 1);
 }
 
+fn inactive_workspace_move_state(owner: &PlacementOwner) -> AppState {
+    let mut state = placement_state(&[]);
+    let inactive = state.workspaces[&1][0].clone();
+    state.workspaces.get_mut(&1).unwrap().push(inactive);
+    state.workspaces.get_mut(&1).unwrap()[1]
+        .insert_window(owner.window_id, Some(320))
+        .unwrap();
+    state
+        .injected_window_info
+        .insert(owner.window_id, make_test_window_info(owner.window_id));
+    state.injected_native_offscreen_enabled = true;
+    state
+}
+
+fn notify_fixture_move(state: &mut AppState, owner: &PlacementOwner) {
+    state.on_window_moved_or_resized_with_native_ops(
+        owner.window_id,
+        false,
+        || Some(10_000),
+        |_| panic!("inactive fixture must not request a maximized restore"),
+        |_| false,
+    );
+}
+
+fn fixture_is_at_sentinel(owner: &PlacementOwner) -> bool {
+    leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+        .is_some_and(|rect| leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&rect))
+}
+
+#[test]
+fn test_inactive_workspace_escape_is_parked_without_active_snapback() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_inactive_workspace_escape_is_parked_without_active_snapback",
+    ) {
+        return;
+    }
+    let _desktop = FixtureDesktop::enter();
+    let owner = PlacementOwner::spawn_at(Rect::new(0, 0, 160, 120));
+    owner.resume();
+    let mut state = inactive_workspace_move_state(&owner);
+    let cached_rect = Rect::new(400, 48, 160, 120);
+    state
+        .last_placed_layout_rects
+        .insert(owner.window_id, cached_rect);
+    let request_seq = state.physical_request_seq;
+
+    notify_fixture_move(&mut state, &owner);
+
+    assert_eq!(
+        state.inactive_workspace_park_requests,
+        vec![owner.window_id]
+    );
+    assert!(wait_for_fixture(
+        || fixture_is_at_sentinel(&owner),
+        Duration::from_secs(2)
+    ));
+    assert_eq!(
+        state.physical_request_seq, request_seq,
+        "inactive escape applied active layout"
+    );
+    assert_eq!(
+        state.last_placed_layout_rects.get(&owner.window_id),
+        Some(&cached_rect)
+    );
+}
+
+#[test]
+fn test_inactive_workspace_sentinel_move_does_not_park_again() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_inactive_workspace_sentinel_move_does_not_park_again",
+    ) {
+        return;
+    }
+    let _desktop = FixtureDesktop::enter();
+    let owner = PlacementOwner::spawn();
+    owner.resume();
+    leopardwm_platform_win32::queue_window_offscreen(owner.window_id).unwrap();
+    assert!(wait_for_fixture(
+        || fixture_is_at_sentinel(&owner),
+        Duration::from_secs(2)
+    ));
+    let mut state = inactive_workspace_move_state(&owner);
+    let request_seq = state.physical_request_seq;
+
+    for _ in 0..8 {
+        notify_fixture_move(&mut state, &owner);
+    }
+
+    assert!(state.inactive_workspace_park_requests.is_empty());
+    assert_eq!(state.physical_request_seq, request_seq);
+    assert!(fixture_is_at_sentinel(&owner));
+}
+
+#[test]
+fn test_inactive_workspace_escape_replays_after_layout_transition() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_inactive_workspace_escape_replays_after_layout_transition",
+    ) {
+        return;
+    }
+    let _desktop = FixtureDesktop::enter();
+    let owner = PlacementOwner::spawn_at(Rect::new(0, 0, 160, 120));
+    owner.resume();
+    let mut state = inactive_workspace_move_state(&owner);
+    state.layout_transition = Some(crate::state::LayoutTransition {
+        start_rects: Default::default(),
+        exit_rects: Default::default(),
+        exit_provenance: Default::default(),
+        elapsed_ms: 0,
+        duration_ms: 150,
+        easing: Default::default(),
+        ghosted_wids: Default::default(),
+        suppress_landing_focus_resync: false,
+        defer_focus_border: false,
+    });
+    let request_seq = state.physical_request_seq;
+    assert_eq!(state.current_physical_visibility(owner.window_id), None);
+
+    notify_fixture_move(&mut state, &owner);
+    assert!(state.deferred_moved_or_resized.contains(&owner.window_id));
+    assert!(state.inactive_workspace_park_requests.is_empty());
+    assert!(!fixture_is_at_sentinel(&owner));
+    state.recheck_deferred_window_moves();
+    assert!(state.deferred_moved_or_resized.contains(&owner.window_id));
+    assert!(state.inactive_workspace_park_requests.is_empty());
+
+    state.layout_transition = None;
+    state.recheck_deferred_window_moves();
+
+    assert!(!state.deferred_moved_or_resized.contains(&owner.window_id));
+    assert_eq!(
+        state.inactive_workspace_park_requests,
+        vec![owner.window_id]
+    );
+    assert!(wait_for_fixture(
+        || fixture_is_at_sentinel(&owner),
+        Duration::from_secs(2)
+    ));
+    assert_eq!(state.physical_request_seq, request_seq);
+}
+
 #[test]
 fn test_workspace_park_supersedes_queued_marked_landing() {
     if run_in_placement_test_process(

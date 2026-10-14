@@ -380,39 +380,46 @@ impl AppState {
     }
 
     pub(crate) fn park_inactive_workspace_windows(&mut self) {
-        if self.paused {
-            return;
-        }
         // Shutdown recovers parked windows; apply_layout only places active workspaces.
+        let mut inactive_windows = Vec::new();
         for (&monitor, workspaces) in &self.workspaces {
             let active = self.active_workspace_idx(monitor);
             for (index, workspace) in workspaces.iter().enumerate() {
-                if index == active {
-                    continue;
-                }
-                for wid in workspace.all_window_ids() {
-                    if workspace.is_minimized(wid) || self.is_application_fullscreen(wid) {
-                        continue;
-                    }
-                    if let Some(session) = self.observe_current_application_fullscreen(wid) {
-                        self.application_fullscreen.insert(wid, session);
-                        continue;
-                    }
-                    #[cfg(not(test))]
-                    if let Err(e) = leopardwm_platform_win32::queue_window_offscreen(wid) {
-                        warn!("Failed to park inactive workspace window {:#x}: {}", wid, e);
-                    }
-                    #[cfg(test)]
-                    self.inactive_workspace_park_requests.push(wid);
-                    #[cfg(test)]
-                    if self.injected_native_offscreen_enabled {
-                        if let Err(e) = leopardwm_platform_win32::queue_window_offscreen(wid) {
-                            warn!("Failed to park inactive workspace window {:#x}: {}", wid, e);
-                        }
-                    }
+                if index != active {
+                    inactive_windows.extend(workspace.all_window_ids());
                 }
             }
         }
+        for wid in inactive_windows {
+            self.park_inactive_workspace_window(wid);
+        }
+    }
+
+    pub(crate) fn park_inactive_workspace_window(&mut self, wid: u64) -> bool {
+        if self.paused
+            || self
+                .find_window_workspace(wid)
+                .is_some_and(|(monitor, index)| self.workspaces[&monitor][index].is_minimized(wid))
+            || self.is_application_fullscreen(wid)
+        {
+            return false;
+        }
+        if let Some(session) = self.observe_current_application_fullscreen(wid) {
+            self.application_fullscreen.insert(wid, session);
+            return false;
+        }
+        #[cfg(test)]
+        {
+            self.inactive_workspace_park_requests.push(wid);
+            if !self.injected_native_offscreen_enabled {
+                return true;
+            }
+        }
+        if let Err(e) = leopardwm_platform_win32::queue_window_offscreen(wid) {
+            warn!("Failed to park inactive workspace window {:#x}: {}", wid, e);
+            return false;
+        }
+        true
     }
 
     /// Reconcile every managed window's minimized flag with the OS.

@@ -3522,10 +3522,16 @@ impl AppState {
         let mut deferred = deferred.into_iter();
         while let Some(hwnd) = deferred.next() {
             let visibility = self.current_physical_visibility(hwnd);
-            let workspace = self
-                .find_window_workspace(hwnd)
+            let location = self.find_window_workspace(hwnd);
+            let inactive_replay = replay_windows.contains(&hwnd)
+                && location.is_some_and(|(monitor_id, ws_idx)| {
+                    ws_idx != self.active_workspace_idx(monitor_id)
+                });
+            let workspace = location
                 .and_then(|(monitor_id, ws_idx)| self.workspaces.get(&monitor_id)?.get(ws_idx));
-            if visibility.is_none() || workspace.is_none_or(|ws| ws.is_minimized(hwnd)) {
+            if (visibility.is_none() && !inactive_replay)
+                || workspace.is_none_or(|ws| ws.is_minimized(hwnd))
+            {
                 self.window_move_recheck_attempts.remove(&hwnd);
                 self.deferred_physical_landings.remove(&hwnd);
                 continue;
@@ -3549,7 +3555,8 @@ impl AppState {
                 }
                 continue;
             }
-            let finalize_landing = self.deferred_physical_landings.contains(&hwnd)
+            let finalize_landing = !inactive_replay
+                && self.deferred_physical_landings.contains(&hwnd)
                 && !leopardwm_platform_win32::pending_async_position(hwnd);
             let before = self.physical_request_seq;
             if finalize_landing {
@@ -3793,14 +3800,16 @@ impl AppState {
                 return;
             }
         }
-        // Non-drag: if the window is managed (tiled), snap it back to its layout position.
-        // For floating windows, retain external geometry changes and refresh the border.
+        // Non-drag moves restore inactive parking or reconcile active window geometry.
         if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
+            if self.on_inactive_workspace_window_moved(hwnd, monitor_id, ws_idx, &mut is_maximized)
+            {
+                return;
+            }
             let workspace = &self.workspaces[&monitor_id][ws_idx];
-            let is_floating = workspace.is_floating(hwnd);
             let is_minimized = workspace.is_minimized(hwnd);
 
-            if is_floating {
+            if workspace.is_floating(hwnd) {
                 self.on_floating_window_moved_or_resized(
                     hwnd,
                     monitor_id,
@@ -3986,6 +3995,40 @@ impl AppState {
                 }
             }
         }
+    }
+
+    fn on_inactive_workspace_window_moved(
+        &mut self,
+        hwnd: u64,
+        monitor_id: leopardwm_platform_win32::MonitorId,
+        ws_idx: usize,
+        is_maximized: &mut impl FnMut(u64) -> bool,
+    ) -> bool {
+        let workspace = &self.workspaces[&monitor_id][ws_idx];
+        if ws_idx == self.active_workspace_idx(monitor_id)
+            || self.sticky_windows.contains(&hwnd)
+            || workspace.fullscreen_window_id() == Some(hwnd)
+            || workspace.is_minimized(hwnd)
+            || is_maximized(hwnd)
+        {
+            return false;
+        }
+        if self.layout_transition.is_some() {
+            self.deferred_moved_or_resized.insert(hwnd);
+            return true;
+        }
+        self.window_move_recheck_attempts.remove(&hwnd);
+        self.window_last_maximized_at.remove(&hwnd);
+        if leopardwm_platform_win32::get_window_chrome_rect(hwnd)
+            .is_some_and(|rect| !leopardwm_platform_win32::is_move_offscreen_sentinel_rect(&rect))
+            && self.park_inactive_workspace_window(hwnd)
+        {
+            debug!(
+                "Managed window {} on an inactive workspace moved back on screen; parking it again",
+                hwnd
+            );
+        }
+        true
     }
 
     fn on_floating_window_moved_or_resized(
