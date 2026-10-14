@@ -6,7 +6,7 @@ use std::sync::{Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, SetWindowPos, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
+    GetWindowRect, GetWindowThreadProcessId, SetWindowPos, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,6 +79,22 @@ pub(super) fn mark(window_id: WindowId) {
             generation: lifetime,
             cancelled: 0,
         },
+    );
+    drop(state);
+
+    let (class, executable) = window_id_to_hwnd(window_id)
+        .map(|hwnd| {
+            let class = super::window_class_name(hwnd);
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            (class, crate::get_process_executable(pid))
+        })
+        .unwrap_or_default();
+    tracing::info!(
+        "Window ignores queued moves; LeopardWM now moves it synchronously on the mover thread: hwnd={:#x} class={:?} executable={:?}",
+        window_id,
+        class,
+        executable
     );
 }
 
@@ -370,8 +386,67 @@ mod tests {
     use leopardwm_core_layout::Visibility;
     use windows::Win32::Foundation::HWND;
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct LogWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn marking_logs_once_per_window_lifetime() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let window_id = u64::MAX - 1;
+        let output = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(writer.clone()))
+            .finish();
+        let lines = || {
+            String::from_utf8(output.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        let (first, repeated, reused) = tracing::subscriber::with_default(subscriber, || {
+            mark(window_id);
+            let first = lines();
+            mark(window_id);
+            let repeated = lines();
+            forget(window_id);
+            mark(window_id);
+            let reused = lines();
+            forget(window_id);
+            (first, repeated, reused)
+        });
+
+        assert_eq!(first.len(), 1, "newly marked window must be logged");
+        assert_eq!(repeated, first, "repeated marking must not log again");
+        assert_eq!(reused.len(), 2, "a new window lifetime must log again");
+        for line in reused {
+            assert!(line.contains("INFO"));
+            assert!(line.contains(&format!("hwnd={window_id:#x}")));
+            assert!(line.contains("class="));
+            assert!(line.contains("executable="));
+        }
+    }
+
     #[test]
     fn reused_window_landing_does_not_inherit_old_in_flight_work() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let window_id = u64::MAX;
         mark(window_id);
         let lifetime = lock().slots[&window_id].lifetime;

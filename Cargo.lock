@@ -1160,6 +1160,7 @@ dependencies = [
  "leopardwm-core-layout",
  "thiserror 2.0.21",
  "tracing",
+ "tracing-subscriber",
  "windows",
  "winreg",
 ]
