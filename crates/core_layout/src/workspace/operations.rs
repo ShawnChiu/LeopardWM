@@ -248,6 +248,7 @@ impl Workspace {
             }
         }
         self.clamp_focus_indices();
+        self.sync_active_tab_to_focus();
         Some(col)
     }
 
@@ -428,11 +429,15 @@ impl Workspace {
     /// Swap the focused window with the one above in the same column.
     /// In a Tabbed column, `swap_windows` keeps `active_idx` tracking the
     /// same window (handled inside `Column::swap_windows`).
+    /// No-op when there is no focused tiled window or it is already at the top.
     pub fn move_window_up_in_column(&mut self) {
-        if self.focused_window_in_column == 0 {
+        let Some(column) = self.columns.get_mut(self.focused_column) else {
+            return;
+        };
+        if self.focused_window_in_column == 0 || self.focused_window_in_column >= column.len() {
             return;
         }
-        self.columns[self.focused_column].swap_windows(
+        column.swap_windows(
             self.focused_window_in_column,
             self.focused_window_in_column - 1,
         );
@@ -441,11 +446,15 @@ impl Workspace {
     }
 
     /// Swap the focused window with the one below in the same column.
+    /// No-op when there is no focused tiled window or it is already at the bottom.
     pub fn move_window_down_in_column(&mut self) {
-        if self.focused_window_in_column + 1 >= self.columns[self.focused_column].len() {
+        let Some(column) = self.columns.get_mut(self.focused_column) else {
+            return;
+        };
+        if self.focused_window_in_column >= column.len().saturating_sub(1) {
             return;
         }
-        self.columns[self.focused_column].swap_windows(
+        column.swap_windows(
             self.focused_window_in_column,
             self.focused_window_in_column + 1,
         );

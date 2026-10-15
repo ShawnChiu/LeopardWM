@@ -298,6 +298,7 @@ impl Workspace {
                 }
 
                 self.clamp_focus_indices();
+                self.sync_active_tab_to_focus();
 
                 debug_assert!(
                     self.columns.is_empty() || self.focused_column < self.columns.len(),
