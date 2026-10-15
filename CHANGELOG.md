@@ -13,6 +13,7 @@ All notable changes to LeopardWM will be documented in this file.
 - **Consuming a window into the focused column (Ctrl+Alt+, and Ctrl+Alt+.) no longer pulls in a minimized window.** It now takes the nearest non-minimized window and leaves minimized windows where they are.
 - **Apps launched on an empty workspace, and launchers dismissed there, keep you on that workspace again, and the empty workspace no longer adds a blank Alt+Tab entry.** The 0.3.1 change meant to hide LeopardWM's invisible focus window from Alt+Tab didn't hide it, and it made Windows skip that window when choosing the next window to activate. (#136)
 - **Moving columns (Ctrl+Alt+Shift+H and Ctrl+Alt+Shift+L) or windows (Ctrl+Alt+[ and Ctrl+Alt+]) no longer appears stuck behind minimized windows.** These moves now skip columns containing only minimized windows and use the nearest visible neighbour.
+- **Moving a window up or down (Ctrl+Alt+Shift+K and Ctrl+Alt+Shift+J) on a workspace with no tiled windows no longer crashes LeopardWM.** A tabbed column also now shows the focused tab after a window or column is removed from it. (#147)
 
 ## 0.3.1
 
