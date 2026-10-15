@@ -4,9 +4,7 @@ use crate::Win32Error;
 use leopardwm_core_layout::{Rect, WindowId};
 use std::ffi::c_void;
 use std::sync::mpsc;
-use windows::core::BOOL;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
@@ -14,7 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowPos, UnregisterClassW, HWND_TOP, LWA_ALPHA, MSG,
     SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW, WM_CLOSE, WM_DESTROY, WM_QUIT, WM_USER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const WINDOW_CLASS: &str = "LeopardWMFocusPlaceholder";
@@ -81,8 +79,11 @@ impl FocusPlaceholder {
                     return;
                 }
 
+                // Alt+Tab skips windows owned by a tool window. Keep the placeholder ordinary:
+                // Windows skips cloaked windows when the foreground window hides, and tool
+                // windows when restoring foreground after a UAC prompt.
                 let owner = match CreateWindowExW(
-                    Default::default(),
+                    WS_EX_TOOLWINDOW,
                     owner_class_name_ptr,
                     None,
                     WS_POPUP,
@@ -142,20 +143,6 @@ impl FocusPlaceholder {
                     let _ = UnregisterClassW(class_name_ptr, None);
                     let _ = UnregisterClassW(owner_class_name_ptr, None);
                     return;
-                }
-
-                // Cloak before showing so the shell never presents this focus target.
-                // Keep its styles and Win32 visibility unchanged for foreground restoration.
-                let cloaked = BOOL::from(true);
-                if let Err(error) = DwmSetWindowAttribute(
-                    placeholder,
-                    DWMWA_CLOAK,
-                    &cloaked as *const _ as _,
-                    std::mem::size_of::<BOOL>() as u32,
-                ) {
-                    tracing::warn!(
-                        "Failed to cloak focus placeholder; preserving empty-workspace focus without Alt+Tab suppression: {error}"
-                    );
                 }
 
                 let thread_id = GetCurrentThreadId();
@@ -379,8 +366,47 @@ unsafe extern "system" fn placeholder_window_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_focus_window_class, work_area_center, OWNER_CLASS, WINDOW_CLASS};
+    use super::{
+        is_focus_window_class, work_area_center, FocusPlaceholder, OWNER_CLASS, WINDOW_CLASS,
+    };
     use leopardwm_core_layout::Rect;
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GetWindowLongPtrW, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
+    };
+
+    #[test]
+    fn focus_placeholder_is_uncloaked_with_a_hidden_tool_window_owner() {
+        let placeholder = FocusPlaceholder::new().expect("create hidden focus placeholder");
+        let hwnd = HWND(placeholder.hwnd as *mut c_void);
+        let mut cloaked = u32::MAX;
+        unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .expect("read focus placeholder cloak state");
+        }
+        assert_eq!(cloaked, 0, "focus placeholder must not be cloaked");
+        assert_eq!(
+            unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0,
+            0,
+            "focus placeholder must not be a tool window"
+        );
+        let owner = unsafe { GetWindow(hwnd, GW_OWNER) }.expect("focus placeholder has an owner");
+        assert_ne!(
+            unsafe { GetWindowLongPtrW(owner, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0,
+            0,
+            "focus placeholder owner must be a tool window"
+        );
+        assert!(!unsafe { IsWindowVisible(owner) }.as_bool());
+        assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool());
+        drop(placeholder);
+    }
 
     #[test]
     fn placeholder_position_uses_monitor_work_area_center() {

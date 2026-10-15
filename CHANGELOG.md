@@ -11,6 +11,7 @@ All notable changes to LeopardWM will be documented in this file.
 - **These windows now slide with the other windows during scrolls instead of jumping into place afterwards.** The daemon log now names each window LeopardWM starts moving this way.
 - **A window on another workspace that moves itself back on screen, such as Zen Browser, is now moved off screen again.** Previously it stayed visible over the current workspace until you switched workspaces.
 - **Consuming a window into the focused column (Ctrl+Alt+, and Ctrl+Alt+.) no longer pulls in a minimized window.** It now takes the nearest non-minimized window and leaves minimized windows where they are.
+- **Apps launched on an empty workspace, and launchers dismissed there, keep you on that workspace again, and the empty workspace no longer adds a blank Alt+Tab entry.** The 0.3.1 change meant to hide LeopardWM's invisible focus window from Alt+Tab didn't hide it, and it made Windows skip that window when choosing the next window to activate. (#136)
 
 ## 0.3.1
 
