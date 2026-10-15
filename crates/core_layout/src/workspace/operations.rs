@@ -378,44 +378,45 @@ impl Workspace {
         self.focused_window_in_column = 0;
     }
 
-    /// Pull the top window of the column to the right into the focused
-    /// column (the inverse of expel). The window is appended to the focused
-    /// column's stack and becomes focused; if the right column empties, it
-    /// is removed. No-op if there is no column to the right.
+    /// Append and focus the first non-minimized window from the nearest
+    /// active column to the right. Remove the source column if it empties.
+    /// No-op if there is no non-minimized window to the right.
     pub fn consume_from_right(&mut self) {
-        let right = self.focused_column + 1;
-        if right >= self.columns.len() {
-            return;
+        if let Some(right) = (self.focused_column + 1..self.columns.len())
+            .find(|&index| self.is_column_active(&self.columns[index]))
+        {
+            self.consume_from_column(right);
         }
-        let Some(wid) = self.columns[right].remove_at_index(0) else {
-            return;
-        };
-        if self.columns[right].is_empty() {
-            self.columns.remove(right);
-        }
-        self.columns[self.focused_column].add_window(wid);
-        self.focused_window_in_column = self.columns[self.focused_column].len().saturating_sub(1);
-        // If the focused column is tabbed, make the consumed window the
-        // active (visible) tab rather than leaving the old tab showing.
-        self.sync_active_tab_to_focus();
     }
 
-    /// Pull the top window of the column to the left into the focused
-    /// column (the inverse of expel). The window is appended to the focused
-    /// column's stack and becomes focused; if the left column empties, it
-    /// is removed and the focus index follows the focused column. No-op if
-    /// there is no column to the left.
+    /// Append and focus the first non-minimized window from the nearest
+    /// active column to the left. Remove the source column if it empties.
+    /// No-op if there is no non-minimized window to the left.
     pub fn consume_from_left(&mut self) {
-        if self.focused_column == 0 {
-            return;
+        if let Some(left) = (0..self.focused_column)
+            .rev()
+            .find(|&index| self.is_column_active(&self.columns[index]))
+        {
+            self.consume_from_column(left);
         }
-        let left = self.focused_column - 1;
-        let Some(wid) = self.columns[left].remove_at_index(0) else {
+    }
+
+    fn consume_from_column(&mut self, source: usize) {
+        let Some(window_index) = self.columns[source]
+            .windows()
+            .iter()
+            .position(|wid| !self.minimized_windows.contains(wid))
+        else {
             return;
         };
-        if self.columns[left].is_empty() {
-            self.columns.remove(left);
-            self.focused_column -= 1;
+        let Some(wid) = self.columns[source].remove_at_index(window_index) else {
+            return;
+        };
+        if self.columns[source].is_empty() {
+            self.columns.remove(source);
+            if source < self.focused_column {
+                self.focused_column -= 1;
+            }
         }
         self.columns[self.focused_column].add_window(wid);
         self.focused_window_in_column = self.columns[self.focused_column].len().saturating_sub(1);

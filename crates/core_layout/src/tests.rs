@@ -4228,6 +4228,82 @@ mod tests {
     }
 
     #[test]
+    fn test_consume_from_right_skips_minimized_column() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.insert_window(3, Some(400)).unwrap();
+        ws.mark_minimized(2);
+        ws.test_set_focus_unchecked(0, 0);
+
+        ws.consume_from_right();
+
+        assert_eq!(ws.column_count(), 2);
+        assert_eq!(ws.columns()[0].windows(), &[1, 3]);
+        assert_eq!(ws.columns()[1].windows(), &[2]);
+        assert_eq!(ws.focused_column_index(), 0);
+        assert_eq!(ws.focused_window(), Some(3));
+        assert!(ws.is_minimized(2));
+    }
+
+    #[test]
+    fn test_consume_from_right_skips_minimized_top_window() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.insert_window_in_column(3, 1).unwrap();
+        ws.mark_minimized(2);
+        ws.test_set_focus_unchecked(0, 0);
+
+        ws.consume_from_right();
+
+        assert_eq!(ws.column_count(), 2);
+        assert_eq!(ws.columns()[0].windows(), &[1, 3]);
+        assert_eq!(ws.columns()[1].windows(), &[2]);
+        assert_eq!(ws.focused_column_index(), 0);
+        assert_eq!(ws.focused_window(), Some(3));
+        assert!(ws.is_minimized(2));
+    }
+
+    #[test]
+    fn test_consume_from_left_skips_minimized_column() {
+        let mut ws = Workspace::new();
+        ws.insert_window(3, Some(400)).unwrap();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.mark_minimized(2);
+        ws.test_set_focus_unchecked(2, 0);
+
+        ws.consume_from_left();
+
+        assert_eq!(ws.column_count(), 2);
+        assert_eq!(ws.columns()[0].windows(), &[2]);
+        assert_eq!(ws.columns()[1].windows(), &[1, 3]);
+        assert_eq!(ws.focused_column_index(), 1);
+        assert_eq!(ws.focused_window(), Some(3));
+        assert!(ws.is_minimized(2));
+    }
+
+    #[test]
+    fn test_consume_from_left_skips_minimized_top_window() {
+        let mut ws = Workspace::new();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.insert_window_in_column(3, 0).unwrap();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.mark_minimized(2);
+        ws.test_set_focus_unchecked(1, 0);
+
+        ws.consume_from_left();
+
+        assert_eq!(ws.column_count(), 2);
+        assert_eq!(ws.columns()[0].windows(), &[2]);
+        assert_eq!(ws.columns()[1].windows(), &[1, 3]);
+        assert_eq!(ws.focused_column_index(), 1);
+        assert_eq!(ws.focused_window(), Some(3));
+        assert!(ws.is_minimized(2));
+    }
+
+    #[test]
     fn test_consume_noop_without_neighbor() {
         let mut ws = Workspace::new();
         ws.insert_window(1, Some(400)).unwrap();

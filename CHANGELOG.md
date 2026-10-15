@@ -10,6 +10,7 @@ All notable changes to LeopardWM will be documented in this file.
 - **Windows whose apps never apply queued moves, such as Wargaming Game Center, no longer stay out of their tiles after windows scroll or resize.** LeopardWM now re-checks them and moves them back into their tiles within about a second.
 - **These windows now slide with the other windows during scrolls instead of jumping into place afterwards.** The daemon log now names each window LeopardWM starts moving this way.
 - **A window on another workspace that moves itself back on screen, such as Zen Browser, is now moved off screen again.** Previously it stayed visible over the current workspace until you switched workspaces.
+- **Consuming a window into the focused column (Ctrl+Alt+, and Ctrl+Alt+.) no longer pulls in a minimized window.** It now takes the nearest non-minimized window and leaves minimized windows where they are.
 
 ## 0.3.1
 
