@@ -93,6 +93,7 @@ const VK_TAB: u32 = 0x09;
 const VK_BACK: u32 = 0x08;
 const VK_ESCAPE: u32 = 0x1B;
 const VK_DELETE: u32 = 0x2E;
+const VK_MENU_MASK: u16 = 0xE8;
 
 fn is_modifier_vk(vk: i32) -> bool {
     matches!(
@@ -133,19 +134,19 @@ enum Action {
     Pass,
     SwallowOverview {
         input: crate::overview::OverviewInput,
-        start_menu_mask: bool,
+        mask: Option<u16>,
     },
     RecordingControl,
     Swallow,
     SwallowHotkey {
         event: HotkeyEvent,
         emit: bool,
-        start_menu_mask: bool,
+        mask: Option<u16>,
     },
     SwallowRecorded {
         modifiers: Modifiers,
         vk: u32,
-        start_menu_mask: bool,
+        mask: Option<u16>,
     },
     PassRecorded {
         modifiers: Modifiers,
@@ -159,8 +160,14 @@ fn is_recording_control(vk: u32, modifiers: Modifiers) -> bool {
     modifiers == Modifiers::default() && matches!(vk, VK_ESCAPE | VK_TAB | VK_BACK | VK_DELETE)
 }
 
-fn win_only(modifiers: Modifiers) -> bool {
-    modifiers.win && !modifiers.ctrl && !modifiers.alt && !modifiers.shift
+fn menu_mask(modifiers: Modifiers) -> Option<u16> {
+    if modifiers.win && !modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+        Some(VK_CONTROL as u16)
+    } else if modifiers.alt && !modifiers.ctrl {
+        Some(VK_MENU_MASK)
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -217,7 +224,7 @@ fn decide(
             Action::SwallowRecorded {
                 modifiers: held,
                 vk,
-                start_menu_mask: win_only(held),
+                mask: menu_mask(held),
             }
         } else {
             Action::Swallow
@@ -236,7 +243,11 @@ fn decide(
         return Action::SwallowHotkey {
             event: HotkeyEvent { id: bind.id },
             emit: is_new_press,
-            start_menu_mask: is_new_press && win_only(bind.modifiers),
+            mask: if is_new_press {
+                menu_mask(bind.modifiers)
+            } else {
+                None
+            },
         };
     }
 
@@ -296,14 +307,12 @@ fn route_overview_action(
     }
     match action {
         Action::SwallowHotkey {
-            emit: true,
-            start_menu_mask,
-            ..
+            emit: true, mask, ..
         } => {
             if let Some(action) = overview_action {
                 return Action::SwallowOverview {
                     input: OverviewInput::Action(action),
-                    start_menu_mask,
+                    mask,
                 };
             }
         }
@@ -312,7 +321,7 @@ fn route_overview_action(
         {
             return Action::SwallowOverview {
                 input: OverviewInput::Key(vk as u16),
-                start_menu_mask: false,
+                mask: None,
             };
         }
         _ => {}
@@ -710,37 +719,30 @@ unsafe fn apply_action(action: Action, ncode: i32, wparam: WPARAM, lparam: LPARA
             .unwrap_or_else(recover_poisoned_mutex),
     );
     match action {
-        Action::SwallowOverview {
-            input,
-            start_menu_mask,
-        } => {
+        Action::SwallowOverview { input, mask } => {
             if let Some(target) = target {
                 crate::overview::post_input(target, input);
             }
-            if start_menu_mask {
-                send_start_menu_mask();
+            if let Some(vk) = mask {
+                send_menu_mask(vk);
             }
             LRESULT(1)
         }
         Action::Pass | Action::RecordingControl => CallNextHookEx(None, ncode, wparam, lparam),
         Action::Swallow => LRESULT(1),
-        Action::SwallowHotkey {
-            event,
-            emit,
-            start_menu_mask,
-        } => {
+        Action::SwallowHotkey { event, emit, mask } => {
             if emit {
                 send_event(KeyboardHookEvent::Hotkey(event));
             }
-            if start_menu_mask {
-                send_start_menu_mask();
+            if let Some(vk) = mask {
+                send_menu_mask(vk);
             }
             LRESULT(1)
         }
         Action::SwallowRecorded {
             modifiers,
             vk,
-            start_menu_mask,
+            mask,
         } => {
             send_event(KeyboardHookEvent::Recorded { modifiers, vk });
             // One-shot capture closes the swallow window before JS posts its stop event.
@@ -750,8 +752,8 @@ unsafe fn apply_action(action: Action, ncode: i32, wparam: WPARAM, lparam: LPARA
                 .unwrap_or_else(recover_poisoned_mutex);
             *pending = Some(vk);
             drop(pending);
-            if start_menu_mask {
-                send_start_menu_mask();
+            if let Some(vk) = mask {
+                send_menu_mask(vk);
             }
             LRESULT(1)
         }
@@ -770,15 +772,15 @@ fn send_event(event: KeyboardHookEvent) {
     }
 }
 
-/// Inject a Ctrl key tap to mask a bare-Win press so it doesn't pop the Start
-/// menu after the hook swallows the bound key. Ctrl alone is inert, so the tap
-/// has no user-visible side effect.
-unsafe fn send_start_menu_mask() {
+/// Tap a key after swallowing a bind: Ctrl masks bare Win so Start stays closed,
+/// and the unassigned VK 0xE8 masks bare Alt so the app's menu bar stays inactive.
+/// Alt uses an unused key rather than Ctrl because Ctrl+Alt acts as AltGr on some layouts.
+unsafe fn send_menu_mask(vk: u16) {
     let key = |flags| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(VK_CONTROL as u16),
+                wVk: VIRTUAL_KEY(vk),
                 wScan: 0,
                 dwFlags: flags,
                 time: 0,
@@ -866,7 +868,7 @@ mod tests {
                 Action::SwallowHotkey {
                     event: HotkeyEvent { id: binds[0].id },
                     emit: expected_emit,
-                    start_menu_mask: false,
+                    mask: None,
                 }
             );
             assert_eq!(
@@ -891,7 +893,7 @@ mod tests {
         let hotkey = Action::SwallowHotkey {
             event: HotkeyEvent { id: 123 },
             emit: true,
-            start_menu_mask: false,
+            mask: None,
         };
         for mapped in [
             navigate,
@@ -1004,7 +1006,7 @@ mod tests {
                 Action::Swallow
                     | Action::SwallowHotkey {
                         emit: false,
-                        start_menu_mask: false,
+                        mask: None,
                         ..
                     }
             ));
@@ -1040,7 +1042,7 @@ mod tests {
         let action = Action::SwallowHotkey {
             event: HotkeyEvent { id: 123 },
             emit: true,
-            start_menu_mask: false,
+            mask: None,
         };
         assert_eq!(
             retain_overview_press(KeyMsg::Down, 0x25, action, false, &mut owned),
@@ -1154,7 +1156,7 @@ mod tests {
             Action::SwallowRecorded {
                 modifiers: held,
                 vk: 0x48,
-                start_menu_mask: false,
+                mask: None,
             }
         );
         assert_eq!(
@@ -1255,28 +1257,90 @@ mod tests {
     }
 
     #[test]
-    fn recording_win_only_chord_masks_start_menu() {
-        let held = Modifiers::win();
-        assert_eq!(
-            decide(
-                KeyMsg::Down,
-                0x24,
-                held,
-                true,
-                &[],
-                0,
-                0,
-                0,
-                true,
-                true,
+    fn recording_chords_mask_start_and_alt_menus() {
+        for (held, vk, mask) in [
+            (Modifiers::win(), 0x24, Some(VK_CONTROL as u16)),
+            (Modifiers::alt(), 0x4A, Some(VK_MENU_MASK)),
+        ] {
+            assert_eq!(
+                decide(KeyMsg::Down, vk, held, true, &[], 0, 0, 0, true, true, None,),
+                Action::SwallowRecorded {
+                    modifiers: held,
+                    vk,
+                    mask,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn hotkeys_mask_menus_only_on_new_presses_without_ctrl() {
+        for (modifiers, mask) in [
+            (Modifiers::alt(), Some(VK_MENU_MASK)),
+            (
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::alt()
+                },
+                Some(VK_MENU_MASK),
+            ),
+            (
+                Modifiers {
+                    win: true,
+                    ..Modifiers::alt()
+                },
+                Some(VK_MENU_MASK),
+            ),
+            (
+                Modifiers {
+                    fn_mods: fn_mod_bit(0x7C).unwrap(),
+                    ..Modifiers::alt()
+                },
+                Some(VK_MENU_MASK),
+            ),
+            (
+                Modifiers {
+                    ctrl: true,
+                    ..Modifiers::alt()
+                },
                 None,
             ),
-            Action::SwallowRecorded {
-                modifiers: held,
-                vk: 0x24,
-                start_menu_mask: true,
+            (Modifiers::win(), Some(VK_CONTROL as u16)),
+            (win_ctrl(), None),
+            (
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                None,
+            ),
+            (Modifiers::default(), None),
+        ] {
+            let binds = [bind(modifiers, 0x4A)];
+            for is_new_press in [true, false] {
+                assert_eq!(
+                    decide(
+                        KeyMsg::Down,
+                        0x4A,
+                        modifiers,
+                        false,
+                        &binds,
+                        0,
+                        0,
+                        0,
+                        is_new_press,
+                        false,
+                        None,
+                    ),
+                    Action::SwallowHotkey {
+                        event: HotkeyEvent { id: binds[0].id },
+                        emit: is_new_press,
+                        mask: if is_new_press { mask } else { None },
+                    },
+                    "modifiers={modifiers:?}, is_new_press={is_new_press}"
+                );
             }
-        );
+        }
     }
 
     #[test]
@@ -1303,7 +1367,7 @@ mod tests {
             Action::SwallowRecorded {
                 modifiers: held,
                 vk: 0x48,
-                start_menu_mask: false,
+                mask: None,
             }
         );
         assert_eq!(
