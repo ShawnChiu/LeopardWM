@@ -38,11 +38,13 @@ pub fn move_window_offscreen(window_id: WindowId) -> Result<(), Win32Error> {
 }
 
 pub fn queue_window_offscreen(window_id: WindowId) -> Result<(), Win32Error> {
+    let origin = crate::placement::observed_async_position(window_id_to_hwnd(window_id)?);
     if !move_window_offscreen_with_flags(window_id, SWP_ASYNCWINDOWPOS)? {
         crate::placement::record_queued_owner_position(
             window_id,
             MOVE_OFFSCREEN_SENTINEL_COORD,
             MOVE_OFFSCREEN_SENTINEL_COORD,
+            origin,
         );
     }
     Ok(())
@@ -217,7 +219,11 @@ fn restore_window_if_offscreen_to_work_area(
             )));
         }
         if owner_wait {
-            crate::placement::record_queued_owner_rect(window_id, &restore_rect);
+            crate::placement::record_queued_owner_rect(
+                window_id,
+                &restore_rect,
+                Some((current_rect.x, current_rect.y)),
+            );
         }
     }
 
@@ -309,7 +315,11 @@ fn emergency_sentinel_pass(
             .is_ok()
                 && owner_wait
             {
-                crate::placement::record_queued_owner_rect(id, &restored);
+                crate::placement::record_queued_owner_rect(
+                    id,
+                    &restored,
+                    Some((current.x, current.y)),
+                );
             }
         }
     }

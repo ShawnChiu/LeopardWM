@@ -1074,6 +1074,7 @@ fn skip_visible_tiled_maximized(
                 || owner_pending
                 || (async_flag == SET_WINDOW_POS_FLAGS(0)
                     && pending_async_position(placement.window_id)));
+        let mut origin = None;
         let recovery =
             recover_placement_parked(placement.window_id, async_flag, pending, |flags| {
                 let Ok(hwnd) = window_id_to_hwnd(placement.window_id) else {
@@ -1093,6 +1094,7 @@ fn skip_visible_tiled_maximized(
                     }
                     return mover::seal(&entry);
                 }
+                origin = observed_async_position(hwnd);
                 unsafe {
                     SetWindowPos(hwnd, None, placement.rect.x, placement.rect.y, 0, 0, flags)
                         .is_ok()
@@ -1109,7 +1111,7 @@ fn skip_visible_tiled_maximized(
                     placement.rect.y,
                     None,
                     false,
-                    None,
+                    origin,
                 );
             }
         }
@@ -1600,7 +1602,7 @@ where
         {
             continue;
         }
-        let origin = async_position_origin(entry);
+        let origin = observed_async_position(entry.hwnd);
         if let Err(error) = queue_endpoint(entry) {
             tracing::warn!(window_id = entry.window_id, %error, "Could not queue animation endpoint");
             failures.insert(entry.window_id);
@@ -1622,7 +1624,7 @@ where
         .iter()
         .map(|entry| {
             if entry.flags.contains(SWP_ASYNCWINDOWPOS) {
-                async_position_origin(entry)
+                observed_async_position(entry.hwnd)
             } else {
                 None
             }
@@ -1725,20 +1727,10 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
     deferrals
 }
 
-fn observed_async_position(hwnd: HWND) -> Option<(i32, i32)> {
+pub(crate) fn observed_async_position(hwnd: HWND) -> Option<(i32, i32)> {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(hwnd, &mut rect).ok()? };
     Some((rect.left, rect.top))
-}
-
-fn async_position_origin(entry: &DeferEntry) -> Option<(i32, i32)> {
-    let has_submission = lock_async_positions()
-        .as_ref()
-        .is_some_and(|submissions| submissions.contains_key(&entry.window_id));
-    if has_submission {
-        return None;
-    }
-    observed_async_position(entry.hwnd)
 }
 
 fn record_async_position(entry: &DeferEntry, origin: Option<(i32, i32)>) {
@@ -1746,18 +1738,27 @@ fn record_async_position(entry: &DeferEntry, origin: Option<(i32, i32)>) {
     record_async_coordinates(entry.window_id, entry.x, entry.y, size, false, origin);
 }
 
-pub(crate) fn record_queued_owner_position(window_id: WindowId, x: i32, y: i32) {
-    record_async_coordinates(window_id, x, y, None, true, None);
+pub(crate) fn record_queued_owner_position(
+    window_id: WindowId,
+    x: i32,
+    y: i32,
+    origin: Option<(i32, i32)>,
+) {
+    record_async_coordinates(window_id, x, y, None, true, origin);
 }
 
-pub(crate) fn record_queued_owner_rect(window_id: WindowId, rect: &Rect) {
+pub(crate) fn record_queued_owner_rect(
+    window_id: WindowId,
+    rect: &Rect,
+    origin: Option<(i32, i32)>,
+) {
     record_async_coordinates(
         window_id,
         rect.x,
         rect.y,
         Some((rect.width, rect.height)),
         true,
-        None,
+        origin,
     );
 }
 
@@ -4115,16 +4116,35 @@ mod tests {
         }
     }
 
+    struct ClearPlacementOnDrop(WindowId);
+    impl Drop for ClearPlacementOnDrop {
+        fn drop(&mut self) {
+            clear_suspected_oversize(self.0);
+        }
+    }
+
+    fn prepare_self_move_owner_probe(window: &HiddenPopup) {
+        assert!(!mover::pending(window.id));
+        let submission = lock_async_positions().as_ref().unwrap()[&window.id];
+        assert!(!submission.wait_for_owner);
+        assert!(submission.last_submitted.elapsed() >= RESPONSIVE_OWNER_DRAIN_WAIT);
+        assert!(placement_owner_answers(window.hwnd, 50));
+        let owner_thread = unsafe { GetWindowThreadProcessId(window.hwnd, None) };
+        // A previous test can leave an unanswered probe cached under a reused owner thread ID.
+        if let Some(answers) = PLACEMENT_OWNER_ANSWERS
+            .lock()
+            .unwrap_or_else(crate::recover_poisoned_mutex)
+            .as_mut()
+        {
+            answers.remove(&owner_thread);
+        }
+    }
+
     #[test]
     fn owner_self_move_before_async_bookkeeping_does_not_mark() {
-        struct ClearPlacementOnDrop(WindowId);
-        impl Drop for ClearPlacementOnDrop {
-            fn drop(&mut self) {
-                clear_suspected_oversize(self.0);
-            }
-        }
-
-        for endpoint in [false, true] {
+        for (endpoint, retire_submission) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let window = HiddenPopup::new(48, 48, 160, 120);
             let _cleanup = ClearPlacementOnDrop(window.id);
             let entry = DeferEntry {
@@ -4137,6 +4157,9 @@ mod tests {
                 flags: SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
                 ..fresh_inset_entry(window.id, 0)
             };
+            if retire_submission {
+                record_async_position(&entry, Some((48, 48)));
+            }
             let apply_then_move = |entry: &DeferEntry| unsafe {
                 SetWindowPos(
                     entry.hwnd,
@@ -4149,6 +4172,9 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(observed_async_position(entry.hwnd), Some((300, 100)));
+                if retire_submission {
+                    assert!(!pending_async_position(entry.window_id));
+                }
                 SetWindowPos(
                     entry.hwnd,
                     None,
@@ -4189,15 +4215,52 @@ mod tests {
             );
             assert!(failures.is_empty());
             assert_eq!(observed_async_position(window.hwnd), Some((90, 90)));
-            assert!(placement_owner_answers(window.hwnd, 50));
             std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
+            prepare_self_move_owner_probe(&window);
             let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
             assert!(deferrals.probe_expired.contains(&window.id));
             assert!(
                 !mover::is_marked(window.id),
-                "owner that applied a move and self-moved before bookkeeping was marked (endpoint={endpoint})"
+                "owner that applied a move and self-moved before bookkeeping was marked (endpoint={endpoint}, retire_submission={retire_submission})"
             );
         }
+    }
+
+    #[test]
+    fn queued_owner_self_move_after_owner_wait_does_not_mark() {
+        let window = HiddenPopup::new(48, 48, 160, 120);
+        let _cleanup = ClearPlacementOnDrop(window.id);
+        crate::visibility::queue_window_offscreen(window.id).unwrap();
+        assert_eq!(
+            observed_async_position(window.hwnd),
+            Some((
+                crate::MOVE_OFFSCREEN_SENTINEL_COORD,
+                crate::MOVE_OFFSCREEN_SENTINEL_COORD
+            )),
+        );
+        unsafe {
+            SetWindowPos(
+                window.hwnd,
+                None,
+                90,
+                90,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+            .unwrap();
+        }
+        let deferrals = probe_placement_owners(&[], false, true);
+        assert!(deferrals.unresponsive.is_empty());
+        assert!(deferrals.wait_for_owner.is_empty());
+        assert!(!lock_async_positions().as_ref().unwrap()[&window.id].wait_for_owner);
+        std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
+        prepare_self_move_owner_probe(&window);
+        assert!(!pending_async_position(window.id));
+        assert!(
+            !mover::is_marked(window.id),
+            "queued owner that applied its move and self-moved was marked after owner wait cleared",
+        );
     }
 
     #[test]
