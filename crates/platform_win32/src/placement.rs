@@ -2882,6 +2882,10 @@ pub(crate) fn invisible_border_insets(hwnd: HWND) -> (i32, i32, i32, i32) {
 mod tests {
     use super::*;
 
+    // Owner probes sweep the process-global async-position map; the exclusive test
+    // leaves a marked window whose owner thread does not pump messages.
+    static OWNER_SWEEP: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
     #[test]
     fn sticky_compositor_nudge_includes_explorer_and_existing_classes_only() {
         for class in [
@@ -4228,6 +4232,9 @@ mod tests {
 
     #[test]
     fn queued_owner_self_move_after_owner_wait_does_not_mark() {
+        let _owner_sweep = OWNER_SWEEP
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let window = HiddenPopup::new(48, 48, 160, 120);
         let _cleanup = ClearPlacementOnDrop(window.id);
         crate::visibility::queue_window_offscreen(window.id).unwrap();
@@ -4561,6 +4568,9 @@ mod tests {
 
     #[test]
     fn test_apply_placements_empty() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serialize = lock_cloak_set_tests();
         // Verify empty placements succeed without error
         let config = PlatformConfig::default();
@@ -4570,6 +4580,9 @@ mod tests {
 
     #[test]
     fn test_apply_placements_skips_invalid_windows() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serialize = lock_cloak_set_tests();
         let config = PlatformConfig::default();
         let placements = vec![WindowPlacement {
@@ -4630,6 +4643,9 @@ mod tests {
 
     #[test]
     fn test_empty_apply_and_managed_uncloak_clear_foreign_parked_cloaks() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serialize = lock_cloak_set_tests();
         let parked: WindowId = 0xFFFF_FFFF_FFFF_FF13;
         let direct: WindowId = 0xFFFF_FFFF_FFFF_FF14;
@@ -5073,6 +5089,9 @@ mod tests {
 
     #[test]
     fn test_offscreen_batch_uses_passed_topology_and_parks_without_it() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serialize = GENERATION_TEST_LOCK
             .lock()
             .unwrap_or_else(crate::recover_poisoned_mutex);
@@ -5141,6 +5160,9 @@ mod tests {
 
     #[test]
     fn apply_placements_retries_tab_landing_after_wrong_zero_insets() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if crate::is_high_contrast_enabled() {
             return;
         }
@@ -5200,6 +5222,9 @@ mod tests {
 
     #[test]
     fn test_zero_size_hidden_tab_native_park_is_stable_across_inset_cache() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _serialize = GENERATION_TEST_LOCK
             .lock()
             .unwrap_or_else(crate::recover_poisoned_mutex);
