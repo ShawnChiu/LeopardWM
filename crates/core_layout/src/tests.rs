@@ -750,6 +750,77 @@ mod tests {
     }
 
     #[test]
+    fn test_move_column_skips_minimized_column_and_restores_order() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.insert_window(3, Some(400)).unwrap();
+        ws.mark_minimized(2);
+        ws.test_set_focus_unchecked(2, 0);
+
+        ws.move_column_left();
+
+        assert_eq!(ws.columns()[0].windows(), &[3]);
+        assert_eq!(ws.columns()[1].windows(), &[2]);
+        assert_eq!(ws.columns()[2].windows(), &[1]);
+        assert_eq!(ws.focused_column_index(), 0);
+        assert_eq!(ws.focused_window(), Some(3));
+
+        ws.move_column_right();
+
+        assert_eq!(ws.columns()[0].windows(), &[1]);
+        assert_eq!(ws.columns()[1].windows(), &[2]);
+        assert_eq!(ws.columns()[2].windows(), &[3]);
+        assert_eq!(ws.focused_column_index(), 2);
+        assert_eq!(ws.focused_window(), Some(3));
+    }
+
+    #[test]
+    fn test_move_column_noop_beyond_active_edge() {
+        for move_left in [true, false] {
+            let mut ws = Workspace::new();
+            ws.insert_window(1, Some(400)).unwrap();
+            ws.insert_window(2, Some(400)).unwrap();
+            ws.insert_window(3, Some(400)).unwrap();
+            ws.mark_minimized(1);
+            ws.mark_minimized(3);
+            ws.test_set_focus_unchecked(1, 0);
+
+            if move_left {
+                ws.move_column_left();
+            } else {
+                ws.move_column_right();
+            }
+
+            assert_eq!(ws.columns()[0].windows(), &[1]);
+            assert_eq!(ws.columns()[1].windows(), &[2]);
+            assert_eq!(ws.columns()[2].windows(), &[3]);
+            assert_eq!(ws.focused_column_index(), 1);
+            assert_eq!(ws.focused_window(), Some(2));
+        }
+    }
+
+    #[test]
+    fn test_move_column_skips_minimized_column_to_mixed_column() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.insert_window_in_column(4, 0).unwrap();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.insert_window(3, Some(400)).unwrap();
+        ws.mark_minimized(1);
+        ws.mark_minimized(2);
+        ws.test_set_focus_unchecked(2, 0);
+
+        ws.move_column_left();
+
+        assert_eq!(ws.columns()[0].windows(), &[3]);
+        assert_eq!(ws.columns()[1].windows(), &[2]);
+        assert_eq!(ws.columns()[2].windows(), &[1, 4]);
+        assert_eq!(ws.focused_column_index(), 0);
+        assert_eq!(ws.focused_window(), Some(3));
+    }
+
+    #[test]
     fn test_reorder_column_forward() {
         let mut ws = Workspace::new();
         ws.insert_window(1, Some(400)).unwrap();
@@ -4125,6 +4196,114 @@ mod tests {
         assert_eq!(ws.columns()[0].windows(), &[2, 1]); // B + A
         assert_eq!(ws.columns()[1].windows(), &[3]);
         assert_eq!(ws.focused_window(), Some(1));
+    }
+
+    #[test]
+    fn test_move_window_left_skips_minimized_column() {
+        for stacked in [false, true] {
+            let mut ws = Workspace::new();
+            ws.insert_window(1, Some(400)).unwrap();
+            ws.insert_window(2, Some(400)).unwrap();
+            ws.insert_window(3, Some(400)).unwrap();
+            if stacked {
+                ws.insert_window_in_column(4, 2).unwrap();
+            }
+            ws.mark_minimized(2);
+            ws.test_set_focus_unchecked(2, 0);
+
+            ws.move_window_left();
+
+            assert_eq!(ws.column_count(), if stacked { 3 } else { 2 });
+            assert_eq!(ws.columns()[0].windows(), &[1, 3]);
+            assert_eq!(ws.columns()[1].windows(), &[2]);
+            if stacked {
+                assert_eq!(ws.columns()[2].windows(), &[4]);
+            }
+            assert_eq!(ws.focused_column_index(), 0);
+            assert_eq!(ws.focused_window(), Some(3));
+            assert!(ws.is_minimized(2));
+        }
+    }
+
+    #[test]
+    fn test_move_window_right_skips_minimized_column() {
+        for stacked in [false, true] {
+            let mut ws = Workspace::new();
+            ws.insert_window(1, Some(400)).unwrap();
+            ws.insert_window(2, Some(400)).unwrap();
+            ws.insert_window(3, Some(400)).unwrap();
+            if stacked {
+                ws.insert_window_in_column(4, 0).unwrap();
+            }
+            ws.mark_minimized(2);
+            ws.test_set_focus_unchecked(0, 0);
+
+            ws.move_window_right();
+
+            assert_eq!(ws.column_count(), if stacked { 3 } else { 2 });
+            let target = if stacked { 2 } else { 1 };
+            if stacked {
+                assert_eq!(ws.columns()[0].windows(), &[4]);
+            }
+            assert_eq!(ws.columns()[target - 1].windows(), &[2]);
+            assert_eq!(ws.columns()[target].windows(), &[3, 1]);
+            assert_eq!(ws.focused_column_index(), target);
+            assert_eq!(ws.focused_window(), Some(1));
+            assert!(ws.is_minimized(2));
+        }
+    }
+
+    #[test]
+    fn test_move_window_left_beyond_active_edge_unstacks_or_noops() {
+        for stacked in [false, true] {
+            let mut ws = Workspace::new();
+            ws.insert_window(1, Some(400)).unwrap();
+            ws.insert_window(2, Some(400)).unwrap();
+            if stacked {
+                ws.insert_window_in_column(3, 1).unwrap();
+            }
+            ws.mark_minimized(1);
+            ws.test_set_focus_unchecked(1, 0);
+
+            ws.move_window_left();
+
+            assert_eq!(ws.column_count(), if stacked { 3 } else { 2 });
+            assert_eq!(ws.columns()[0].windows(), &[1]);
+            assert_eq!(ws.columns()[1].windows(), &[2]);
+            if stacked {
+                assert_eq!(ws.columns()[2].windows(), &[3]);
+            }
+            assert_eq!(ws.focused_column_index(), 1);
+            assert_eq!(ws.focused_window(), Some(2));
+            assert!(ws.is_minimized(1));
+        }
+    }
+
+    #[test]
+    fn test_move_window_right_beyond_active_edge_unstacks_or_noops() {
+        for stacked in [false, true] {
+            let mut ws = Workspace::new();
+            ws.insert_window(1, Some(400)).unwrap();
+            ws.insert_window(2, Some(400)).unwrap();
+            if stacked {
+                ws.insert_window_in_column(3, 0).unwrap();
+            }
+            ws.mark_minimized(2);
+            ws.test_set_focus_unchecked(0, 0);
+
+            ws.move_window_right();
+
+            assert_eq!(ws.column_count(), if stacked { 3 } else { 2 });
+            let target = if stacked { 1 } else { 0 };
+            if stacked {
+                assert_eq!(ws.columns()[0].windows(), &[3]);
+            }
+            assert_eq!(ws.columns()[target].windows(), &[1]);
+            assert_eq!(ws.columns()[target + 1].windows(), &[2]);
+            assert_eq!(ws.focused_column_index(), target);
+            assert_eq!(ws.focused_window(), Some(1));
+            assert!(ws.is_minimized(2));
+        }
     }
 
     #[test]
