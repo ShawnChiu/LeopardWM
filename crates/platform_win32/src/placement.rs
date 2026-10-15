@@ -1658,7 +1658,9 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
             let state = submission.map_or(AsyncPositionState::Pending, |submission| {
                 let observed = observed_async_position(hwnd);
                 if mover::is_marked(window_id) {
-                    AsyncPositionState::ProbeExpired
+                    AsyncPositionState::ProbeExpired {
+                        never_applied: true,
+                    }
                 } else {
                     async_position_state_with_owner_probe(
                         submission,
@@ -1688,8 +1690,10 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
                 AsyncPositionState::Pending => {
                     deferrals.pending.insert(window_id);
                 }
-                AsyncPositionState::ProbeExpired => {
-                    mover::mark(window_id);
+                AsyncPositionState::ProbeExpired { never_applied } => {
+                    if never_applied {
+                        mover::mark(window_id);
+                    }
                     submissions.remove(&window_id);
                     deferrals.probe_expired.insert(window_id);
                 }
@@ -1747,7 +1751,13 @@ fn record_async_coordinates(
     let now = std::time::Instant::now();
     let mut guard = lock_async_positions();
     let submissions = guard.get_or_insert_with(HashMap::new);
-    let mut next = async_position_submission(submissions.get(&window_id).copied(), (x, y), now);
+    let previous = submissions.get(&window_id).copied();
+    let mut next = async_position_submission(previous, (x, y), now);
+    if previous.is_none() {
+        next.origin = window_id_to_hwnd(window_id)
+            .ok()
+            .and_then(observed_async_position);
+    }
     next.size = size.or(next.size);
     next.wait_for_owner |= wait_for_owner;
     submissions.insert(window_id, next);
@@ -1766,6 +1776,7 @@ fn async_position_submission(
             last_submitted: now,
             size: previous.size,
             wait_for_owner: previous.wait_for_owner,
+            origin: previous.origin,
         },
         None => AsyncPositionSubmission {
             x: position.0,
@@ -1774,6 +1785,7 @@ fn async_position_submission(
             last_submitted: now,
             size: None,
             wait_for_owner: false,
+            origin: None,
         },
     }
 }
@@ -1783,7 +1795,7 @@ enum AsyncPositionState {
     Drained,
     Pending,
     Expired,
-    ProbeExpired,
+    ProbeExpired { never_applied: bool },
 }
 
 fn async_position_state(
@@ -1821,7 +1833,11 @@ fn async_position_state_with_owner_probe(
         return state;
     };
     if cached_placement_owner_answer(hwnd) {
-        AsyncPositionState::ProbeExpired
+        AsyncPositionState::ProbeExpired {
+            never_applied: submission.origin.is_none()
+                || current_position.is_none()
+                || current_position == submission.origin,
+        }
     } else {
         state
     }
@@ -1841,7 +1857,9 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
     let hwnd = window_id_to_hwnd(window_id).ok();
     let current = hwnd.and_then(observed_async_position);
     let state = if mover::is_marked(window_id) {
-        AsyncPositionState::ProbeExpired
+        AsyncPositionState::ProbeExpired {
+            never_applied: true,
+        }
     } else {
         async_position_state_with_owner_probe(snapshot, current, std::time::Instant::now(), hwnd)
     };
@@ -1861,8 +1879,10 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
             false
         }
         AsyncPositionState::Pending => true,
-        AsyncPositionState::ProbeExpired => {
-            mover::mark(window_id);
+        AsyncPositionState::ProbeExpired { never_applied } => {
+            if never_applied {
+                mover::mark(window_id);
+            }
             drop(guard);
             clear_async_position(window_id);
             false
@@ -1999,6 +2019,7 @@ struct AsyncPositionSubmission {
     last_submitted: std::time::Instant,
     // Display-change deferrals must not expire into a synchronous call while the owner is hung.
     wait_for_owner: bool,
+    origin: Option<(i32, i32)>,
 }
 
 // Expire pending work so windows that clamp or reject placement resume normal handling.
@@ -2025,6 +2046,7 @@ fn record_queued_recovery(window_id: WindowId, x: i32, y: i32) {
         last_submitted: now,
         size: None,
         wait_for_owner: false,
+        origin: None,
     };
     lock_queued_recoveries()
         .get_or_insert_with(HashMap::new)
@@ -2044,7 +2066,7 @@ fn retain_pending_queued_recovery(
     match async_position_state(submission, current_position, now) {
         AsyncPositionState::Drained
         | AsyncPositionState::Expired
-        | AsyncPositionState::ProbeExpired => {
+        | AsyncPositionState::ProbeExpired { .. } => {
             submissions.remove(&window_id);
             false
         }
@@ -2866,6 +2888,7 @@ mod tests {
             last_submitted: submitted,
             size: None,
             wait_for_owner: false,
+            origin: None,
         };
         assert_eq!(
             async_position_state(submission, Some(position), recent),
@@ -2897,6 +2920,7 @@ mod tests {
                 last_submitted: submitted,
                 size: None,
                 wait_for_owner: false,
+                origin: None,
             }),
             updated_position,
             recent,
@@ -2935,6 +2959,7 @@ mod tests {
                 last_submitted: submission_time,
                 size: None,
                 wait_for_owner: false,
+                origin: None,
             },
         )]);
 
@@ -2984,6 +3009,7 @@ mod tests {
                 last_submitted: expired_submission_time,
                 size: None,
                 wait_for_owner: false,
+                origin: None,
             },
         );
         let landings = collect_placement_landings_with_recoveries(

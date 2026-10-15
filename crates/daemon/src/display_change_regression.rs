@@ -90,6 +90,25 @@ unsafe extern "system" fn placement_owner_proc(
         );
         return LRESULT(0);
     }
+    if message == windows::Win32::UI::WindowsAndMessaging::WM_APP + 43 {
+        windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            hwnd,
+            None,
+            wparam.0 as i32,
+            lparam.0 as i32,
+            0,
+            0,
+            SWP_NOSIZE
+                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+                | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+        )
+        .unwrap();
+        let control = GetPropW(hwnd, w!("LeopardWMFixtureMoveControl")).0;
+        (*(control as *const MoveControl))
+            .sent_messages_only
+            .store(true, Ordering::SeqCst);
+        return LRESULT(0);
+    }
     if message == WM_WINDOWPOSCHANGING {
         let control = GetPropW(hwnd, w!("LeopardWMFixtureMoveControl")).0;
         if !control.is_null() {
@@ -143,6 +162,7 @@ struct MoveControl {
     pause_pump: AtomicBool,
     pause_after_move: AtomicBool,
     pump_paused: AtomicBool,
+    sent_messages_only: AtomicBool,
     moves: Mutex<Vec<(i32, i32)>>,
     released: Mutex<bool>,
     wake: Condvar,
@@ -153,6 +173,7 @@ impl MoveControl {
         *self.released.lock().unwrap() = true;
         self.wake.notify_all();
         self.pause_pump.store(false, Ordering::SeqCst);
+        self.sent_messages_only.store(false, Ordering::SeqCst);
     }
 }
 
@@ -271,6 +292,22 @@ impl PlacementOwner {
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
                 DispatchMessageW(&message);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while owner_control.sent_messages_only.load(Ordering::SeqCst)
+                    && Instant::now() < deadline
+                {
+                    let mut sent = MSG::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                        &mut sent,
+                        None,
+                        WM_QUIT,
+                        WM_QUIT,
+                        windows::Win32::UI::WindowsAndMessaging::PEEK_MESSAGE_REMOVE_TYPE(
+                            windows::Win32::UI::WindowsAndMessaging::QS_SENDMESSAGE.0 << 16,
+                        ),
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
             DestroyWindow(hwnd).unwrap();
         });
@@ -1994,6 +2031,89 @@ fn test_unmarked_owner_keeps_async_animation_delivery() {
         || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
             == Some(placements[0].rect),
         Duration::from_secs(2)
+    ));
+}
+
+#[test]
+fn test_self_moving_owner_keeps_async_animation_delivery() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_self_moving_owner_keeps_async_animation_delivery",
+    ) {
+        return;
+    }
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _desktop = FixtureDesktop::enter();
+    let owner = PlacementOwner::spawn_with(Rect::new(48, 48, 160, 120), 1, false);
+    let state = placement_state(&[owner.window_id]);
+    let mut placements =
+        state.workspaces[&1][0].compute_placements_animated(state.layout_viewport(1));
+    let mut cache = leopardwm_platform_win32::PlacementCache::new();
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    owner.resume();
+    assert!(wait_for_fixture(
+        || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+            == Some(placements[0].rect),
+        Duration::from_secs(2),
+    ));
+    let moved = Rect::new(90, 90, placements[0].rect.width, placements[0].rect.height);
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(HWND(owner.window_id as usize as *mut _)),
+            windows::Win32::UI::WindowsAndMessaging::WM_APP + 43,
+            WPARAM(moved.x as usize),
+            LPARAM(moved.y as isize),
+        )
+        .unwrap();
+    }
+    assert!(wait_for_fixture(
+        || owner.control.sent_messages_only.load(Ordering::SeqCst)
+            && leopardwm_platform_win32::get_window_chrome_rect(owner.window_id) == Some(moved),
+        Duration::from_secs(2),
+    ));
+    thread::sleep(Duration::from_millis(300));
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    placements[0].rect.x += 80;
+    leopardwm_platform_win32::apply_placements(
+        &placements,
+        &state.platform_config,
+        Some(&mut cache),
+        false,
+    )
+    .unwrap();
+    assert!(
+        !wait_for_fixture(
+            || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id) != Some(moved),
+            Duration::from_millis(400),
+        ),
+        "self-moving owner was marked and received a synchronous mover placement"
+    );
+    owner
+        .control
+        .sent_messages_only
+        .store(false, Ordering::SeqCst);
+    unsafe {
+        PostThreadMessageW(
+            owner.thread_id,
+            windows::Win32::UI::WindowsAndMessaging::WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .unwrap();
+    }
+    assert!(wait_for_fixture(
+        || leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
+            == Some(placements[0].rect),
+        Duration::from_secs(2),
     ));
 }
 
