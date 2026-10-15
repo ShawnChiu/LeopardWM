@@ -216,7 +216,6 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
     for initially_zoomed in [true, false] {
         let owner = MaximizedOwner::spawn();
         let hwnd = owner.window_id;
-        let last_input = Instant::now() - Duration::from_secs(1);
         let mut state = native_admission_state(hwnd);
         let chrome = leopardwm_platform_win32::get_window_chrome_rect(hwnd).unwrap();
         let monitor = state.monitors.get_mut(&1).unwrap();
@@ -228,7 +227,7 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
             chrome.height - 200,
         );
         state.paused = true;
-        state.injected_input_age_ms = Some(1000);
+        state.injected_press_count = 10;
         assert_eq!(
             state.try_admit_window_at_with_native_ops(
                 hwnd,
@@ -245,7 +244,7 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
             state.on_window_moved_or_resized_with_native_ops(
                 hwnd,
                 false,
-                || Some(0),
+                || 11,
                 |_| panic!("user-initiated maximize must not restore"),
                 |_| true,
             );
@@ -254,7 +253,7 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
         state.on_window_moved_or_resized_with_native_ops(
             hwnd,
             false,
-            || Some(u32::try_from(last_input.elapsed().as_millis()).unwrap()),
+            || 10 + u64::from(initially_zoomed),
             |_| panic!("fresh app fullscreen must not be restored into its tile"),
             |_| false,
         );
@@ -268,17 +267,16 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
 }
 
 #[test]
-fn test_late_maximize_event_wrapper_uses_input_history_to_queue_restore() {
+fn test_late_maximize_event_wrapper_uses_press_count_to_queue_restore() {
     let _serial = REAL_WINDOW_STYLE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let (_hooks, _events) = leopardwm_platform_win32::install_event_hooks().unwrap();
     let owner = MaximizedOwner::spawn();
     let hwnd = owner.window_id;
-    let last_input = Instant::now() - Duration::from_secs(1);
     let mut state = native_admission_state(hwnd);
     state.paused = true;
-    state.injected_input_age_ms = Some(1000);
+    state.injected_press_count = 10;
     assert_eq!(
         state.try_admit_window_at_with_native_ops(
             hwnd,
@@ -293,7 +291,6 @@ fn test_late_maximize_event_wrapper_uses_input_history_to_queue_restore() {
     state
         .moved_or_resized_suppression
         .insert(hwnd, Instant::now() + Duration::from_millis(250));
-    state.injected_input_age_ms = Some(u32::try_from(last_input.elapsed().as_millis()).unwrap());
     state.handle_window_event(WindowEvent::MovedOrResized(hwnd));
     assert!(state.pending_maximized_admission_restores.contains(&hwnd));
     let _ = owner.release.send(());

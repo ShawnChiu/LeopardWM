@@ -526,7 +526,7 @@ fn notify_fixture_move(state: &mut AppState, owner: &PlacementOwner) {
     state.on_window_moved_or_resized_with_native_ops(
         owner.window_id,
         false,
-        || Some(10_000),
+        || 0,
         |_| panic!("inactive fixture must not request a maximized restore"),
         |_| false,
     );

@@ -40,6 +40,7 @@ pub mod inspect;
 mod placement;
 mod system;
 mod types;
+mod user_press;
 mod visibility;
 mod window_identity;
 mod window_query;
@@ -49,6 +50,7 @@ pub use gestures::*;
 pub use hotkeys::*;
 pub use keyboard_hook::*;
 pub use mouse_hook::*;
+pub use user_press::{install_mouse_press_hook, user_press_count, MousePressHookHandle};
 
 // Re-export public API from submodules
 pub use elevation::{

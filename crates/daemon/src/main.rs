@@ -493,6 +493,38 @@ fn install_hotkey_hook(
     }
 }
 
+fn setup_input_hooks(
+    config: &Config,
+    event_tx: mpsc::Sender<DaemonEvent>,
+    skip_hotkeys: bool,
+) -> (
+    HotkeyState,
+    Option<leopardwm_platform_win32::MousePressHookHandle>,
+) {
+    let hotkeys = if skip_hotkeys {
+        info!("Hotkeys disabled by command-line flag");
+        HotkeyState {
+            handle: setup_system_event_handle(),
+            hook: None,
+            mapping: HashMap::new(),
+            requested_count: 0,
+            registered_count: 0,
+            failed_binds: Vec::new(),
+            recording: false,
+        }
+    } else {
+        setup_hotkeys(config, event_tx)
+    };
+    let mouse_presses = match leopardwm_platform_win32::install_mouse_press_hook() {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            warn!("Mouse press hook unavailable; mouse presses will not end post-admission maximize restores: {}", error);
+            None
+        }
+    };
+    (hotkeys, mouse_presses)
+}
+
 fn setup_system_event_handle() -> Option<leopardwm_platform_win32::SystemEventHandle> {
     match register_system_events() {
         Ok(handle) => Some(handle),
@@ -3826,20 +3858,8 @@ async fn main() -> Result<()> {
     let _hook_handle = setup_window_hooks(&config, &event_tx, &mut thread_handles);
 
     // Register global hotkeys (mutable to support reload)
-    let mut hotkey_state = if args.skip_hotkeys() {
-        info!("Hotkeys disabled by command-line flag");
-        HotkeyState {
-            handle: setup_system_event_handle(),
-            hook: None,
-            mapping: HashMap::new(),
-            requested_count: 0,
-            registered_count: 0,
-            failed_binds: Vec::new(),
-            recording: false,
-        }
-    } else {
-        setup_hotkeys(&config, event_tx.clone())
-    };
+    let (mut hotkey_state, _mouse_press_hook) =
+        setup_input_hooks(&config, event_tx.clone(), args.skip_hotkeys());
 
     // Install mouse hook for focus-follows-mouse (if enabled). Kept mutable so
     // a tray/Settings toggle can install or drop it live (see sync_mouse_hook).

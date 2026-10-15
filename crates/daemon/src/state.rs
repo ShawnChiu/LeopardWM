@@ -701,8 +701,7 @@ pub(crate) struct AppState {
     pub(crate) window_managed_at: HashMap<u64, std::time::Instant>,
     pub(crate) pending_maximized_admission_restores: HashSet<u64>,
     /// Admission input baseline and restores issued for this lifetime, including the admission restore.
-    pub(crate) post_admission_maximize_restore_eligible:
-        HashMap<u64, (Option<std::time::Instant>, u8)>,
+    pub(crate) post_admission_maximize_restore_eligible: HashMap<u64, (u64, u8)>,
     /// Last time each tiled window was seen maximized. Lets a window that opens
     /// maximized and momentarily restores itself mid-burst (an app opening
     /// several windows/tabs at once) re-assert maximize instead of being snapped
@@ -832,7 +831,7 @@ pub(crate) struct AppState {
     #[cfg(test)]
     pub(crate) injected_window_maximized: HashMap<u64, bool>,
     #[cfg(test)]
-    pub(crate) injected_input_age_ms: Option<u32>,
+    pub(crate) injected_press_count: u64,
     #[cfg(test)]
     pub(crate) departing_foreground_evidence_reads: usize,
     /// Test-only GetTickCount stand-in for last-window departure arming.
@@ -1290,7 +1289,7 @@ impl AppState {
             #[cfg(test)]
             injected_window_maximized: HashMap::new(),
             #[cfg(test)]
-            injected_input_age_ms: None,
+            injected_press_count: 0,
             #[cfg(test)]
             departing_foreground_evidence_reads: 0,
             #[cfg(test)]

@@ -633,6 +633,10 @@ unsafe fn keyboard_ll_hook_inner(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> 
         }
     };
 
+    if is_new_press {
+        crate::user_press::record_user_press();
+    }
+
     if recording && fn_mod_bit(vk).is_some() {
         let bit = fn_mod_bit(vk).unwrap();
         let mut recording_held = HOOK_RECORDING_FN_HELD
@@ -797,6 +801,43 @@ mod tests {
     use super::*;
 
     static HOOK_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn keyboard_hook_counts_only_new_non_modifier_presses() {
+        let _guard = HOOK_STATE_TEST_LOCK.lock().unwrap();
+        let _counter_guard = crate::user_press::PRESS_COUNT_TEST_LOCK.lock().unwrap();
+        reset_held_keys().unwrap();
+        let mut expected = crate::user_press_count();
+        for (message, vk, counts) in [
+            (WM_KEYUP, 0x41, false),
+            (WM_KEYDOWN, 0x41, true),
+            (WM_KEYDOWN, 0x41, false),
+            (WM_KEYUP, 0x41, false),
+            (WM_SYSKEYDOWN, 0x41, true),
+            (WM_SYSKEYUP, 0x41, false),
+            (WM_KEYDOWN, VK_LSHIFT as u32, false),
+            (WM_KEYUP, VK_LSHIFT as u32, false),
+        ] {
+            let kb = KBDLLHOOKSTRUCT {
+                vkCode: vk,
+                ..Default::default()
+            };
+            unsafe {
+                keyboard_ll_hook_inner(
+                    0,
+                    WPARAM(message as usize),
+                    LPARAM(&kb as *const _ as isize),
+                )
+            };
+            expected += u64::from(counts);
+            assert_eq!(
+                crate::user_press_count(),
+                expected,
+                "message={message}, vk={vk}"
+            );
+        }
+        reset_held_keys().unwrap();
+    }
 
     fn bind(modifiers: Modifiers, vk: u32) -> HotkeyBind {
         HotkeyBind {

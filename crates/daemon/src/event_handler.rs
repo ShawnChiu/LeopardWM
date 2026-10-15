@@ -530,25 +530,22 @@ impl AppState {
         is_maximized: &mut impl FnMut(u64) -> bool,
     ) {
         if action == config::WindowAction::Tile {
-            let last_input = self.native_ms_since_last_user_input().and_then(|age| {
-                std::time::Instant::now()
-                    .checked_sub(std::time::Duration::from_millis(u64::from(age)))
-            });
+            let press_count = self.native_user_press_count();
             self.post_admission_maximize_restore_eligible
-                .insert(hwnd, (last_input, 0));
+                .insert(hwnd, (press_count, 0));
         }
         if maximized_at_admission {
             self.queue_maximized_admission_restore(hwnd, now, queue, is_maximized);
         }
     }
 
-    fn native_ms_since_last_user_input(&self) -> Option<u32> {
+    fn native_user_press_count(&self) -> u64 {
         #[cfg(test)]
         {
-            self.injected_input_age_ms
+            self.injected_press_count
         }
         #[cfg(not(test))]
-        leopardwm_platform_win32::ms_since_last_user_input()
+        leopardwm_platform_win32::user_press_count()
     }
 
     fn queue_maximized_admission_restore(
@@ -593,14 +590,14 @@ impl AppState {
     fn try_restore_post_admission_maximize(
         &mut self,
         hwnd: u64,
-        input_age_ms: &mut impl FnMut() -> Option<u32>,
+        press_count: &mut impl FnMut() -> u64,
         queue: &mut impl FnMut(u64) -> Result<bool, leopardwm_platform_win32::Win32Error>,
         is_maximized: &mut impl FnMut(u64) -> bool,
     ) -> bool {
         if self.pending_maximized_admission_restores.contains(&hwnd) {
             return false;
         }
-        let Some((admission_last_input, restores_issued)) = self
+        let Some((admission_press_count, restores_issued)) = self
             .post_admission_maximize_restore_eligible
             .get(&hwnd)
             .copied()
@@ -614,18 +611,7 @@ impl AppState {
             self.post_admission_maximize_restore_eligible.remove(&hwnd);
             return false;
         }
-        let Some(admission_last_input) = admission_last_input else {
-            self.post_admission_maximize_restore_eligible.remove(&hwnd);
-            return false;
-        };
-        let Some(last_input) = input_age_ms().and_then(|age| {
-            std::time::Instant::now().checked_sub(std::time::Duration::from_millis(u64::from(age)))
-        }) else {
-            self.post_admission_maximize_restore_eligible.remove(&hwnd);
-            return false;
-        };
-        const INPUT_TIMESTAMP_JITTER: std::time::Duration = std::time::Duration::from_millis(50);
-        if last_input.saturating_duration_since(admission_last_input) > INPUT_TIMESTAMP_JITTER {
+        if press_count() != admission_press_count {
             self.post_admission_maximize_restore_eligible.remove(&hwnd);
             debug!(
                 "User input ended post-admission maximize restores for {}",
@@ -648,7 +634,7 @@ impl AppState {
         #[cfg(test)]
         let maximized = self.injected_window_maximized.get(&hwnd).copied();
         #[cfg(test)]
-        let input_age_ms = self.native_ms_since_last_user_input();
+        let press_count = self.native_user_press_count();
         self.on_maximized_admission_restored_with_native_ops(
             hwnd,
             token,
@@ -656,10 +642,10 @@ impl AppState {
             || {
                 #[cfg(test)]
                 {
-                    input_age_ms
+                    press_count
                 }
                 #[cfg(not(test))]
-                leopardwm_platform_win32::ms_since_last_user_input()
+                leopardwm_platform_win32::user_press_count()
             },
             leopardwm_platform_win32::queue_maximized_window_restore,
             |window_id| {
@@ -677,7 +663,7 @@ impl AppState {
         hwnd: u64,
         token: u64,
         worker_still_maximized: bool,
-        mut input_age_ms: impl FnMut() -> Option<u32>,
+        mut press_count: impl FnMut() -> u64,
         mut queue: impl FnMut(u64) -> Result<bool, leopardwm_platform_win32::Win32Error>,
         mut is_maximized: impl FnMut(u64) -> bool,
     ) {
@@ -703,7 +689,7 @@ impl AppState {
         } else if still_maximized
             && self.try_restore_post_admission_maximize(
                 hwnd,
-                &mut input_age_ms,
+                &mut press_count,
                 &mut queue,
                 &mut is_maximized,
             )
@@ -3590,17 +3576,17 @@ impl AppState {
         #[cfg(test)]
         let maximized = self.injected_window_maximized.get(&hwnd).copied();
         #[cfg(test)]
-        let input_age_ms = self.native_ms_since_last_user_input();
+        let press_count = self.native_user_press_count();
         self.on_window_moved_or_resized_with_native_ops(
             hwnd,
             periodic_recheck,
             || {
                 #[cfg(test)]
                 {
-                    input_age_ms
+                    press_count
                 }
                 #[cfg(not(test))]
-                leopardwm_platform_win32::ms_since_last_user_input()
+                leopardwm_platform_win32::user_press_count()
             },
             leopardwm_platform_win32::queue_maximized_window_restore,
             |window_id| {
@@ -3617,7 +3603,7 @@ impl AppState {
         &mut self,
         hwnd: u64,
         periodic_recheck: bool,
-        mut input_age_ms: impl FnMut() -> Option<u32>,
+        mut press_count: impl FnMut() -> u64,
         mut queue_maximized_restore: impl FnMut(
             u64,
         )
@@ -3664,7 +3650,7 @@ impl AppState {
             } else if native_maximized
                 && self.try_restore_post_admission_maximize(
                     hwnd,
-                    &mut input_age_ms,
+                    &mut press_count,
                     &mut queue_maximized_restore,
                     &mut is_maximized,
                 )
