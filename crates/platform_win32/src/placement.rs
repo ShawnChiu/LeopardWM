@@ -1109,6 +1109,7 @@ fn skip_visible_tiled_maximized(
                     placement.rect.y,
                     None,
                     false,
+                    None,
                 );
             }
         }
@@ -1599,12 +1600,13 @@ where
         {
             continue;
         }
+        let origin = async_position_origin(entry);
         if let Err(error) = queue_endpoint(entry) {
             tracing::warn!(window_id = entry.window_id, %error, "Could not queue animation endpoint");
             failures.insert(entry.window_id);
         } else {
             queued_endpoints.insert(entry.window_id, endpoint_target);
-            record_async_position(entry);
+            record_async_position(entry, origin);
         }
     }
 
@@ -1616,13 +1618,23 @@ where
         })
         .cloned()
         .collect();
+    let origins: Vec<_> = synchronous_entries
+        .iter()
+        .map(|entry| {
+            if entry.flags.contains(SWP_ASYNCWINDOWPOS) {
+                async_position_origin(entry)
+            } else {
+                None
+            }
+        })
+        .collect();
     let batch_failures = position_batch(&synchronous_entries);
-    for entry in &synchronous_entries {
+    for (entry, origin) in synchronous_entries.iter().zip(origins) {
         if batch_failures.contains(&entry.window_id) {
             continue;
         }
         if entry.flags.contains(SWP_ASYNCWINDOWPOS) {
-            record_async_position(entry);
+            record_async_position(entry, origin);
         } else if !post_animation_landing && !deferrals.probe_expired.contains(&entry.window_id) {
             clear_async_position(entry.window_id);
         }
@@ -1719,13 +1731,23 @@ fn observed_async_position(hwnd: HWND) -> Option<(i32, i32)> {
     Some((rect.left, rect.top))
 }
 
-fn record_async_position(entry: &DeferEntry) {
+fn async_position_origin(entry: &DeferEntry) -> Option<(i32, i32)> {
+    let has_submission = lock_async_positions()
+        .as_ref()
+        .is_some_and(|submissions| submissions.contains_key(&entry.window_id));
+    if has_submission {
+        return None;
+    }
+    observed_async_position(entry.hwnd)
+}
+
+fn record_async_position(entry: &DeferEntry, origin: Option<(i32, i32)>) {
     let size = (!entry.flags.contains(SWP_NOSIZE)).then_some((entry.w, entry.h));
-    record_async_coordinates(entry.window_id, entry.x, entry.y, size, false);
+    record_async_coordinates(entry.window_id, entry.x, entry.y, size, false, origin);
 }
 
 pub(crate) fn record_queued_owner_position(window_id: WindowId, x: i32, y: i32) {
-    record_async_coordinates(window_id, x, y, None, true);
+    record_async_coordinates(window_id, x, y, None, true, None);
 }
 
 pub(crate) fn record_queued_owner_rect(window_id: WindowId, rect: &Rect) {
@@ -1735,6 +1757,7 @@ pub(crate) fn record_queued_owner_rect(window_id: WindowId, rect: &Rect) {
         rect.y,
         Some((rect.width, rect.height)),
         true,
+        None,
     );
 }
 
@@ -1744,6 +1767,7 @@ fn record_async_coordinates(
     y: i32,
     size: Option<(i32, i32)>,
     wait_for_owner: bool,
+    origin: Option<(i32, i32)>,
 ) {
     if mover::is_marked(window_id) {
         return;
@@ -1754,9 +1778,7 @@ fn record_async_coordinates(
     let previous = submissions.get(&window_id).copied();
     let mut next = async_position_submission(previous, (x, y), now);
     if previous.is_none() {
-        next.origin = window_id_to_hwnd(window_id)
-            .ok()
-            .and_then(observed_async_position);
+        next.origin = origin;
     }
     next.size = size.or(next.size);
     next.wait_for_owner |= wait_for_owner;
@@ -4090,6 +4112,91 @@ mod tests {
             flags: SET_WINDOW_POS_FLAGS(0),
             column_index: 0,
             offscreen_rect: None,
+        }
+    }
+
+    #[test]
+    fn owner_self_move_before_async_bookkeeping_does_not_mark() {
+        struct ClearPlacementOnDrop(WindowId);
+        impl Drop for ClearPlacementOnDrop {
+            fn drop(&mut self) {
+                clear_suspected_oversize(self.0);
+            }
+        }
+
+        for endpoint in [false, true] {
+            let window = HiddenPopup::new(48, 48, 160, 120);
+            let _cleanup = ClearPlacementOnDrop(window.id);
+            let entry = DeferEntry {
+                hwnd: window.hwnd,
+                window_id: window.id,
+                x: 300,
+                y: 100,
+                w: 160,
+                h: 120,
+                flags: SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+                ..fresh_inset_entry(window.id, 0)
+            };
+            let apply_then_move = |entry: &DeferEntry| unsafe {
+                SetWindowPos(
+                    entry.hwnd,
+                    None,
+                    entry.x,
+                    entry.y,
+                    entry.w,
+                    entry.h,
+                    entry.flags,
+                )
+                .unwrap();
+                assert_eq!(observed_async_position(entry.hwnd), Some((300, 100)));
+                SetWindowPos(
+                    entry.hwnd,
+                    None,
+                    90,
+                    90,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+                .unwrap();
+            };
+            let deferrals = AsyncPositionDeferrals {
+                pending: if endpoint {
+                    HashSet::from([window.id])
+                } else {
+                    HashSet::new()
+                },
+                ..Default::default()
+            };
+            let (_, failures) = position_entries_with_pending(
+                std::slice::from_ref(&entry),
+                false,
+                &deferrals,
+                &mut HashMap::new(),
+                &HashMap::new(),
+                |entry| {
+                    assert!(endpoint);
+                    apply_then_move(entry);
+                    Ok(())
+                },
+                |entries| {
+                    assert_eq!(entries.len(), usize::from(!endpoint));
+                    for entry in entries {
+                        apply_then_move(entry);
+                    }
+                    HashSet::new()
+                },
+            );
+            assert!(failures.is_empty());
+            assert_eq!(observed_async_position(window.hwnd), Some((90, 90)));
+            assert!(placement_owner_answers(window.hwnd, 50));
+            std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
+            let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
+            assert!(deferrals.probe_expired.contains(&window.id));
+            assert!(
+                !mover::is_marked(window.id),
+                "owner that applied a move and self-moved before bookkeeping was marked (endpoint={endpoint})"
+            );
         }
     }
 
