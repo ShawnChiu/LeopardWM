@@ -6,7 +6,7 @@ All notable changes to LeopardWM will be documented in this file.
 
 ### Fixes
 
-- **Shortcuts that use Alt without Ctrl, such as Alt+J or Alt+Shift+J, no longer leave the focused app's menu bar active after they fire.** LeopardWM now taps an unused key before Alt is released, the same way it already taps Ctrl to keep Win shortcuts from opening Start. (#145)
+- **Shortcuts that use Alt without Ctrl, such as Alt+J, no longer leave the focused app's menu bar active after they fire.** LeopardWM now taps an unused key before Alt is released, the same way it already taps Ctrl to keep Win shortcuts from opening Start. (#145)
 - **Windows whose apps never apply queued moves, such as Wargaming Game Center, no longer stay out of their tiles after windows scroll or resize.** LeopardWM now re-checks them and moves them back into their tiles within about a second.
 - **These windows now slide with the other windows during scrolls instead of jumping into place afterwards.** The daemon log now names each window LeopardWM starts moving this way.
 - **A window on another workspace that moves itself back on screen, such as Zen Browser, is now moved off screen again.** Previously it stayed visible over the current workspace until you switched workspaces.
