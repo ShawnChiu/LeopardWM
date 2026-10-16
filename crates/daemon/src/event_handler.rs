@@ -530,16 +530,17 @@ impl AppState {
         is_maximized: &mut impl FnMut(u64) -> bool,
     ) {
         if action == config::WindowAction::Tile {
-            let press_count = self.native_user_press_count();
-            self.post_admission_maximize_restore_eligible
-                .insert(hwnd, (press_count, 0));
+            if let Some(press_count) = self.native_user_press_count() {
+                self.post_admission_maximize_restore_eligible
+                    .insert(hwnd, (press_count, 0));
+            }
         }
         if maximized_at_admission {
             self.queue_maximized_admission_restore(hwnd, now, queue, is_maximized);
         }
     }
 
-    fn native_user_press_count(&self) -> u64 {
+    fn native_user_press_count(&self) -> Option<u64> {
         #[cfg(test)]
         {
             self.injected_press_count
@@ -590,7 +591,7 @@ impl AppState {
     fn try_restore_post_admission_maximize(
         &mut self,
         hwnd: u64,
-        press_count: &mut impl FnMut() -> u64,
+        press_count: &mut impl FnMut() -> Option<u64>,
         queue: &mut impl FnMut(u64) -> Result<bool, leopardwm_platform_win32::Win32Error>,
         is_maximized: &mut impl FnMut(u64) -> bool,
     ) -> bool {
@@ -611,10 +612,10 @@ impl AppState {
             self.post_admission_maximize_restore_eligible.remove(&hwnd);
             return false;
         }
-        if press_count() != admission_press_count {
+        if press_count() != Some(admission_press_count) {
             self.post_admission_maximize_restore_eligible.remove(&hwnd);
             debug!(
-                "User input ended post-admission maximize restores for {}",
+                "User press or unavailable observers ended post-admission maximize restores for {}",
                 hwnd
             );
             return false;
@@ -663,7 +664,7 @@ impl AppState {
         hwnd: u64,
         token: u64,
         worker_still_maximized: bool,
-        mut press_count: impl FnMut() -> u64,
+        mut press_count: impl FnMut() -> Option<u64>,
         mut queue: impl FnMut(u64) -> Result<bool, leopardwm_platform_win32::Win32Error>,
         mut is_maximized: impl FnMut(u64) -> bool,
     ) {
@@ -3603,7 +3604,7 @@ impl AppState {
         &mut self,
         hwnd: u64,
         periodic_recheck: bool,
-        mut press_count: impl FnMut() -> u64,
+        mut press_count: impl FnMut() -> Option<u64>,
         mut queue_maximized_restore: impl FnMut(
             u64,
         )

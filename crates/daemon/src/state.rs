@@ -831,7 +831,7 @@ pub(crate) struct AppState {
     #[cfg(test)]
     pub(crate) injected_window_maximized: HashMap<u64, bool>,
     #[cfg(test)]
-    pub(crate) injected_press_count: u64,
+    pub(crate) injected_press_count: Option<u64>,
     #[cfg(test)]
     pub(crate) departing_foreground_evidence_reads: usize,
     /// Test-only GetTickCount stand-in for last-window departure arming.
@@ -1289,7 +1289,7 @@ impl AppState {
             #[cfg(test)]
             injected_window_maximized: HashMap::new(),
             #[cfg(test)]
-            injected_press_count: 0,
+            injected_press_count: None,
             #[cfg(test)]
             departing_foreground_evidence_reads: 0,
             #[cfg(test)]

@@ -1,5 +1,5 @@
 use crate::{Win32Error, WM_QUIT_LLHOOK_THREAD};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -9,9 +9,36 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static USER_PRESS_COUNT: AtomicU64 = AtomicU64::new(0);
+static KEYBOARD_OBSERVER_INSTALLED: AtomicBool = AtomicBool::new(false);
+static MOUSE_OBSERVER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-pub fn user_press_count() -> u64 {
-    USER_PRESS_COUNT.load(Ordering::SeqCst)
+pub fn user_press_count() -> Option<u64> {
+    let count = USER_PRESS_COUNT.load(Ordering::SeqCst);
+    if !KEYBOARD_OBSERVER_INSTALLED.load(Ordering::SeqCst)
+        || !MOUSE_OBSERVER_INSTALLED.load(Ordering::SeqCst)
+    {
+        return None;
+    }
+    // Reject a snapshot spanning an observer gap, even if both hooks are back by now.
+    (USER_PRESS_COUNT.load(Ordering::SeqCst) == count).then_some(count)
+}
+
+pub(crate) fn set_keyboard_observer_installed(installed: bool) {
+    set_observer_installed(&KEYBOARD_OBSERVER_INSTALLED, installed);
+}
+
+pub(crate) fn set_mouse_observer_installed(installed: bool) {
+    set_observer_installed(&MOUSE_OBSERVER_INSTALLED, installed);
+}
+
+fn set_observer_installed(observer: &AtomicBool, installed: bool) {
+    if installed {
+        record_user_press();
+        observer.store(true, Ordering::SeqCst);
+    } else {
+        observer.store(false, Ordering::SeqCst);
+        record_user_press();
+    }
 }
 
 pub(crate) fn record_user_press() {
@@ -25,6 +52,7 @@ pub struct MousePressHookHandle {
 
 impl Drop for MousePressHookHandle {
     fn drop(&mut self) {
+        set_mouse_observer_installed(false);
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT_LLHOOK_THREAD, WPARAM(0), LPARAM(0));
         }
@@ -57,6 +85,7 @@ pub fn install_mouse_press_hook() -> Result<MousePressHookHandle, Win32Error> {
                     return;
                 }
             };
+            set_mouse_observer_installed(true);
             let _ = init_tx.send(Ok(thread_id));
             loop {
                 let ret = GetMessageW(&mut msg, None, 0, 0).0;
@@ -65,6 +94,7 @@ pub fn install_mouse_press_hook() -> Result<MousePressHookHandle, Win32Error> {
                 }
                 let _ = DispatchMessageW(&msg);
             }
+            set_mouse_observer_installed(false);
             let _ = UnhookWindowsHookEx(hook);
         })
         .map_err(|error| {
@@ -108,9 +138,39 @@ mod tests {
     };
 
     #[test]
+    fn press_count_requires_both_observers_and_invalidates_observation_gaps() {
+        let _guard = PRESS_COUNT_TEST_LOCK.lock().unwrap();
+        set_keyboard_observer_installed(false);
+        set_mouse_observer_installed(false);
+        assert_eq!(user_press_count(), None);
+        for (keyboard, installed, available) in [
+            (true, true, false),
+            (false, true, true),
+            (true, false, false),
+            (true, true, true),
+            (false, false, false),
+            (false, true, true),
+            (true, false, false),
+            (false, false, false),
+        ] {
+            let before = USER_PRESS_COUNT.load(Ordering::SeqCst);
+            if keyboard {
+                set_keyboard_observer_installed(installed);
+            } else {
+                set_mouse_observer_installed(installed);
+            }
+            let after = USER_PRESS_COUNT.load(Ordering::SeqCst);
+            assert_eq!(after, before + 1);
+            assert_eq!(user_press_count(), available.then_some(after));
+        }
+    }
+
+    #[test]
     fn mouse_hook_counts_button_downs_but_not_motion_wheel_or_release() {
         let _guard = PRESS_COUNT_TEST_LOCK.lock().unwrap();
-        let mut expected = user_press_count();
+        set_keyboard_observer_installed(true);
+        set_mouse_observer_installed(true);
+        let mut expected = user_press_count().unwrap();
         for (ncode, message, counts) in [
             (0, WM_MOUSEMOVE, false),
             (0, WM_MOUSEWHEEL, false),
@@ -126,9 +186,11 @@ mod tests {
             expected += u64::from(counts);
             assert_eq!(
                 user_press_count(),
-                expected,
+                Some(expected),
                 "message={message}, ncode={ncode}"
             );
         }
+        set_keyboard_observer_installed(false);
+        set_mouse_observer_installed(false);
     }
 }

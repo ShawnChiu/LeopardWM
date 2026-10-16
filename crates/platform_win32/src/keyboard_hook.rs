@@ -353,6 +353,7 @@ pub struct KeyboardHookHandle {
 
 impl Drop for KeyboardHookHandle {
     fn drop(&mut self) {
+        crate::user_press::set_keyboard_observer_installed(false);
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT_LLHOOK_THREAD, WPARAM(0), LPARAM(0));
         }
@@ -493,6 +494,7 @@ pub fn install_keyboard_hook(
                 }
             };
 
+            crate::user_press::set_keyboard_observer_installed(true);
             let _ = init_tx.send(Ok(thread_id));
 
             // Message pump — required for WH_KEYBOARD_LL callbacks.
@@ -507,6 +509,7 @@ pub fn install_keyboard_hook(
                 let _ = DispatchMessageW(&msg);
             }
 
+            crate::user_press::set_keyboard_observer_installed(false);
             let _ = UnhookWindowsHookEx(hook);
         })
         .map_err(|e| {
@@ -807,7 +810,9 @@ mod tests {
         let _guard = HOOK_STATE_TEST_LOCK.lock().unwrap();
         let _counter_guard = crate::user_press::PRESS_COUNT_TEST_LOCK.lock().unwrap();
         reset_held_keys().unwrap();
-        let mut expected = crate::user_press_count();
+        crate::user_press::set_keyboard_observer_installed(true);
+        crate::user_press::set_mouse_observer_installed(true);
+        let mut expected = crate::user_press_count().unwrap();
         for (message, vk, counts) in [
             (WM_KEYUP, 0x41, false),
             (WM_KEYDOWN, 0x41, true),
@@ -832,11 +837,13 @@ mod tests {
             expected += u64::from(counts);
             assert_eq!(
                 crate::user_press_count(),
-                expected,
+                Some(expected),
                 "message={message}, vk={vk}"
             );
         }
         reset_held_keys().unwrap();
+        crate::user_press::set_keyboard_observer_installed(false);
+        crate::user_press::set_mouse_observer_installed(false);
     }
 
     fn bind(modifiers: Modifiers, vk: u32) -> HotkeyBind {

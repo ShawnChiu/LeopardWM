@@ -227,7 +227,7 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
             chrome.height - 200,
         );
         state.paused = true;
-        state.injected_press_count = 10;
+        state.injected_press_count = Some(10);
         assert_eq!(
             state.try_admit_window_at_with_native_ops(
                 hwnd,
@@ -244,7 +244,7 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
             state.on_window_moved_or_resized_with_native_ops(
                 hwnd,
                 false,
-                || 11,
+                || Some(11),
                 |_| panic!("user-initiated maximize must not restore"),
                 |_| true,
             );
@@ -253,7 +253,7 @@ fn test_first_late_maximize_observes_fresh_app_fullscreen_before_restore() {
         state.on_window_moved_or_resized_with_native_ops(
             hwnd,
             false,
-            || 10 + u64::from(initially_zoomed),
+            || Some(10 + u64::from(initially_zoomed)),
             |_| panic!("fresh app fullscreen must not be restored into its tile"),
             |_| false,
         );
@@ -276,7 +276,7 @@ fn test_late_maximize_event_wrapper_uses_press_count_to_queue_restore() {
     let hwnd = owner.window_id;
     let mut state = native_admission_state(hwnd);
     state.paused = true;
-    state.injected_press_count = 10;
+    state.injected_press_count = Some(10);
     assert_eq!(
         state.try_admit_window_at_with_native_ops(
             hwnd,
