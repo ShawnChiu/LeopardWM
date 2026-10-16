@@ -46,7 +46,7 @@ impl SettingsWindowHandle {
     /// Returns `None` if a settings window is already open.
     pub fn open(
         config: Config,
-        event_tx: mpsc::Sender<SettingsEvent>,
+        event_tx: std::sync::Weak<mpsc::Sender<SettingsEvent>>,
         initial_section: Option<&str>,
         high_contrast: bool,
         failed_binds: Vec<String>,

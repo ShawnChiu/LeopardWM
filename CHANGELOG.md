@@ -6,6 +6,7 @@ All notable changes to LeopardWM will be documented in this file.
 
 ### Fixes
 
+- **Quitting or restarting LeopardWM no longer takes about 5 extra seconds.**
 - **Firefox reopened after closing maximized now settles into its tile with its startup placeholder enabled.** Releasing the launch key or moving the mouse no longer stops LeopardWM from undoing Firefox's startup maximize, so users no longer need to turn off `browser.startup.preXulSkeletonUI`. (#104)
 - **Workspace scrolling is smoother and more even in both directions.** Slow-redrawing apps such as Zen Browser now slide in step with other windows instead of trailing behind and jumping into place. Tab bars, the focus border and the tray no longer hold up each animation frame, and each frame waits briefly for windows that apply moves slowly.
 - **Shortcuts that use Alt without Ctrl, such as Alt+J, no longer leave the focused app's menu bar active after they fire.** LeopardWM now taps an unused key before Alt is released, the same way it already taps Ctrl to keep Win shortcuts from opening Start. (#145)

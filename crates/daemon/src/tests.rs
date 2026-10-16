@@ -85,6 +85,38 @@ fn pump_window_style_worker_until_idle() {
     }
 }
 
+#[tokio::test]
+#[allow(clippy::arc_with_non_send_sync)]
+async fn shutdown_closes_state_forwarders_while_state_is_alive() {
+    let state = Arc::new(Mutex::new(AppState::new_with_config(
+        test_config(),
+        test_monitors(),
+    )));
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    let mut handles = Vec::new();
+    spawn_tab_forwarders(&state, &event_tx, &mut handles).await;
+    spawn_overview_forwarder(&state, &event_tx, &mut handles).await;
+    assert_eq!(handles.len(), 3);
+    let pending_dialog = Arc::downgrade(state.lock().await.rename_result_tx.as_ref().unwrap());
+
+    state.lock().await.close_forwarding_channels();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    for handle in handles {
+        let name = handle.thread().name().unwrap().to_owned();
+        let mut handle = Some(handle);
+        assert!(
+            join_with_timeout(
+                &mut handle,
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            ),
+            "{name} did not exit within the shutdown bound while AppState is alive"
+        );
+    }
+    assert!(pending_dialog.upgrade().is_none());
+    drop(state);
+}
+
 fn test_config() -> Config {
     Config::default()
 }
@@ -12598,6 +12630,7 @@ async fn test_animation_frame_handler_updates_border_once() {
     #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(Mutex::new(app));
     let (settings_tx, _settings_rx) = std::sync::mpsc::channel();
+    let settings_tx = Arc::new(settings_tx);
     let quit = quit_fallback::QuitFallback::new(
         cancelled,
         epoch,
@@ -21320,6 +21353,7 @@ async fn test_taskbar_buttons_paused_tray_selection_keeps_buttons_shown_until_re
     let state = Arc::new(Mutex::new(state));
     let (event_tx, _event_rx) = mpsc::channel(8);
     let (settings_tx, _settings_rx) = std::sync::mpsc::channel();
+    let settings_tx = Arc::new(settings_tx);
     let worker =
         animation_worker::AnimationWorkerHandle::spawn(event_tx.clone(), cancelled.clone())
             .unwrap();

@@ -780,7 +780,7 @@ struct EventLoopCtx<'a> {
     hotkey_state: &'a mut HotkeyState,
     tray_manager: &'a Option<tray::TrayManager>,
     snap_hint_overlay: &'a Option<OverlayWindow>,
-    settings_sync_tx: &'a std::sync::mpsc::Sender<settings::SettingsEvent>,
+    settings_sync_tx: &'a Arc<std::sync::mpsc::Sender<settings::SettingsEvent>>,
     settings_handle: &'a mut Option<settings::SettingsWindowHandle>,
     animation_worker: &'a animation_worker::AnimationWorkerHandle,
     animation_active: &'a mut bool,
@@ -1255,7 +1255,7 @@ async fn spawn_tab_forwarders(
         std::sync::mpsc::channel::<crate::events::TabRenameResult>();
     {
         let mut state_guard = state.lock().await;
-        state_guard.rename_result_tx = Some(rename_result_tx);
+        state_guard.rename_result_tx = Some(Arc::new(rename_result_tx));
     }
     {
         let event_tx_for_rename = event_tx.clone();
@@ -2488,7 +2488,7 @@ async fn handle_tray_event(ctx: &mut EventLoopCtx<'_>, tray_event: tray::TrayEve
             };
             *ctx.settings_handle = settings::SettingsWindowHandle::open(
                 config_snapshot,
-                ctx.settings_sync_tx.clone(),
+                Arc::downgrade(ctx.settings_sync_tx),
                 None,
                 hc,
                 ctx.hotkey_state.failed_binds.clone(),
@@ -2503,7 +2503,7 @@ async fn handle_tray_event(ctx: &mut EventLoopCtx<'_>, tray_event: tray::TrayEve
             };
             *ctx.settings_handle = settings::SettingsWindowHandle::open(
                 config_snapshot,
-                ctx.settings_sync_tx.clone(),
+                Arc::downgrade(ctx.settings_sync_tx),
                 Some("about"),
                 hc,
                 ctx.hotkey_state.failed_binds.clone(),
@@ -2924,7 +2924,7 @@ async fn handle_tab_action_with_restore(
                     .and_then(|ws| ws.column(column_idx))
                     .and_then(|col| col.get(tab_idx));
                 let icon = target_hwnd_opt.and_then(leopardwm_platform_win32::get_window_icon);
-                let tx = s.rename_result_tx.clone();
+                let tx = s.rename_result_tx.as_ref().map(Arc::downgrade);
                 let guard = s.rename_dialog_active.clone();
                 // Second clone — needed for the spawn-failure
                 // path below since the closure consumes `guard`.
@@ -2947,7 +2947,7 @@ async fn handle_tab_action_with_restore(
                                         warn!("Rename popup failed to open: {}", e);
                                         None
                                     });
-                                if let Some(sender) = tx {
+                                if let Some(sender) = tx.and_then(|tx| tx.upgrade()) {
                                     let _ = sender.send(crate::events::TabRenameResult {
                                         monitor,
                                         workspace_idx,
@@ -3939,6 +3939,7 @@ async fn main() -> Result<()> {
 
     // Settings window forwarding channel + handle
     let (settings_sync_tx, settings_sync_rx) = std::sync::mpsc::channel();
+    let settings_sync_tx = Arc::new(settings_sync_tx);
     match spawn_forwarding_thread(
         "settings-fwd",
         settings_sync_rx,
@@ -4155,6 +4156,14 @@ async fn main() -> Result<()> {
     ctx.gestures.stop();
     stop_animation_worker_and_run_recovery(animation_worker, &state, event_rx).await;
     quit_fallback.complete();
+
+    state.lock().await.close_forwarding_channels();
+    leopardwm_platform_win32::clear_system_event_senders();
+    drop(_hook_handle);
+    drop(mouse_hook_handle);
+    drop(tray_manager);
+    drop(_settings_handle);
+    drop(settings_sync_tx);
 
     // Join forwarding threads with timeout for graceful shutdown
     info!("Waiting for forwarding threads to exit...");

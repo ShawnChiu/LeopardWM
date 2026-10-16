@@ -190,7 +190,7 @@ impl HasDisplayHandle for Win32Handle {
 /// Build and run the settings window. Blocks until the window is closed.
 pub fn run_settings_window(
     config: Config,
-    event_tx: mpsc::Sender<SettingsEvent>,
+    event_tx: std::sync::Weak<mpsc::Sender<SettingsEvent>>,
     initial_section: Option<&str>,
     high_contrast: bool,
     failed_binds: Vec<String>,
@@ -334,7 +334,9 @@ pub fn run_settings_window(
                 config_json, catalog_json, failed_binds_json, crate::locale::page_json(&config.appearance.language), serde_json::to_string(&config.appearance.language)?, serde_json::to_string(env!("CARGO_PKG_VERSION"))?, crate::locale::languages_json()
             ))
             .with_ipc_handler(move |req| {
-                handle_ipc(req.body(), &event_tx, hwnd);
+                if let Some(event_tx) = event_tx.upgrade() {
+                    handle_ipc(req.body(), &event_tx, hwnd);
+                }
             })
             .with_transparent(true)
             .with_background_color((0, 0, 0, 0))
@@ -428,7 +430,9 @@ pub fn run_settings_window(
             }
         }
         // Let the daemon resume hotkeys if the window closed mid-recording.
-        let _ = close_tx.send(SettingsEvent::Closed);
+        if let Some(close_tx) = close_tx.upgrade() {
+            let _ = close_tx.send(SettingsEvent::Closed);
+        }
 
         // Hide window before tearing down WebView2 to prevent white flash.
         let _ = ShowWindow(hwnd, SW_HIDE);

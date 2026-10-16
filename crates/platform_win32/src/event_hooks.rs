@@ -90,7 +90,7 @@ fn focused_window_event(window_id: WindowId, event_time_ms: u32) -> WindowEvent 
 ///
 /// This uses a thread-safe channel because WinEvent callbacks run on Windows'
 /// internal thread pool and we need to forward events to the async runtime.
-static EVENT_SENDER: std::sync::Mutex<Option<mpsc::Sender<WindowEvent>>> =
+static EVENT_SENDER: std::sync::Mutex<Option<std::sync::Arc<mpsc::Sender<WindowEvent>>>> =
     std::sync::Mutex::new(None);
 
 pub(crate) fn set_event_sender(sender: mpsc::Sender<WindowEvent>) -> Result<(), crate::Win32Error> {
@@ -102,7 +102,7 @@ pub(crate) fn set_event_sender(sender: mpsc::Sender<WindowEvent>) -> Result<(), 
             "Event sender already initialized - drop existing EventHookHandle first".to_string(),
         ));
     }
-    *guard = Some(sender);
+    *guard = Some(std::sync::Arc::new(sender));
     Ok(())
 }
 
@@ -113,7 +113,12 @@ pub(crate) fn clear_event_sender() {
 
 pub(crate) fn clone_event_sender() -> Option<mpsc::Sender<WindowEvent>> {
     let guard = EVENT_SENDER.lock().unwrap_or_else(recover_poisoned_mutex);
-    guard.as_ref().cloned()
+    guard.as_ref().map(|sender| sender.as_ref().clone())
+}
+
+pub(crate) fn weak_event_sender() -> Option<std::sync::Weak<mpsc::Sender<WindowEvent>>> {
+    let guard = EVENT_SENDER.lock().unwrap_or_else(recover_poisoned_mutex);
+    guard.as_ref().map(std::sync::Arc::downgrade)
 }
 
 /// Handle for installed event hooks.

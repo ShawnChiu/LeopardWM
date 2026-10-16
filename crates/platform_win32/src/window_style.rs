@@ -333,7 +333,7 @@ enum WindowStyleRequest {
         window_id: WindowId,
         hwnd: usize,
         identity: WindowIdentity,
-        completion_sender: Option<Sender<crate::WindowEvent>>,
+        completion_sender: Option<std::sync::Weak<Sender<crate::WindowEvent>>>,
     },
     Barrier(SyncSender<()>),
 }
@@ -373,7 +373,9 @@ fn window_style_worker() -> &'static Sender<WindowStyleRequest> {
                             completion_sender,
                         } => {
                             restore_maximized_window_with(window_id, hwnd, identity, |event| {
-                                if let Some(sender) = completion_sender {
+                                if let Some(sender) =
+                                    completion_sender.and_then(|sender| sender.upgrade())
+                                {
                                     let _ = sender.send(event);
                                 }
                             });
@@ -399,7 +401,7 @@ pub fn queue_maximized_window_restore(window_id: WindowId) -> Result<bool, Win32
             window_id
         )));
     }
-    let completion_sender = crate::event_hooks::clone_event_sender();
+    let completion_sender = crate::event_hooks::weak_event_sender();
     let will_report = completion_sender.is_some();
     window_style_worker()
         .send(WindowStyleRequest::RestoreMaximized {
@@ -1807,7 +1809,7 @@ mod tests {
     }
 
     #[test]
-    fn test_queued_maximized_restore_completion_survives_sender_clear() {
+    fn test_queued_maximized_restore_does_not_hold_channel_open_after_shutdown() {
         let _sender_lock = crate::event_hooks::GLOBAL_SENDER_TEST_LOCK
             .lock()
             .unwrap_or_else(crate::recover_poisoned_mutex);
@@ -1816,18 +1818,17 @@ mod tests {
         let _sender_fixture = CompletionSenderFixture::install(sender);
         let fixture = HiddenFramedFixture::create();
         let window_id = fixture.window_id();
-        let token = crate::window_identity::stamp_managed_lifetime_token(window_id).unwrap();
+        crate::window_identity::stamp_managed_lifetime_token(window_id).unwrap();
         let blocker = block_style_worker("LeopardWMCompletionSenderCleared");
         queue_maximized_window_restore(window_id).unwrap();
         crate::event_hooks::clear_event_sender();
+        let completion = events.recv_timeout(Duration::from_secs(1));
         blocker.0.release();
         pump_until_window_style_idle();
-        assert!(matches!(events.recv_timeout(Duration::from_millis(200)),
-            Ok(crate::WindowEvent::MaximizedAdmissionRestored {
-                window_id: reported_id,
-                managed_lifetime_token: reported_token,
-                still_maximized: false,
-            }) if reported_id == window_id && reported_token == token));
+        assert_eq!(
+            completion.unwrap_err(),
+            mpsc::RecvTimeoutError::Disconnected
+        );
     }
 
     #[test]

@@ -920,7 +920,8 @@ pub(crate) struct AppState {
     /// startup (parallel to `install_tab_strip`); the spawned dialog
     /// thread posts a `TabRenameResult` here, which a forwarder thread
     /// translates to `DaemonEvent::TabRenameSubmitted`.
-    pub(crate) rename_result_tx: Option<std::sync::mpsc::Sender<crate::events::TabRenameResult>>,
+    pub(crate) rename_result_tx:
+        Option<Arc<std::sync::mpsc::Sender<crate::events::TabRenameResult>>>,
 }
 
 /// Suppresses stale focus notifications from the exact HWND left behind by a
@@ -1548,16 +1549,10 @@ impl AppState {
     /// the overlay receives `tab_action_tx` and posts to it on
     /// WM_LBUTTONDOWN / WM_MBUTTONUP / WM_RBUTTONUP / close-X hit; main.rs
     /// drains the matching receiver and routes the action.
-    ///
-    /// Skipped in test builds (would create real layered DWM windows).
     pub(crate) fn install_tab_strip(
         &mut self,
         tab_action_tx: std::sync::mpsc::Sender<leopardwm_platform_win32::tab_strip::TabActionEvent>,
     ) {
-        if cfg!(test) {
-            drop(tab_action_tx);
-            return;
-        }
         // Stash the sender for on-demand spawning. `update_tab_strip`
         // creates one `TabStripOverlay` per tabbed column the next time
         // it runs — all of them share this cloned sender so click /
@@ -1567,18 +1562,19 @@ impl AppState {
 
     /// Install the overview event sender. The overlay itself is created
     /// lazily on first `show_overview`; this just stashes the channel.
-    ///
-    /// Skipped in test builds (the overlay would create a real top-level
-    /// window) — with no sender, `show_overview` skips overlay creation.
     pub(crate) fn install_overview(
         &mut self,
         event_tx: std::sync::mpsc::Sender<leopardwm_platform_win32::overview::OverviewEvent>,
     ) {
-        if cfg!(test) {
-            drop(event_tx);
-            return;
-        }
         self.overview_event_tx = Some(event_tx);
+    }
+
+    pub(crate) fn close_forwarding_channels(&mut self) {
+        self.tab_strip_overlays.clear();
+        self.tab_strip_action_tx.take();
+        self.overview_overlay.take();
+        self.overview_event_tx.take();
+        self.rename_result_tx.take();
     }
 
     /// Install the debounced save-request sender. Stashed at startup; the

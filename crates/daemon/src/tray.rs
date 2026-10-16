@@ -214,6 +214,7 @@ pub struct QuickToggleState {
 /// right-click.
 pub struct TrayManager {
     shared: Arc<SharedState>,
+    _event_sender: Arc<mpsc::Sender<TrayEvent>>,
     /// Win32 thread ID of the message-loop thread (for `PostThreadMessageW`).
     msg_thread_id: u32,
     /// Join handle for the message-loop thread.
@@ -268,12 +269,16 @@ impl TrayManager {
         quit_thread_id.store(thread_id, Ordering::SeqCst);
 
         // Spawn thread to listen for menu events and forward them.
-        let menu_sender = event_sender.clone();
+        let event_sender = Arc::new(event_sender);
+        let menu_sender = Arc::downgrade(&event_sender);
         std::thread::Builder::new()
             .name("tray-menu-events".into())
             .spawn(move || {
                 let rx = MenuEvent::receiver();
                 while let Ok(event) = rx.recv() {
+                    let Some(menu_sender) = menu_sender.upgrade() else {
+                        break;
+                    };
                     if dispatch_menu_event(event.id.0.as_str(), &menu_sender, &quit_fallback)
                         .is_err()
                     {
@@ -287,11 +292,15 @@ impl TrayManager {
         // (single/right click keep showing the context menu).
         // TrayIconEvent::receiver() is one process-global stream; this must
         // stay the only consumer or readers would compete for events.
+        let click_sender = Arc::downgrade(&event_sender);
         std::thread::Builder::new()
             .name("tray-icon-events".into())
             .spawn(move || {
                 let rx = tray_icon::TrayIconEvent::receiver();
                 while let Ok(event) = rx.recv() {
+                    let Some(event_sender) = click_sender.upgrade() else {
+                        break;
+                    };
                     if matches!(event, tray_icon::TrayIconEvent::DoubleClick { .. })
                         && event_sender.send(TrayEvent::OpenConfig).is_err()
                     {
@@ -305,6 +314,7 @@ impl TrayManager {
 
         Ok(Self {
             shared,
+            _event_sender: event_sender,
             msg_thread_id: thread_id,
             msg_thread: Some(thread),
         })

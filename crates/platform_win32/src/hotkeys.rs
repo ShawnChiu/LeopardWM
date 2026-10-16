@@ -298,6 +298,22 @@ pub fn set_suspend_resume_sender(
     Ok(())
 }
 
+/// Close daemon-owned forwarding channels only at final shutdown, not window recreation.
+pub fn clear_system_event_senders() {
+    DISPLAY_CHANGE_SENDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    SUSPEND_RESUME_SENDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    POWER_STATE_SENDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+}
+
 /// Register the synchronous recovery callback for committed session end.
 ///
 /// Call this before `register_system_events`. The callback survives system-event
@@ -843,6 +859,50 @@ mod tests {
     use super::*;
 
     static HOTKEY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn shutdown_disconnects_system_event_channels() {
+        let _guard = HOTKEY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex);
+        let display_previous = DISPLAY_CHANGE_SENDER
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex)
+            .take();
+        let suspend_previous = SUSPEND_RESUME_SENDER
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex)
+            .take();
+        let power_previous = POWER_STATE_SENDER
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex)
+            .take();
+        let (display_tx, display_rx) = mpsc::channel();
+        let (suspend_tx, suspend_rx) = mpsc::channel();
+        let (power_tx, power_rx) = mpsc::channel();
+        set_display_change_sender(display_tx).unwrap();
+        set_suspend_resume_sender(suspend_tx).unwrap();
+        set_power_state_sender(power_tx).unwrap();
+
+        clear_system_event_senders();
+
+        let bound = std::time::Duration::from_secs(1);
+        let display = display_rx.recv_timeout(bound);
+        let suspend = suspend_rx.recv_timeout(bound);
+        let power = power_rx.recv_timeout(bound);
+        *DISPLAY_CHANGE_SENDER
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex) = display_previous;
+        *SUSPEND_RESUME_SENDER
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex) = suspend_previous;
+        *POWER_STATE_SENDER
+            .lock()
+            .unwrap_or_else(recover_poisoned_mutex) = power_previous;
+        assert_eq!(display.unwrap_err(), mpsc::RecvTimeoutError::Disconnected);
+        assert_eq!(suspend.unwrap_err(), mpsc::RecvTimeoutError::Disconnected);
+        assert_eq!(power.unwrap_err(), mpsc::RecvTimeoutError::Disconnected);
+    }
 
     #[test]
     fn suspend_resume_messages_forward_only_after_registration() {
