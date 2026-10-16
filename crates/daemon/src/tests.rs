@@ -12655,81 +12655,97 @@ async fn test_animation_worker_paces_current_move_before_reporting_frame() {
     use leopardwm_core_layout::{Visibility, WindowPlacement};
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
-    struct ClearAsyncOnDrop(u64);
-    impl Drop for ClearAsyncOnDrop {
+    struct DelayedOwner {
+        window_id: u64,
+        start: std::sync::mpsc::Sender<()>,
+        stop: std::sync::mpsc::Sender<()>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for DelayedOwner {
         fn drop(&mut self) {
-            leopardwm_platform_win32::clear_suspected_oversize(self.0);
+            let _ = self.start.send(());
+            let _ = self.stop.send(());
+            if let Some(join) = self.join.take() {
+                join.join().unwrap();
+            }
+            leopardwm_platform_win32::clear_suspected_oversize(self.window_id);
         }
     }
 
-    async fn run_frame(window_id: u64) -> Duration {
-        assert!(!leopardwm_platform_win32::pending_async_position(window_id));
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let worker = animation_worker::AnimationWorkerHandle::spawn(
-            event_tx,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
-        worker
-            .send_frame(animation_worker::FrameRequest {
-                placements: vec![WindowPlacement {
-                    window_id,
-                    rect: Rect::new(500, 100, 300, 600),
-                    visibility: Visibility::Visible,
-                    column_index: 0,
-                }],
-                ghost_updates: Vec::new(),
-                platform_config: leopardwm_platform_win32::PlatformConfig::default(),
-                physical_request_id: 1,
-                physical_invalidation_id: 1,
-                physical_dispatch_request_id: Arc::new(AtomicU64::new(1)),
-                physical_invalidation: Arc::new(AtomicU64::new(1)),
-            })
-            .unwrap();
-        let Some(DaemonEvent::AnimationFrameApplied(frame)) =
-            tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-                .await
-                .unwrap()
-        else {
-            panic!("expected worker frame completion");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (start_tx, start_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let join = std::thread::spawn(move || {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
         };
-        assert!(frame.apply_result.is_ok());
-        frame.frame_time
-    }
-
-    let control_window = OffscreenResizeOwner::new();
-    let _control_cleanup = ClearAsyncOnDrop(control_window.hwnd);
-    control_window.resize(100, 300);
-    let control = run_frame(control_window.hwnd).await;
+        let window = ResizeTestWindow::new(300);
+        ready_tx.send(window.id()).unwrap();
+        if start_rx.recv().is_err() {
+            return;
+        }
+        // At 60 Hz, an unpaced apply plus DwmFlush reports within about 18 ms.
+        // Pump at 25 ms: later than that report, but inside the subsequent 33 ms
+        // move-drain budget. The assertion checks state, not frame-time variance.
+        std::thread::sleep(Duration::from_millis(25));
+        while stop_rx.try_recv() == Err(std::sync::mpsc::TryRecvError::Empty) {
+            let mut message = MSG::default();
+            unsafe {
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&message);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    let owner = DelayedOwner {
+        window_id: ready_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        start: start_tx,
+        stop: stop_tx,
+        join: Some(join),
+    };
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        owner.window_id
+    ));
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    let worker =
+        animation_worker::AnimationWorkerHandle::spawn(event_tx, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+    worker
+        .send_frame(animation_worker::FrameRequest {
+            placements: vec![WindowPlacement {
+                window_id: owner.window_id,
+                rect: Rect::new(500, 100, 300, 600),
+                visibility: Visibility::Visible,
+                column_index: 0,
+            }],
+            ghost_updates: Vec::new(),
+            platform_config: leopardwm_platform_win32::PlatformConfig::default(),
+            physical_request_id: 1,
+            physical_invalidation_id: 1,
+            physical_dispatch_request_id: Arc::new(AtomicU64::new(1)),
+            physical_invalidation: Arc::new(AtomicU64::new(1)),
+        })
+        .unwrap();
+    owner.start.send(()).unwrap();
+    let Some(DaemonEvent::AnimationFrameApplied(frame)) =
+        tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+    else {
+        panic!("expected worker frame completion");
+    };
+    assert!(frame.apply_result.is_ok());
     assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(control_window.hwnd)
+        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
             .unwrap()
             .x,
         500,
-        "the pumping owner must apply the control move"
+        "the submitted move must apply before the worker reports the frame"
     );
-    assert!(!leopardwm_platform_win32::pending_async_position(
-        control_window.hwnd
-    ));
-
-    let window = ResizeTestWindow::new(300);
-    let _cleanup = ClearAsyncOnDrop(window.id());
-    let held = run_frame(window.id()).await;
-    assert!(leopardwm_platform_win32::pending_async_position(
-        window.id()
-    ));
-    assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(window.id())
-            .unwrap()
-            .x,
-        100,
-        "the owner must still be holding the newly submitted move"
-    );
-    eprintln!("animation pacing: control={control:?}, held={held:?}");
-    // Allow 8 ms of apply/vsync variance around the held move's 33 ms budget.
     assert!(
-        held >= control + Duration::from_millis(25),
-        "frame reported without pacing its own pending move: control={control:?}, held={held:?}"
+        !leopardwm_platform_win32::pending_async_position(owner.window_id),
+        "the submitted move must drain before the worker reports the frame"
     );
 }
 
