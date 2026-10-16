@@ -1703,6 +1703,13 @@ where
             }
         })
         .collect();
+    for entry in &synchronous_entries {
+        if !entry.flags.contains(SWP_ASYNCWINDOWPOS)
+            && (post_animation_landing || deferrals.probe_expired.contains(&entry.window_id))
+        {
+            note_synchronous_move(entry.window_id);
+        }
+    }
     let batch_failures = position_batch(&synchronous_entries);
     for (entry, origin) in synchronous_entries.iter().zip(origins) {
         if batch_failures.contains(&entry.window_id) {
@@ -1712,12 +1719,6 @@ where
             record_async_position(entry, origin);
         } else if !post_animation_landing && !deferrals.probe_expired.contains(&entry.window_id) {
             clear_async_position(entry.window_id);
-        } else if let Some(submission) = lock_async_positions()
-            .as_mut()
-            .and_then(|submissions| submissions.get_mut(&entry.window_id))
-        {
-            // A synchronous landing cannot prove that the owner applied the queued endpoint.
-            submission.synchronous = true;
         }
     }
     failures.extend(batch_failures);
@@ -1811,6 +1812,16 @@ pub(crate) fn observed_async_position(hwnd: HWND) -> Option<(i32, i32)> {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(hwnd, &mut rect).ok()? };
     Some((rect.left, rect.top))
+}
+
+pub(crate) fn note_synchronous_move(window_id: WindowId) {
+    if let Some(submission) = lock_async_positions()
+        .as_mut()
+        .and_then(|submissions| submissions.get_mut(&window_id))
+    {
+        // Flag before moving: an observer can retire the record as soon as the window lands.
+        submission.synchronous = true;
+    }
 }
 
 fn record_async_position(entry: &DeferEntry, origin: Option<(i32, i32)>) {
@@ -4668,7 +4679,9 @@ mod tests {
         let _owner_sweep = OWNER_SWEEP
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for drain_via_entries in [false, true] {
+        for (drain_via_entries, observe_during_batch) in
+            [(false, false), (true, false), (false, true)]
+        {
             let window = HiddenPopup::new(48, 48, 160, 120);
             let _cleanup = ClearPlacementOnDrop(window.id);
             let mut entry = DeferEntry {
@@ -4687,7 +4700,11 @@ mod tests {
                 |_| Ok(()),
                 |entries| {
                     assert_eq!(entries.len(), 1);
-                    position_entries_batch(entries)
+                    let failures = position_entries_batch(entries);
+                    if observe_during_batch {
+                        assert!(!pending_async_position(window.id));
+                    }
+                    failures
                 },
             );
             assert_eq!(applied, 1);
@@ -4719,6 +4736,44 @@ mod tests {
                 "a synchronous landing earned queued-move credit"
             );
         }
+    }
+
+    #[test]
+    fn queued_move_direct_position_does_not_credit_never_applying_owner() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = HiddenPopup::new(48, 48, 160, 120);
+        let _cleanup = ClearPlacementOnDrop(window.id);
+        let target = Rect::new(300, 100, 160, 120);
+        let mut entry = DeferEntry {
+            hwnd: window.hwnd,
+            x: target.x,
+            y: target.y,
+            w: target.width,
+            h: target.height,
+            flags: SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+            ..fresh_inset_entry(window.id, 0)
+        };
+        record_async_position(&entry, observed_async_position(window.hwnd));
+        crate::visibility::position_window(window.id, target).unwrap();
+        assert_eq!(window.rect(), target);
+        assert!(!pending_async_position(window.id));
+        assert!(!lock_async_positions()
+            .as_ref()
+            .unwrap()
+            .contains_key(&window.id));
+
+        entry.x = 500;
+        record_async_position(&entry, observed_async_position(window.hwnd));
+        std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
+        prepare_self_move_owner_probe(&window);
+        let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
+        assert!(deferrals.probe_expired.contains(&window.id));
+        assert!(
+            mover::is_marked(window.id),
+            "direct synchronous positioning earned queued-move credit"
+        );
     }
 
     #[test]

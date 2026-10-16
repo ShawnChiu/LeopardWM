@@ -93,6 +93,7 @@ fn move_window_offscreen_with_flags(
 /// layout pass would otherwise leave it stale).
 pub fn position_window(window_id: WindowId, rect: Rect) -> Result<(), Win32Error> {
     let hwnd = window_id_to_hwnd(window_id)?;
+    crate::placement::note_synchronous_move(window_id);
     unsafe {
         SetWindowPos(
             hwnd,
@@ -200,6 +201,9 @@ fn restore_window_if_offscreen_to_work_area(
 
         if !crate::placement::can_recover_placement_owner(window_id, hwnd, None) {
             return Ok(false);
+        }
+        if !async_flag.contains(SWP_ASYNCWINDOWPOS) {
+            crate::placement::note_synchronous_move(window_id);
         }
         if let Err(e) = SetWindowPos(
             hwnd,
