@@ -518,7 +518,10 @@ fn setup_input_hooks(
     let mouse_presses = match leopardwm_platform_win32::install_mouse_press_hook() {
         Ok(handle) => Some(handle),
         Err(error) => {
-            warn!("Mouse press hook unavailable; mouse presses will not end post-admission maximize restores: {}", error);
+            warn!(
+                "Mouse press hook unavailable; post-admission maximize restores are disabled: {}",
+                error
+            );
             None
         }
     };
