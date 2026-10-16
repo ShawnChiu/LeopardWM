@@ -1786,7 +1786,7 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
                     deferrals.pending.insert(window_id);
                 }
                 AsyncPositionState::ProbeExpired { never_applied } => {
-                    if never_applied && !has_applied_queued_move(window_id) {
+                    if never_applied && !take_applied_queued_move(window_id) {
                         mover::mark(window_id);
                     }
                     submissions.remove(&window_id);
@@ -1997,7 +1997,7 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
         }
         AsyncPositionState::Pending => true,
         AsyncPositionState::ProbeExpired { never_applied } => {
-            if never_applied && !has_applied_queued_move(window_id) {
+            if never_applied && !take_applied_queued_move(window_id) {
                 mover::mark(window_id);
             }
             drop(guard);
@@ -2169,10 +2169,11 @@ fn credit_applied_queued_move(window_id: WindowId, submission: AsyncPositionSubm
     }
 }
 
-fn has_applied_queued_move(window_id: WindowId) -> bool {
+fn take_applied_queued_move(window_id: WindowId) -> bool {
+    // Forgive one stalled burst per real drain; an owner that stops applying moves is marked next time.
     lock_applied_queued_moves()
-        .as_ref()
-        .is_some_and(|windows| windows.contains(&window_id))
+        .as_mut()
+        .is_some_and(|windows| windows.remove(&window_id))
 }
 
 fn lock_queued_recoveries(
@@ -4558,78 +4559,109 @@ mod tests {
     }
 
     #[test]
-    fn queued_move_late_applier_does_not_mark_until_lifetime_ends() {
+    fn queued_move_credit_forgives_one_stall_per_drain_and_resets_on_unmanage() {
         let _owner_sweep = OWNER_SWEEP
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[derive(Clone, Copy, Debug)]
+        enum AfterDrain {
+            StallTwice,
+            RecoverBetweenStalls,
+            EndLifetime,
+        }
         for drain_via_entries in [false, true] {
-            let window = HiddenPopup::new(48, 48, 160, 120);
-            let _cleanup = ClearPlacementOnDrop(window.id);
-            let mut entry = DeferEntry {
-                hwnd: window.hwnd,
-                x: 300,
-                y: 100,
-                w: 160,
-                h: 120,
-                flags: SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
-                ..fresh_inset_entry(window.id, 0)
-            };
-            record_async_position(&entry, observed_async_position(window.hwnd));
-            unsafe {
-                SetWindowPos(
-                    window.hwnd,
-                    None,
-                    entry.x,
-                    entry.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                )
-                .unwrap();
-            }
-            assert_eq!(observed_async_position(window.hwnd), Some((300, 100)));
-            if drain_via_entries {
-                let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
-                assert!(deferrals.pending.is_empty());
-                assert!(deferrals.probe_expired.is_empty());
-            } else {
-                assert!(!pending_async_position(window.id));
-            }
-            assert!(!lock_async_positions()
-                .as_ref()
-                .unwrap()
-                .contains_key(&window.id));
+            for scenario in [
+                AfterDrain::StallTwice,
+                AfterDrain::RecoverBetweenStalls,
+                AfterDrain::EndLifetime,
+            ] {
+                let window = HiddenPopup::new(48, 48, 160, 120);
+                let _cleanup = ClearPlacementOnDrop(window.id);
+                let mut entry = DeferEntry {
+                    hwnd: window.hwnd,
+                    x: 300,
+                    y: 100,
+                    w: 160,
+                    h: 120,
+                    flags: SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+                    ..fresh_inset_entry(window.id, 0)
+                };
+                let apply_and_drain = |entry: &DeferEntry| {
+                    record_async_position(entry, observed_async_position(window.hwnd));
+                    unsafe {
+                        SetWindowPos(
+                            window.hwnd,
+                            None,
+                            entry.x,
+                            entry.y,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                        )
+                        .unwrap();
+                    }
+                    assert_eq!(
+                        observed_async_position(window.hwnd),
+                        Some((entry.x, entry.y))
+                    );
+                    if drain_via_entries {
+                        let deferrals = pending_async_entries(std::slice::from_ref(entry), true);
+                        assert!(deferrals.pending.is_empty());
+                        assert!(deferrals.probe_expired.is_empty());
+                    } else {
+                        assert!(!pending_async_position(window.id));
+                    }
+                    assert!(!lock_async_positions()
+                        .as_ref()
+                        .unwrap()
+                        .contains_key(&window.id));
+                };
+                let stall = |entry: &DeferEntry| {
+                    record_async_position(entry, observed_async_position(window.hwnd));
+                    std::thread::sleep(
+                        RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10),
+                    );
+                    prepare_self_move_owner_probe(&window);
+                    if drain_via_entries {
+                        assert!(!pending_async_position(window.id));
+                    } else {
+                        let deferrals = pending_async_entries(std::slice::from_ref(entry), true);
+                        assert!(deferrals.probe_expired.contains(&window.id));
+                        assert!(deferrals.pending.is_empty());
+                    }
+                    assert!(!lock_async_positions()
+                        .as_ref()
+                        .unwrap()
+                        .contains_key(&window.id));
+                };
+                apply_and_drain(&entry);
+                entry.x = 500;
+                if matches!(scenario, AfterDrain::EndLifetime) {
+                    clear_suspected_oversize(window.id);
+                    stall(&entry);
+                    assert!(
+                        mover::is_marked(window.id),
+                        "unspent credit survived unmanagement"
+                    );
+                    continue;
+                }
 
-            entry.x = 500;
-            record_async_position(&entry, observed_async_position(window.hwnd));
-            std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
-            prepare_self_move_owner_probe(&window);
-            if drain_via_entries {
-                assert!(!pending_async_position(window.id));
-            } else {
-                let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
-                assert!(deferrals.probe_expired.contains(&window.id));
-                assert!(deferrals.pending.is_empty());
+                stall(&entry);
+                assert!(
+                    !mover::is_marked(window.id),
+                    "the first stalled burst was not forgiven"
+                );
+                if matches!(scenario, AfterDrain::RecoverBetweenStalls) {
+                    apply_and_drain(&entry);
+                    entry.x = 700;
+                }
+                stall(&entry);
+                assert_eq!(
+                    mover::is_marked(window.id),
+                    matches!(scenario, AfterDrain::StallTwice),
+                    "unexpected marking after the second stall ({scenario:?}, drain_via_entries={drain_via_entries})",
+                );
             }
-            assert!(
-                !mover::is_marked(window.id),
-                "an owner that applied a previous queued move was marked after a stalled burst",
-            );
-            assert!(!lock_async_positions()
-                .as_ref()
-                .unwrap()
-                .contains_key(&window.id));
-
-            clear_suspected_oversize(window.id);
-            record_async_position(&entry, observed_async_position(window.hwnd));
-            std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
-            prepare_self_move_owner_probe(&window);
-            let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
-            assert!(deferrals.probe_expired.contains(&window.id));
-            assert!(
-                mover::is_marked(window.id),
-                "queued-move credit survived unmanagement"
-            );
         }
     }
 
