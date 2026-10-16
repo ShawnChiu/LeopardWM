@@ -2000,6 +2000,8 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
             if never_applied && !take_applied_queued_move(window_id) {
                 mover::mark(window_id);
             }
+            // Remove under the lock so a concurrent check of this expiry cannot spend the credit twice.
+            submissions.remove(&window_id);
             drop(guard);
             clear_async_position(window_id);
             false
