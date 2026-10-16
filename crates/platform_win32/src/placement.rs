@@ -4212,37 +4212,17 @@ mod tests {
         let _cleanup = windows
             .each_ref()
             .map(|window| ClearPlacementOnDrop(window.id));
-        let placements = windows.each_ref().map(|window| {
-            let entry = DeferEntry {
-                x: 300,
-                y: 100,
-                ..fresh_inset_entry(window.id, 0)
-            };
-            record_async_position(&entry, observed_async_position(window.hwnd));
-            offscreen_placement(
-                window.id,
-                Rect::new(400, 100, 160, 120),
-                Visibility::Visible,
-            )
-        });
-        std::thread::scope(|scope| {
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-            let waiter = scope.spawn(move || {
-                ready_tx.send(()).unwrap();
-                wait_for_animation_positions(&placements, || false);
-                placements.map(|placement| {
-                    observed_async_position(window_id_to_hwnd(placement.window_id).unwrap())
-                })
-            });
-            ready_rx.recv().unwrap();
-            for window in &windows {
-                std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut conclusive = false;
+        let mut issue_delays = Vec::new();
+        for _ in 0..5 {
+            for (window, (x, y)) in windows.iter().zip([(48, 48), (90, 90)]) {
+                clear_suspected_oversize(window.id);
                 unsafe {
                     SetWindowPos(
                         window.hwnd,
                         None,
-                        300,
-                        100,
+                        x,
+                        y,
                         0,
                         0,
                         SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
@@ -4250,8 +4230,59 @@ mod tests {
                     .unwrap();
                 }
             }
-            assert_eq!(waiter.join().unwrap(), [Some((300, 100)); 2]);
-        });
+            let placements = windows.each_ref().map(|window| {
+                let entry = DeferEntry {
+                    x: 300,
+                    y: 100,
+                    ..fresh_inset_entry(window.id, 0)
+                };
+                record_async_position(&entry, observed_async_position(window.hwnd));
+                offscreen_placement(
+                    window.id,
+                    Rect::new(400, 100, 160, 120),
+                    Visibility::Visible,
+                )
+            });
+            let (issued_after_start, observed) = std::thread::scope(|scope| {
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                let waiter = scope.spawn(move || {
+                    ready_tx.send(std::time::Instant::now()).unwrap();
+                    wait_for_animation_positions(&placements, || false);
+                    placements.map(|placement| {
+                        observed_async_position(window_id_to_hwnd(placement.window_id).unwrap())
+                    })
+                });
+                let started = ready_rx.recv().unwrap();
+                for window in &windows {
+                    unsafe {
+                        SetWindowPos(
+                            window.hwnd,
+                            None,
+                            300,
+                            100,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                        )
+                        .unwrap();
+                    }
+                }
+                let issued_after_start = started.elapsed();
+                (issued_after_start, waiter.join().unwrap())
+            });
+            issue_delays.push(issued_after_start);
+            // A delayed producer can legitimately miss the shared 33 ms cap.
+            if issued_after_start > std::time::Duration::from_millis(20) {
+                continue;
+            }
+            assert_eq!(observed, [Some((300, 100)); 2]);
+            conclusive = true;
+            break;
+        }
+        assert!(
+            conclusive,
+            "all five attempts were inconclusive: second-move issue delays {issue_delays:?}"
+        );
         // Waiting must not retire evidence needed by later owner/self-move probes.
         for window in &windows {
             assert!(lock_async_positions()
