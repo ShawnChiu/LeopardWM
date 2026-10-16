@@ -406,12 +406,18 @@ fn worker_loop(
                 // A queued frame must not place windows or update ghost thumbnails
                 // after either physical invalidation or a newer physical dispatch.
                 // `apply_worker_cancelled` remains shutdown/revert-only.
-                let stale_physical_request =
-                    request.physical_dispatch_request_id.load(Ordering::SeqCst)
-                        != request.physical_request_id
+                let frame_cancelled = || {
+                    apply_worker_cancelled.load(Ordering::SeqCst)
+                        || request.physical_dispatch_request_id.load(Ordering::SeqCst)
+                            != request.physical_request_id
                         || request.physical_invalidation.load(Ordering::SeqCst)
-                            != request.physical_invalidation_id;
-                if apply_worker_cancelled.load(Ordering::SeqCst) || stale_physical_request {
+                            != request.physical_invalidation_id
+                };
+                leopardwm_platform_win32::wait_for_animation_positions(
+                    &request.placements,
+                    frame_cancelled,
+                );
+                if frame_cancelled() {
                     let result = FrameResult {
                         apply_result: Ok(()),
                         frame_time: frame_start.elapsed(),

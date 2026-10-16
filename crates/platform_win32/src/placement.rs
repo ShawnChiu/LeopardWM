@@ -1358,6 +1358,79 @@ struct OwnerDeferrals {
     unresponsive: HashSet<WindowId>,
 }
 
+/// Give the preceding visible animation moves one shared two-60-Hz-frame budget.
+/// Observation only: the normal pending filter must still handle timeouts and
+/// retire submissions, preserving owner-wait and never-applied-move detection.
+pub fn wait_for_animation_positions(
+    placements: &[WindowPlacement],
+    should_cancel: impl Fn() -> bool,
+) {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_millis(33);
+    if should_cancel() {
+        return;
+    }
+    let owner_deferrals = probe_placement_owners(placements, false, false);
+    loop {
+        if should_cancel() || Instant::now() >= deadline {
+            return;
+        }
+        let snapshots: Vec<_> = {
+            let guard = lock_async_positions();
+            placements
+                .iter()
+                .filter(|placement| placement.visibility == Visibility::Visible)
+                .filter_map(|placement| {
+                    let id = placement.window_id;
+                    let submission = guard.as_ref()?.get(&id).copied()?;
+                    (!submission.wait_for_owner
+                        && !owner_deferrals.pending.contains(&id)
+                        && !owner_deferrals.unresponsive.contains(&id))
+                    .then_some((id, submission))
+                })
+                .collect()
+        };
+        let pending = snapshots.into_iter().any(|(id, submission)| {
+            if should_cancel()
+                || Instant::now() >= deadline
+                || mover::is_marked(id)
+                || is_placement_parked(id)
+                || crate::is_move_offscreen_sentinel_position(submission.x, submission.y)
+            {
+                return false;
+            }
+            let Ok(hwnd) = window_id_to_hwnd(id) else {
+                return false;
+            };
+            if unsafe { !IsWindow(Some(hwnd)).as_bool() || IsIconic(hwnd).as_bool() } {
+                return false;
+            }
+            let owner_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+            let owner_deferred = PLACEMENT_OWNER_ANSWERS
+                .lock()
+                .unwrap_or_else(crate::recover_poisoned_mutex)
+                .as_ref()
+                .and_then(|answers| answers.get(&owner_thread))
+                .is_some_and(|answer| {
+                    answer.probed_at.elapsed() < RESPONSIVE_OWNER_DRAIN_WAIT
+                        && answer.answered != Some(true)
+                });
+            if owner_deferred {
+                return false;
+            }
+            // Never run the potentially 50-ms WM_NULL probe inside this budget.
+            async_position_state(submission, observed_async_position(hwnd), Instant::now())
+                == AsyncPositionState::Pending
+        });
+        if !pending {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
+}
+
 pub(crate) fn placement_owner_answers(hwnd: HWND, timeout_ms: u32) -> bool {
     unsafe {
         SendMessageTimeoutW(
@@ -4125,6 +4198,240 @@ mod tests {
         fn drop(&mut self) {
             clear_suspected_oversize(self.0);
         }
+    }
+
+    #[test]
+    fn animation_position_wait_drains_all_visible_moves() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let windows = [
+            HiddenPopup::new(48, 48, 160, 120),
+            HiddenPopup::new(90, 90, 160, 120),
+        ];
+        let _cleanup = windows
+            .each_ref()
+            .map(|window| ClearPlacementOnDrop(window.id));
+        let placements = windows.each_ref().map(|window| {
+            let entry = DeferEntry {
+                x: 300,
+                y: 100,
+                ..fresh_inset_entry(window.id, 0)
+            };
+            record_async_position(&entry, observed_async_position(window.hwnd));
+            offscreen_placement(
+                window.id,
+                Rect::new(400, 100, 160, 120),
+                Visibility::Visible,
+            )
+        });
+        std::thread::scope(|scope| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let waiter = scope.spawn(move || {
+                ready_tx.send(()).unwrap();
+                wait_for_animation_positions(&placements, || false);
+                placements.map(|placement| {
+                    observed_async_position(window_id_to_hwnd(placement.window_id).unwrap())
+                })
+            });
+            ready_rx.recv().unwrap();
+            for window in &windows {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                unsafe {
+                    SetWindowPos(
+                        window.hwnd,
+                        None,
+                        300,
+                        100,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    )
+                    .unwrap();
+                }
+            }
+            assert_eq!(waiter.join().unwrap(), [Some((300, 100)); 2]);
+        });
+        // Waiting must not retire evidence needed by later owner/self-move probes.
+        for window in &windows {
+            assert!(lock_async_positions()
+                .as_ref()
+                .unwrap()
+                .contains_key(&window.id));
+        }
+    }
+
+    #[test]
+    fn animation_position_wait_has_one_budget_and_preserves_pending_filter() {
+        use std::time::{Duration, Instant};
+
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let windows: Vec<_> = (0..12)
+            .map(|_| HiddenPopup::new(48, 48, 160, 120))
+            .collect();
+        let _cleanup: Vec<_> = windows
+            .iter()
+            .map(|window| ClearPlacementOnDrop(window.id))
+            .collect();
+        let entries: Vec<_> = windows
+            .iter()
+            .map(|window| {
+                let entry = DeferEntry {
+                    x: 300,
+                    y: 100,
+                    flags: SWP_ASYNCWINDOWPOS,
+                    ..fresh_inset_entry(window.id, 0)
+                };
+                record_async_position(&entry, Some((48, 48)));
+                entry
+            })
+            .collect();
+        let placements: Vec<_> = windows
+            .iter()
+            .map(|window| {
+                offscreen_placement(
+                    window.id,
+                    Rect::new(400, 100, 160, 120),
+                    Visibility::Visible,
+                )
+            })
+            .collect();
+        let before = lock_async_positions().clone();
+        let start = Instant::now();
+        wait_for_animation_positions(&placements, || false);
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(33), "{elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "per-window waits: {elapsed:?}"
+        );
+        for window in &windows {
+            assert!(
+                lock_async_positions().as_ref().unwrap()[&window.id]
+                    == before.as_ref().unwrap()[&window.id]
+            );
+            assert!(!mover::is_marked(window.id));
+        }
+        let pending = pending_async_entries(&entries, false);
+        assert!(windows
+            .iter()
+            .all(|window| pending.pending.contains(&window.id)));
+    }
+
+    #[test]
+    fn animation_position_wait_excludes_deferred_and_nonvisible_moves() {
+        use std::cell::Cell;
+        use std::time::Instant;
+
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serialize = lock_cloak_set_tests();
+        for excluded in [
+            "offscreen",
+            "parked",
+            "sentinel",
+            "mover",
+            "owner_wait",
+            "unresponsive",
+            "drained",
+            "expired",
+            "absent",
+        ] {
+            let window = HiddenPopup::new(48, 48, 160, 120);
+            let _cleanup = ClearPlacementOnDrop(window.id);
+            let _membership = CloakMembershipGuard::claim(window.id);
+            let entry = DeferEntry {
+                x: if excluded == "drained" { 48 } else { 300 },
+                y: if excluded == "drained" { 48 } else { 100 },
+                ..fresh_inset_entry(window.id, 0)
+            };
+            if excluded != "absent" {
+                record_async_position(&entry, Some((48, 48)));
+            }
+            let mut placement = offscreen_placement(
+                window.id,
+                Rect::new(400, 100, 160, 120),
+                Visibility::Visible,
+            );
+            let owner_thread = unsafe { GetWindowThreadProcessId(window.hwnd, None) };
+            match excluded {
+                "offscreen" => placement.visibility = Visibility::OffScreenLeft,
+                "parked" => mark_placement_parked(window.id),
+                "mover" => mover::mark(window.id),
+                "owner_wait" | "expired" | "sentinel" => {
+                    let mut guard = lock_async_positions();
+                    let submission = guard.as_mut().unwrap().get_mut(&window.id).unwrap();
+                    match excluded {
+                        "owner_wait" => submission.wait_for_owner = true,
+                        "expired" => {
+                            submission.first_submitted =
+                                Instant::now() - ASYNC_POSITION_PENDING_LIMIT
+                        }
+                        _ => {
+                            submission.x = crate::MOVE_OFFSCREEN_SENTINEL_COORD;
+                            submission.y = crate::MOVE_OFFSCREEN_SENTINEL_COORD;
+                        }
+                    }
+                }
+                "unresponsive" => {
+                    PLACEMENT_OWNER_ANSWERS
+                        .lock()
+                        .unwrap_or_else(crate::recover_poisoned_mutex)
+                        .get_or_insert_with(HashMap::new)
+                        .insert(
+                            owner_thread,
+                            PlacementOwnerAnswer {
+                                probed_at: Instant::now(),
+                                answered: Some(false),
+                            },
+                        );
+                }
+                _ => {}
+            }
+            let polls = Cell::new(0);
+            wait_for_animation_positions(&[placement], || {
+                polls.set(polls.get() + 1);
+                false
+            });
+            if excluded == "unresponsive" {
+                PLACEMENT_OWNER_ANSWERS
+                    .lock()
+                    .unwrap_or_else(crate::recover_poisoned_mutex)
+                    .as_mut()
+                    .unwrap()
+                    .remove(&owner_thread);
+            }
+            assert!(
+                polls.get() <= 3,
+                "waited for {excluded}: {} polls",
+                polls.get()
+            );
+        }
+    }
+
+    #[test]
+    fn animation_position_wait_observes_cancellation() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = HiddenPopup::new(48, 48, 160, 120);
+        let _cleanup = ClearPlacementOnDrop(window.id);
+        record_async_position(&fresh_inset_entry(window.id, 0), Some((48, 48)));
+        let placement = offscreen_placement(
+            window.id,
+            Rect::new(400, 100, 160, 120),
+            Visibility::Visible,
+        );
+        let polls = std::cell::Cell::new(0);
+        wait_for_animation_positions(&[placement], || {
+            polls.set(polls.get() + 1);
+            polls.get() >= 4
+        });
+        assert_eq!(polls.get(), 4);
+        assert!(pending_async_position(window.id));
     }
 
     fn prepare_self_move_owner_probe(window: &HiddenPopup) {
