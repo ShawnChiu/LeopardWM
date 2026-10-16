@@ -1,5 +1,5 @@
 use crate::{Win32Error, WM_QUIT_LLHOOK_THREAD};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -9,13 +9,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static USER_PRESS_COUNT: AtomicU64 = AtomicU64::new(0);
-static KEYBOARD_OBSERVER_INSTALLED: AtomicBool = AtomicBool::new(false);
-static MOUSE_OBSERVER_INSTALLED: AtomicBool = AtomicBool::new(false);
+static NEXT_OBSERVER_GENERATION: AtomicU64 = AtomicU64::new(1);
+static KEYBOARD_OBSERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
+static MOUSE_OBSERVER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn user_press_count() -> Option<u64> {
     let count = USER_PRESS_COUNT.load(Ordering::SeqCst);
-    if !KEYBOARD_OBSERVER_INSTALLED.load(Ordering::SeqCst)
-        || !MOUSE_OBSERVER_INSTALLED.load(Ordering::SeqCst)
+    if KEYBOARD_OBSERVER_GENERATION.load(Ordering::SeqCst) == 0
+        || MOUSE_OBSERVER_GENERATION.load(Ordering::SeqCst) == 0
     {
         return None;
     }
@@ -23,20 +24,26 @@ pub fn user_press_count() -> Option<u64> {
     (USER_PRESS_COUNT.load(Ordering::SeqCst) == count).then_some(count)
 }
 
-pub(crate) fn set_keyboard_observer_installed(installed: bool) {
-    set_observer_installed(&KEYBOARD_OBSERVER_INSTALLED, installed);
+pub(crate) fn next_observer_generation() -> u64 {
+    NEXT_OBSERVER_GENERATION.fetch_add(1, Ordering::SeqCst)
 }
 
-pub(crate) fn set_mouse_observer_installed(installed: bool) {
-    set_observer_installed(&MOUSE_OBSERVER_INSTALLED, installed);
+pub(crate) fn set_keyboard_observer_installed(generation: u64, installed: bool) {
+    set_observer_installed(&KEYBOARD_OBSERVER_GENERATION, generation, installed);
 }
 
-fn set_observer_installed(observer: &AtomicBool, installed: bool) {
+pub(crate) fn set_mouse_observer_installed(generation: u64, installed: bool) {
+    set_observer_installed(&MOUSE_OBSERVER_GENERATION, generation, installed);
+}
+
+fn set_observer_installed(observer: &AtomicU64, generation: u64, installed: bool) {
     if installed {
         record_user_press();
-        observer.store(true, Ordering::SeqCst);
-    } else {
-        observer.store(false, Ordering::SeqCst);
+        observer.store(generation, Ordering::SeqCst);
+    } else if observer
+        .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
         record_user_press();
     }
 }
@@ -47,12 +54,13 @@ pub(crate) fn record_user_press() {
 
 pub struct MousePressHookHandle {
     thread_id: u32,
+    generation: u64,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for MousePressHookHandle {
     fn drop(&mut self) {
-        set_mouse_observer_installed(false);
+        set_mouse_observer_installed(self.generation, false);
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT_LLHOOK_THREAD, WPARAM(0), LPARAM(0));
         }
@@ -70,6 +78,7 @@ impl Drop for MousePressHookHandle {
 
 pub fn install_mouse_press_hook() -> Result<MousePressHookHandle, Win32Error> {
     let (init_tx, init_rx) = std::sync::mpsc::channel();
+    let generation = next_observer_generation();
     let thread = std::thread::Builder::new()
         .name("mouse-press-hook".into())
         .spawn(move || unsafe {
@@ -85,7 +94,7 @@ pub fn install_mouse_press_hook() -> Result<MousePressHookHandle, Win32Error> {
                     return;
                 }
             };
-            set_mouse_observer_installed(true);
+            set_mouse_observer_installed(generation, true);
             let _ = init_tx.send(Ok(thread_id));
             loop {
                 let ret = GetMessageW(&mut msg, None, 0, 0).0;
@@ -94,7 +103,7 @@ pub fn install_mouse_press_hook() -> Result<MousePressHookHandle, Win32Error> {
                 }
                 let _ = DispatchMessageW(&msg);
             }
-            set_mouse_observer_installed(false);
+            set_mouse_observer_installed(generation, false);
             let _ = UnhookWindowsHookEx(hook);
         })
         .map_err(|error| {
@@ -107,6 +116,7 @@ pub fn install_mouse_press_hook() -> Result<MousePressHookHandle, Win32Error> {
     })??;
     Ok(MousePressHookHandle {
         thread_id,
+        generation,
         thread: Some(thread),
     })
 }
@@ -140,8 +150,8 @@ mod tests {
     #[test]
     fn press_count_requires_both_observers_and_invalidates_observation_gaps() {
         let _guard = PRESS_COUNT_TEST_LOCK.lock().unwrap();
-        set_keyboard_observer_installed(false);
-        set_mouse_observer_installed(false);
+        let mut keyboard_generation = next_observer_generation();
+        let mut mouse_generation = next_observer_generation();
         assert_eq!(user_press_count(), None);
         for (keyboard, installed, available) in [
             (true, true, false),
@@ -155,9 +165,15 @@ mod tests {
         ] {
             let before = USER_PRESS_COUNT.load(Ordering::SeqCst);
             if keyboard {
-                set_keyboard_observer_installed(installed);
+                if installed {
+                    keyboard_generation = next_observer_generation();
+                }
+                set_keyboard_observer_installed(keyboard_generation, installed);
             } else {
-                set_mouse_observer_installed(installed);
+                if installed {
+                    mouse_generation = next_observer_generation();
+                }
+                set_mouse_observer_installed(mouse_generation, installed);
             }
             let after = USER_PRESS_COUNT.load(Ordering::SeqCst);
             assert_eq!(after, before + 1);
@@ -166,10 +182,38 @@ mod tests {
     }
 
     #[test]
+    fn stale_observer_clear_preserves_replacement_availability() {
+        let _guard = PRESS_COUNT_TEST_LOCK.lock().unwrap();
+        let setters: [fn(u64, bool); 2] = [
+            set_keyboard_observer_installed,
+            set_mouse_observer_installed,
+        ];
+        for (index, set_observer) in setters.into_iter().enumerate() {
+            let set_other = setters[1 - index];
+            let other_generation = next_observer_generation();
+            let old_generation = next_observer_generation();
+            let current_generation = next_observer_generation();
+            set_other(other_generation, true);
+            set_observer(old_generation, true);
+            set_observer(old_generation, false);
+            set_observer(current_generation, true);
+            let count = user_press_count().unwrap();
+            set_observer(old_generation, false);
+            assert_eq!(user_press_count(), Some(count));
+            set_observer(current_generation, false);
+            assert_eq!(user_press_count(), None);
+            assert_eq!(USER_PRESS_COUNT.load(Ordering::SeqCst), count + 1);
+            set_other(other_generation, false);
+        }
+    }
+
+    #[test]
     fn mouse_hook_counts_button_downs_but_not_motion_wheel_or_release() {
         let _guard = PRESS_COUNT_TEST_LOCK.lock().unwrap();
-        set_keyboard_observer_installed(true);
-        set_mouse_observer_installed(true);
+        let keyboard_generation = next_observer_generation();
+        let mouse_generation = next_observer_generation();
+        set_keyboard_observer_installed(keyboard_generation, true);
+        set_mouse_observer_installed(mouse_generation, true);
         let mut expected = user_press_count().unwrap();
         for (ncode, message, counts) in [
             (0, WM_MOUSEMOVE, false),
@@ -190,7 +234,7 @@ mod tests {
                 "message={message}, ncode={ncode}"
             );
         }
-        set_keyboard_observer_installed(false);
-        set_mouse_observer_installed(false);
+        set_keyboard_observer_installed(keyboard_generation, false);
+        set_mouse_observer_installed(mouse_generation, false);
     }
 }

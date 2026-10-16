@@ -348,12 +348,13 @@ pub fn set_recording(enabled: bool) {
 /// unhook and exit, then clears the global state.
 pub struct KeyboardHookHandle {
     thread_id: u32,
+    generation: u64,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for KeyboardHookHandle {
     fn drop(&mut self) {
-        crate::user_press::set_keyboard_observer_installed(false);
+        crate::user_press::set_keyboard_observer_installed(self.generation, false);
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT_LLHOOK_THREAD, WPARAM(0), LPARAM(0));
         }
@@ -473,6 +474,7 @@ pub fn install_keyboard_hook(
 
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<u32, Win32Error>>();
 
+    let generation = crate::user_press::next_observer_generation();
     let thread = std::thread::Builder::new()
         .name("hotkey-hook".into())
         .spawn(move || unsafe {
@@ -494,7 +496,7 @@ pub fn install_keyboard_hook(
                 }
             };
 
-            crate::user_press::set_keyboard_observer_installed(true);
+            crate::user_press::set_keyboard_observer_installed(generation, true);
             let _ = init_tx.send(Ok(thread_id));
 
             // Message pump — required for WH_KEYBOARD_LL callbacks.
@@ -509,7 +511,7 @@ pub fn install_keyboard_hook(
                 let _ = DispatchMessageW(&msg);
             }
 
-            crate::user_press::set_keyboard_observer_installed(false);
+            crate::user_press::set_keyboard_observer_installed(generation, false);
             let _ = UnhookWindowsHookEx(hook);
         })
         .map_err(|e| {
@@ -525,6 +527,7 @@ pub fn install_keyboard_hook(
     Ok((
         KeyboardHookHandle {
             thread_id,
+            generation,
             thread: Some(thread),
         },
         rx,
@@ -810,8 +813,10 @@ mod tests {
         let _guard = HOOK_STATE_TEST_LOCK.lock().unwrap();
         let _counter_guard = crate::user_press::PRESS_COUNT_TEST_LOCK.lock().unwrap();
         reset_held_keys().unwrap();
-        crate::user_press::set_keyboard_observer_installed(true);
-        crate::user_press::set_mouse_observer_installed(true);
+        let keyboard_generation = crate::user_press::next_observer_generation();
+        let mouse_generation = crate::user_press::next_observer_generation();
+        crate::user_press::set_keyboard_observer_installed(keyboard_generation, true);
+        crate::user_press::set_mouse_observer_installed(mouse_generation, true);
         let mut expected = crate::user_press_count().unwrap();
         for (message, vk, counts) in [
             (WM_KEYUP, 0x41, false),
@@ -842,8 +847,8 @@ mod tests {
             );
         }
         reset_held_keys().unwrap();
-        crate::user_press::set_keyboard_observer_installed(false);
-        crate::user_press::set_mouse_observer_installed(false);
+        crate::user_press::set_keyboard_observer_installed(keyboard_generation, false);
+        crate::user_press::set_mouse_observer_installed(mouse_generation, false);
     }
 
     fn bind(modifiers: Modifiers, vk: u32) -> HotkeyBind {
