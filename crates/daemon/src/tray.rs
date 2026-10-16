@@ -381,6 +381,9 @@ impl TrayManager {
             active_workspace,
         );
         if let Ok(mut text) = self.shared.tooltip_text.lock() {
+            if *text == tooltip {
+                return;
+            }
             *text = tooltip;
         }
         // Wake the message-loop thread to apply the new tooltip.
@@ -512,7 +515,8 @@ fn run_tray_thread(
             if msg.hwnd.is_null() {
                 match msg.message {
                     win32_msg::WM_APP_UPDATE_TOOLTIP => {
-                        if let Ok(text) = shared.tooltip_text.lock() {
+                        let text = shared.tooltip_text.lock().ok().map(|text| text.clone());
+                        if let Some(text) = text {
                             let _ = tray.set_tooltip(Some(text.as_str()));
                         }
                         continue;
