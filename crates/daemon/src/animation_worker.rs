@@ -5,7 +5,8 @@
 //! 1. Blocks on a channel when idle (zero CPU)
 //! 2. Applies window placements via DeferWindowPos
 //! 3. Calls DwmFlush() to block until the next compositor vsync
-//! 4. Sends the result back to the main event loop
+//! 4. Briefly waits for the submitted visible moves to drain
+//! 5. Sends the result back to the main event loop
 //!
 //! This eliminates per-frame thread spawn overhead and naturally adapts to any refresh rate.
 
@@ -49,7 +50,7 @@ pub struct GhostFrame {
 pub struct FrameResult {
     /// Whether the placements were applied successfully.
     pub apply_result: Result<(), String>,
-    /// How long the frame took (apply + vsync wait).
+    /// How long the frame took (apply + vsync + bounded move-drain wait).
     #[allow(dead_code)]
     pub frame_time: Duration,
     /// Width violations detected (windows enforcing a minimum width).
@@ -319,7 +320,7 @@ impl Drop for AnimationWorkerHandle {
 /// The worker thread's main loop.
 ///
 /// Blocks on `command_rx.recv()` when no animation is active (zero CPU).
-/// For each frame: apply placements → DwmFlush → send result back.
+/// For each frame: apply placements, DwmFlush, bounded move-drain wait, then report.
 fn worker_loop(
     command_rx: std_mpsc::Receiver<WorkerCommand>,
     event_tx: tokio::sync::mpsc::Sender<super::DaemonEvent>,
@@ -413,10 +414,6 @@ fn worker_loop(
                         || request.physical_invalidation.load(Ordering::SeqCst)
                             != request.physical_invalidation_id
                 };
-                leopardwm_platform_win32::wait_for_animation_positions(
-                    &request.placements,
-                    frame_cancelled,
-                );
                 if frame_cancelled() {
                     let result = FrameResult {
                         apply_result: Ok(()),
@@ -465,6 +462,13 @@ fn worker_loop(
 
                 // Wait for next vsync via DwmFlush
                 dwm_flush_or_fallback();
+
+                // Hold the acknowledgement, not the next frame's application:
+                // the main loop advances decorations when it dispatches that frame.
+                leopardwm_platform_win32::wait_for_animation_positions(
+                    &request.placements,
+                    frame_cancelled,
+                );
 
                 let frame_time = frame_start.elapsed();
 

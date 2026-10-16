@@ -1358,7 +1358,7 @@ struct OwnerDeferrals {
     unresponsive: HashSet<WindowId>,
 }
 
-/// Give the preceding visible animation moves one shared two-60-Hz-frame budget.
+/// Give the submitted visible animation moves one shared two-60-Hz-frame budget.
 /// Observation only: the normal pending filter must still handle timeouts and
 /// retire submissions, preserving owner-wait and never-applied-move detection.
 pub fn wait_for_animation_positions(

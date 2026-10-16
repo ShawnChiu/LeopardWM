@@ -12650,6 +12650,70 @@ async fn test_animation_frame_handler_updates_border_once() {
     );
 }
 
+#[tokio::test]
+async fn test_animation_worker_paces_current_move_before_reporting_frame() {
+    use leopardwm_core_layout::{Visibility, WindowPlacement};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    struct ClearAsyncOnDrop(u64);
+    impl Drop for ClearAsyncOnDrop {
+        fn drop(&mut self) {
+            leopardwm_platform_win32::clear_suspected_oversize(self.0);
+        }
+    }
+
+    let window = ResizeTestWindow::new(300);
+    let _cleanup = ClearAsyncOnDrop(window.id());
+    assert!(!leopardwm_platform_win32::pending_async_position(
+        window.id()
+    ));
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    let worker =
+        animation_worker::AnimationWorkerHandle::spawn(event_tx, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+    worker
+        .send_frame(animation_worker::FrameRequest {
+            placements: vec![WindowPlacement {
+                window_id: window.id(),
+                rect: Rect::new(500, 100, 300, 600),
+                visibility: Visibility::Visible,
+                column_index: 0,
+            }],
+            ghost_updates: Vec::new(),
+            platform_config: leopardwm_platform_win32::PlatformConfig::default(),
+            physical_request_id: 1,
+            physical_invalidation_id: 1,
+            physical_dispatch_request_id: Arc::new(AtomicU64::new(1)),
+            physical_invalidation: Arc::new(AtomicU64::new(1)),
+        })
+        .unwrap();
+    // This owner does not pump messages, so its first asynchronous move cannot
+    // drain. Pacing the preceding (absent) submission would report immediately.
+    let Some(DaemonEvent::AnimationFrameApplied(frame)) =
+        tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+    else {
+        panic!("expected worker frame completion");
+    };
+    assert!(frame.apply_result.is_ok());
+    assert!(leopardwm_platform_win32::pending_async_position(
+        window.id()
+    ));
+    assert_eq!(
+        leopardwm_platform_win32::get_window_chrome_rect(window.id())
+            .unwrap()
+            .x,
+        100,
+        "the owner must still be holding the newly submitted move"
+    );
+    assert!(
+        frame.frame_time >= Duration::from_millis(33),
+        "frame reported without pacing its own pending move: {:?}",
+        frame.frame_time
+    );
+}
+
 #[test]
 fn test_send_animation_frame_skips_after_apply_worker_cancelled() {
     let mut state = AppState::new_with_config(test_config(), test_monitors());
