@@ -7,7 +7,7 @@ All notable changes to LeopardWM will be documented in this file.
 ### Fixes
 
 - **Firefox reopened after closing maximized now settles into its tile with its startup placeholder enabled.** Releasing the launch key or moving the mouse no longer stops LeopardWM from undoing Firefox's startup maximize, so users no longer need to turn off `browser.startup.preXulSkeletonUI`. (#104)
-- **Scrolling a workspace that has tabbed columns no longer drops the animation frame rate.** Tab bars no longer query every app's icon and redraw unchanged content on each frame; icons still refresh every two seconds.
+- **Workspace scrolling is smoother and more even in both directions.** Slow-redrawing apps such as Zen Browser now slide in step with other windows instead of trailing behind and jumping into place. Tab bars, the focus border and the tray no longer hold up each animation frame, and each frame waits briefly for windows that apply moves slowly.
 - **Shortcuts that use Alt without Ctrl, such as Alt+J, no longer leave the focused app's menu bar active after they fire.** LeopardWM now taps an unused key before Alt is released, the same way it already taps Ctrl to keep Win shortcuts from opening Start. (#145)
 - **Windows whose apps never apply queued moves, such as Wargaming Game Center, no longer stay out of their tiles after windows scroll or resize.** LeopardWM now re-checks them and moves them back into their tiles within about a second.
 - **These windows now slide with the other windows during scrolls instead of jumping into place afterwards.** The daemon log now names each window LeopardWM starts moving this way.
