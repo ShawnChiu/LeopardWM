@@ -4,6 +4,7 @@
 //! with per-pixel alpha for anti-aliased rounded corners. Uses a signed
 //! distance field to produce smooth edges without GDI+ or Direct2D.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -156,6 +157,7 @@ static BORDER_STATE: Mutex<BorderState> = Mutex::new(BorderState {
 /// around the focused window with anti-aliased rounded corners.
 pub struct BorderFrame {
     hwnd: HWND,
+    visible: Cell<bool>,
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -226,6 +228,7 @@ impl BorderFrame {
 
         Ok(Self {
             hwnd: HWND(hwnd_raw as *mut c_void),
+            visible: Cell::new(false),
             _thread: Some(thread),
         })
     }
@@ -311,8 +314,9 @@ impl BorderFrame {
 
     /// Hide the border frame.
     pub fn hide(&self) {
+        self.visible.set(false);
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            let _ = ShowWindowAsync(self.hwnd, SW_HIDE);
         }
     }
 
@@ -348,7 +352,7 @@ impl BorderFrame {
                     y,
                     0,
                     0,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOSIZE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS,
                 );
             }
         }
@@ -377,16 +381,18 @@ impl BorderFrame {
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
                 );
             }
             let z_flags = if plan.insert_after.is_some() {
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
             } else {
-                SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+                SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
             };
             let _ = SetWindowPos(self.hwnd, plan.insert_after, 0, 0, 0, 0, z_flags);
-            let _ = ShowWindow(self.hwnd, SW_SHOWNA);
+            if !self.visible.replace(true) {
+                let _ = ShowWindowAsync(self.hwnd, SW_SHOWNA);
+            }
         }
     }
 
@@ -592,8 +598,6 @@ impl BorderFrame {
             let _ = DeleteDC(hdc_mem);
             ReleaseDC(None, hdc_screen);
             let _ = DeleteObject(hbitmap.into());
-
-            let _ = ShowWindow(self.hwnd, SW_SHOWNA);
         }
     }
 }

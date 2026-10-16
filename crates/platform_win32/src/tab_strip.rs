@@ -749,9 +749,8 @@ impl TabStripOverlay {
                     strip_y,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
                 );
-                let _ = ShowWindow(self.hwnd, SW_SHOWNA);
             }
             return;
         }
@@ -766,12 +765,17 @@ impl TabStripOverlay {
         }
 
         render_strip_now(self.hwnd, strip_x, strip_y, strip_w, strip_h);
+        if !prev_visible {
+            unsafe {
+                let _ = ShowWindowAsync(self.hwnd, SW_SHOWNA);
+            }
+        }
     }
 
     /// Hide the tab strip overlay.
     pub fn hide(&self) {
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            let _ = ShowWindowAsync(self.hwnd, SW_HIDE);
         }
         let mut reg = registry();
         if let Some(state) = reg.states.get_mut(&(self.hwnd.0 as isize)) {
@@ -808,7 +812,7 @@ impl TabStripOverlay {
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
             );
         }
     }
@@ -1642,10 +1646,9 @@ fn render_strip_inner(
         // Without this, OS-driven SetWindowPos calls during a drag
         // (the dragged window gets raised to HWND_TOP) push the
         // strip behind the active window, making it appear to vanish
-        // mid-drag and only re-appear on the next focus change. The
-        // `SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOSIZE` combo
-        // mirrors `BorderFrame`'s pattern: stay on top, stay visible,
-        // don't steal focus, keep current size.
+        // mid-drag and only re-appear on the next focus change.
+        // Visibility is handled by show_overlay_rect; timer and hover
+        // repaints must not resurrect a strip after an asynchronous hide.
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOP),
@@ -1653,9 +1656,8 @@ fn render_strip_inner(
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
-        let _ = ShowWindow(hwnd, SW_SHOWNA);
         rendered.is_ok()
     }
 }
