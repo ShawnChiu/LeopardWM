@@ -12654,16 +12654,15 @@ async fn test_animation_frame_handler_updates_border_once() {
 async fn test_animation_worker_paces_current_move_before_reporting_frame() {
     use leopardwm_core_layout::{Visibility, WindowPlacement};
     use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::time::Instant;
 
     struct DelayedOwner {
         window_id: u64,
-        start: std::sync::mpsc::Sender<()>,
         stop: std::sync::mpsc::Sender<()>,
         join: Option<std::thread::JoinHandle<()>>,
     }
     impl Drop for DelayedOwner {
         fn drop(&mut self) {
-            let _ = self.start.send(());
             let _ = self.stop.send(());
             if let Some(join) = self.join.take() {
                 join.join().unwrap();
@@ -12672,81 +12671,120 @@ async fn test_animation_worker_paces_current_move_before_reporting_frame() {
         }
     }
 
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    let (start_tx, start_rx) = std::sync::mpsc::channel();
-    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
-    let join = std::thread::spawn(move || {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
-        };
-        let window = ResizeTestWindow::new(300);
-        ready_tx.send(window.id()).unwrap();
-        if start_rx.recv().is_err() {
-            return;
-        }
-        // At 60 Hz, an unpaced apply plus DwmFlush reports within about 18 ms.
-        // Pump at 25 ms: later than that report, but inside the subsequent 33 ms
-        // move-drain budget. The assertion checks state, not frame-time variance.
-        std::thread::sleep(Duration::from_millis(25));
-        while stop_rx.try_recv() == Err(std::sync::mpsc::TryRecvError::Empty) {
+    let mut inconclusive = Vec::new();
+    for attempt in 1..=5 {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (pump_tx, pump_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, GetQueueStatus, PeekMessageW, MSG, PM_REMOVE, QS_ALLINPUT,
+            };
+            let window = ResizeTestWindow::new(300);
             let mut message = MSG::default();
             unsafe {
                 while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                     DispatchMessageW(&message);
                 }
             }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    });
-    let owner = DelayedOwner {
-        window_id: ready_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-        start: start_tx,
-        stop: stop_tx,
-        join: Some(join),
-    };
-    assert!(!leopardwm_platform_win32::pending_async_position(
-        owner.window_id
-    ));
-    let (event_tx, mut event_rx) = mpsc::channel(1);
-    let worker =
-        animation_worker::AnimationWorkerHandle::spawn(event_tx, Arc::new(AtomicBool::new(false)))
-            .unwrap();
-    worker
-        .send_frame(animation_worker::FrameRequest {
-            placements: vec![WindowPlacement {
-                window_id: owner.window_id,
-                rect: Rect::new(500, 100, 300, 600),
-                visibility: Visibility::Visible,
-                column_index: 0,
-            }],
-            ghost_updates: Vec::new(),
-            platform_config: leopardwm_platform_win32::PlatformConfig::default(),
-            physical_request_id: 1,
-            physical_invalidation_id: 1,
-            physical_dispatch_request_id: Arc::new(AtomicU64::new(1)),
-            physical_invalidation: Arc::new(AtomicU64::new(1)),
-        })
+            ready_tx.send(window.id()).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(200);
+            let arrival = loop {
+                // ALLINPUT includes posted and sent internal window-manager work;
+                // unlike PeekMessage, GetQueueStatus never dispatches the move.
+                if unsafe { GetQueueStatus(QS_ALLINPUT) } >> 16 != 0 {
+                    break Instant::now();
+                }
+                if Instant::now() >= deadline {
+                    let _ = pump_tx.send(None);
+                    return;
+                }
+                if stop_rx.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
+                    return;
+                }
+                std::thread::yield_now();
+            };
+            // Anchor to queued work, not frame dispatch: 24 ms is beyond one
+            // 60-Hz refresh (~17 ms) but below the earliest 33 ms drain deadline.
+            // Even the permitted 5 ms pump slippage leaves 4 ms for draining.
+            std::thread::sleep(Duration::from_millis(24));
+            let pump_start = Instant::now();
+            pump_tx.send(Some((arrival, pump_start))).unwrap();
+            while stop_rx.try_recv() == Err(std::sync::mpsc::TryRecvError::Empty) {
+                unsafe {
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        DispatchMessageW(&message);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let owner = DelayedOwner {
+            window_id: ready_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            stop: stop_tx,
+            join: Some(join),
+        };
+        assert!(!leopardwm_platform_win32::pending_async_position(
+            owner.window_id
+        ));
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let worker = animation_worker::AnimationWorkerHandle::spawn(
+            event_tx,
+            Arc::new(AtomicBool::new(false)),
+        )
         .unwrap();
-    owner.start.send(()).unwrap();
-    let Some(DaemonEvent::AnimationFrameApplied(frame)) =
-        tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-            .await
-            .unwrap()
-    else {
-        panic!("expected worker frame completion");
-    };
-    assert!(frame.apply_result.is_ok());
-    assert_eq!(
-        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id)
-            .unwrap()
-            .x,
-        500,
-        "the submitted move must apply before the worker reports the frame"
-    );
-    assert!(
-        !leopardwm_platform_win32::pending_async_position(owner.window_id),
-        "the submitted move must drain before the worker reports the frame"
-    );
+        worker
+            .send_frame(animation_worker::FrameRequest {
+                placements: vec![WindowPlacement {
+                    window_id: owner.window_id,
+                    rect: Rect::new(500, 100, 300, 600),
+                    visibility: Visibility::Visible,
+                    column_index: 0,
+                }],
+                ghost_updates: Vec::new(),
+                platform_config: leopardwm_platform_win32::PlatformConfig::default(),
+                physical_request_id: 1,
+                physical_invalidation_id: 1,
+                physical_dispatch_request_id: Arc::new(AtomicU64::new(1)),
+                physical_invalidation: Arc::new(AtomicU64::new(1)),
+            })
+            .unwrap();
+        let Some(DaemonEvent::AnimationFrameApplied(frame)) =
+            tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .unwrap()
+        else {
+            panic!("expected worker frame completion");
+        };
+        let reported_position = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id);
+        let reported_pending = leopardwm_platform_win32::pending_async_position(owner.window_id);
+        let Some((arrival, pump_start)) = pump_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            inconclusive.push(format!("attempt {attempt}: no queued move within 200 ms"));
+            continue;
+        };
+        let pump_delay = pump_start.duration_since(arrival);
+        if pump_delay > Duration::from_millis(29) {
+            inconclusive.push(format!("attempt {attempt}: pump delay {pump_delay:?}"));
+            continue;
+        }
+        eprintln!(
+            "animation pacing: inconclusive_retries={}, pump_delay={pump_delay:?}",
+            inconclusive.len()
+        );
+        assert!(frame.apply_result.is_ok());
+        assert_eq!(
+            reported_position.unwrap().x,
+            500,
+            "the submitted move must apply before the worker reports the frame"
+        );
+        assert!(
+            !reported_pending,
+            "the submitted move must drain before the worker reports the frame"
+        );
+        return;
+    }
+    panic!("all five arrival-anchored pacing attempts were inconclusive: {inconclusive:?}");
 }
 
 #[test]
