@@ -4213,7 +4213,7 @@ mod tests {
             .each_ref()
             .map(|window| ClearPlacementOnDrop(window.id));
         let mut conclusive = false;
-        let mut issue_delays = Vec::new();
+        let mut attempts = Vec::new();
         for _ in 0..5 {
             for (window, (x, y)) in windows.iter().zip([(48, 48), (90, 90)]) {
                 clear_suspected_oversize(window.id);
@@ -4243,45 +4243,63 @@ mod tests {
                     Visibility::Visible,
                 )
             });
-            let (issued_after_start, observed) = std::thread::scope(|scope| {
-                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-                let waiter = scope.spawn(move || {
-                    ready_tx.send(std::time::Instant::now()).unwrap();
-                    wait_for_animation_positions(&placements, || false);
-                    placements.map(|placement| {
-                        observed_async_position(window_id_to_hwnd(placement.window_id).unwrap())
-                    })
+            let (started, first_move, second_move, issued, returned, observed) =
+                std::thread::scope(|scope| {
+                    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                    let waiter = scope.spawn(move || {
+                        ready_tx.send(std::time::Instant::now()).unwrap();
+                        wait_for_animation_positions(&placements, || false);
+                        let returned = std::time::Instant::now();
+                        let observed = placements.map(|placement| {
+                            observed_async_position(window_id_to_hwnd(placement.window_id).unwrap())
+                        });
+                        (returned, observed)
+                    });
+                    let started = ready_rx.recv().unwrap();
+                    let moves = windows.each_ref().map(|window| {
+                        let issued = std::time::Instant::now();
+                        unsafe {
+                            SetWindowPos(
+                                window.hwnd,
+                                None,
+                                300,
+                                100,
+                                0,
+                                0,
+                                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                            )
+                            .unwrap();
+                        }
+                        issued
+                    });
+                    let issued = std::time::Instant::now();
+                    let (returned, observed) = waiter.join().unwrap();
+                    (started, moves[0], moves[1], issued, returned, observed)
                 });
-                let started = ready_rx.recv().unwrap();
-                for window in &windows {
-                    unsafe {
-                        SetWindowPos(
-                            window.hwnd,
-                            None,
-                            300,
-                            100,
-                            0,
-                            0,
-                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-                        )
-                        .unwrap();
-                    }
-                }
-                let issued_after_start = started.elapsed();
-                (issued_after_start, waiter.join().unwrap())
-            });
-            issue_delays.push(issued_after_start);
+            let issued_after_start = issued.duration_since(started);
+            attempts.push((
+                first_move.checked_duration_since(started),
+                issued_after_start,
+            ));
             // A delayed producer can legitimately miss the shared 33 ms cap.
-            if issued_after_start > std::time::Duration::from_millis(20) {
+            if started >= first_move || issued_after_start > std::time::Duration::from_millis(20) {
                 continue;
             }
+            eprintln!(
+                "animation drain: inconclusive_retries={}",
+                attempts.len() - 1
+            );
+            assert!(
+                returned >= second_move,
+                "the wait returned before the second move was issued"
+            );
             assert_eq!(observed, [Some((300, 100)); 2]);
             conclusive = true;
             break;
         }
         assert!(
             conclusive,
-            "all five attempts were inconclusive: second-move issue delays {issue_delays:?}"
+            "all five attempts were inconclusive: (first-move delay, second-move completion delay) {attempts:?}"
         );
         // Waiting must not retire evidence needed by later owner/self-move probes.
         for window in &windows {
