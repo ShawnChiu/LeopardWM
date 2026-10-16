@@ -3392,9 +3392,12 @@ async fn handle_animation_frame_applied(
         // border by one vsync — windows updated at vsync N,
         // border at vsync N+1 — which is what the user noticed
         // as "border scrolling at a different framerate".
-        if let Some(hwnd) = state.previous_focused_hwnd {
-            if state.config.appearance.active_border {
-                state.show_border(hwnd);
+        // send_animation_frame updates the border itself for continuing frames.
+        if !running && !state.is_animating() {
+            if let Some(hwnd) = state.previous_focused_hwnd {
+                if state.config.appearance.active_border {
+                    state.show_border(hwnd);
+                }
             }
         }
         if running || state.is_animating() {

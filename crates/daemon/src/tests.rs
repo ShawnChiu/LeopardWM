@@ -12555,6 +12555,101 @@ fn test_protected_only_animation_frame_dispatches_and_settles_transition() {
     drop(worker);
 }
 
+#[tokio::test]
+async fn test_animation_frame_handler_updates_border_once() {
+    let mut app = AppState::new_with_config(test_config(), test_monitors());
+    app.paused = false;
+    app.config.appearance.active_border = true;
+    app.previous_focused_hwnd = Some(100);
+    app.workspaces.get_mut(&1).unwrap()[0]
+        .insert_window(100, Some(800))
+        .unwrap();
+    app.layout_transition = Some(crate::state::LayoutTransition {
+        start_rects: HashMap::from([(100, Rect::new(0, 0, 800, 1040))]),
+        exit_rects: HashMap::new(),
+        exit_provenance: HashMap::new(),
+        elapsed_ms: 0,
+        duration_ms: 10_000,
+        easing: leopardwm_core_layout::Easing::default(),
+        ghosted_wids: HashSet::new(),
+        suppress_landing_focus_resync: false,
+        defer_focus_border: false,
+    });
+    let cancelled = app.apply_worker_cancelled.clone();
+    let epoch = app.apply_epoch.clone();
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let worker =
+        animation_worker::AnimationWorkerHandle::spawn(event_tx.clone(), cancelled.clone())
+            .unwrap();
+    assert!(app.send_animation_frame(&worker).unwrap());
+    assert_eq!(
+        app.border_show_count.load(Ordering::Relaxed),
+        1,
+        "the first frame needs its border"
+    );
+    let Some(DaemonEvent::AnimationFrameApplied(frame)) =
+        tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+    else {
+        panic!("expected worker frame completion");
+    };
+    app.border_show_count.store(0, Ordering::Relaxed);
+    #[allow(clippy::arc_with_non_send_sync)]
+    let state = Arc::new(Mutex::new(app));
+    let (settings_tx, _settings_rx) = std::sync::mpsc::channel();
+    let quit = quit_fallback::QuitFallback::new(
+        cancelled,
+        epoch,
+        || {},
+        |_| {},
+        |_| {},
+        quit_fallback::QuitTiming::default(),
+    );
+    let mut ctx = EventLoopCtx {
+        quit_fallback: &quit,
+        state: &state,
+        event_tx: &event_tx,
+        hotkey_state: &mut HotkeyState {
+            handle: None,
+            hook: None,
+            mapping: HashMap::new(),
+            requested_count: 0,
+            registered_count: 0,
+            failed_binds: Vec::new(),
+            recording: false,
+        },
+        tray_manager: &None,
+        snap_hint_overlay: &None,
+        settings_sync_tx: &settings_tx,
+        settings_handle: &mut None,
+        animation_worker: &worker,
+        animation_active: &mut true,
+        last_frame_instant: &mut None,
+        snap_hint_timer_handle: &mut None,
+        focus_follows_mouse_timer: &mut None,
+        display_change_timer: &mut None,
+        idle_layout_reapply_timer: &mut None,
+        display_change_apply_retry_timer: &mut None,
+        mouse_hook_handle: &mut None,
+        gestures: &mut GestureRuntime {
+            startup_raw_input: false,
+            handle: None,
+            cancel: None,
+            retry_install: true,
+        },
+    };
+    handle_animation_frame_applied(&mut ctx, frame).await;
+    assert!(
+        *ctx.animation_active,
+        "the handler must dispatch another frame"
+    );
+    assert_eq!(
+        state.lock().await.border_show_count.load(Ordering::Relaxed),
+        1
+    );
+}
+
 #[test]
 fn test_send_animation_frame_skips_after_apply_worker_cancelled() {
     let mut state = AppState::new_with_config(test_config(), test_monitors());

@@ -522,6 +522,7 @@ pub(crate) struct AppState {
     pub(crate) tab_strip_hide_count: AtomicUsize,
     #[cfg(test)]
     pub(crate) tab_strip_update_count: AtomicUsize,
+    pub(crate) tab_icon_cache: std::collections::HashMap<u64, Option<isize>>,
     /// Tab strip overlays — one per tabbed column across all visible
     /// workspaces. Keyed by `(monitor, workspace_idx, column_idx)`.
     /// `helpers.rs::update_tab_strip` reconciles this map against the
@@ -1162,6 +1163,7 @@ impl AppState {
             // — there's no global "the strip" anymore. `install_tab_strip`
             // just stashes the action sender so subsequent spawns can wire
             // it to the same DaemonEvent drain.
+            tab_icon_cache: std::collections::HashMap::new(),
             tab_strip_overlays: std::collections::HashMap::new(),
             tab_strip_action_tx: None,
             overview_open: false,

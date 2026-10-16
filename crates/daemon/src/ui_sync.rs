@@ -43,6 +43,22 @@ pub(crate) fn should_sync_foreground_on_animation_landing(
     !paused && !suppress_landing_focus_resync
 }
 
+fn tab_icon(
+    cache: &mut std::collections::HashMap<u64, Option<isize>>,
+    hwnd: u64,
+    refresh: bool,
+    query: impl FnOnce(u64) -> Option<isize>,
+) -> Option<isize> {
+    if !refresh {
+        if let Some(&icon) = cache.get(&hwnd) {
+            return icon;
+        }
+    }
+    let icon = query(hwnd);
+    cache.insert(hwnd, icon);
+    icon
+}
+
 impl AppState {
     /// Convert the config border color (hex RGB string) to BGR u32 for Win32.
     /// When high contrast mode is active, returns the system highlight color instead.
@@ -388,11 +404,22 @@ impl AppState {
     /// column just changes which strip's highlight is "active", not
     /// which strips are visible.
     pub(crate) fn update_tab_strip(&mut self) {
+        self.update_tab_strip_icons(true);
+    }
+
+    pub(crate) fn update_tab_strip_for_animation(&mut self) {
+        self.update_tab_strip_icons(false);
+    }
+
+    fn update_tab_strip_icons(&mut self, refresh_icons: bool) {
         use leopardwm_platform_win32::tab_strip::{TabLabel, TabStripColors};
 
         #[cfg(test)]
         self.tab_strip_update_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let managed: std::collections::HashSet<_> =
+            self.all_managed_window_ids().into_iter().collect();
+        self.tab_icon_cache.retain(|hwnd, _| managed.contains(hwnd));
         // No-op when the action sender wasn't installed (tests / headless).
         if self.tab_strip_action_tx.is_none() {
             return;
@@ -402,6 +429,8 @@ impl AppState {
             self.tab_strip_overlays.clear();
             return;
         }
+
+        let mut icon_cache = std::mem::take(&mut self.tab_icon_cache);
 
         // Pull configurable colors from the [appearance] config section.
         // Hex strings are RGB; convert to the 0xBBGGRR layout the strip
@@ -504,7 +533,12 @@ impl AppState {
                             .cloned()
                             .or_else(|| self.lookup_window_info(w).map(|info| info.title))
                             .unwrap_or_default(),
-                        icon: leopardwm_platform_win32::get_window_icon(w),
+                        icon: tab_icon(
+                            &mut icon_cache,
+                            w,
+                            refresh_icons,
+                            leopardwm_platform_win32::get_window_icon,
+                        ),
                     })
                     .collect();
                 desired.insert(
@@ -518,6 +552,8 @@ impl AppState {
                 );
             }
         }
+
+        self.tab_icon_cache = icon_cache;
 
         // Drop overlays whose key is no longer desired (column became
         // Vertical, workspace switched out, monitor disconnected, etc.).
@@ -663,4 +699,38 @@ pub(crate) fn hex_rgb_to_bgr(hex: &str) -> Option<u32> {
     let g = (color >> 8) & 0xFF;
     let b = color & 0xFF;
     Some((b << 16) | (g << 8) | r)
+}
+
+#[cfg(test)]
+mod tab_icon_tests {
+    use super::tab_icon;
+
+    #[test]
+    fn animation_icons_reuse_cached_results_and_refresh_updates_them() {
+        let mut cache = std::collections::HashMap::new();
+        let calls = std::cell::Cell::new(0);
+        let query = |_| {
+            calls.set(calls.get() + 1);
+            Some(calls.get())
+        };
+        assert_eq!(tab_icon(&mut cache, 10, false, query), Some(1));
+        assert_eq!(tab_icon(&mut cache, 10, false, query), Some(1));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(tab_icon(&mut cache, 10, true, query), Some(2));
+        assert_eq!(tab_icon(&mut cache, 10, false, query), Some(2));
+        assert_eq!(tab_icon(&mut cache, 20, false, |_| None), None);
+        assert_eq!(
+            tab_icon(&mut cache, 20, false, |_| panic!(
+                "cached missing icon was queried"
+            )),
+            None
+        );
+        assert_eq!(tab_icon(&mut cache, 10, true, |_| None), None);
+        assert_eq!(
+            tab_icon(&mut cache, 10, false, |_| panic!(
+                "refreshed missing icon was queried"
+            )),
+            None
+        );
+    }
 }

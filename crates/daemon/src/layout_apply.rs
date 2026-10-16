@@ -524,7 +524,7 @@ impl AppState {
                 self.show_border(hwnd);
             }
         }
-        self.update_tab_strip();
+        self.update_tab_strip_for_animation();
         Ok(true)
     }
 

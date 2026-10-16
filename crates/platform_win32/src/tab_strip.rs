@@ -52,7 +52,7 @@ fn snap_to_parity(target: i32, parity_of: i32) -> i32 {
 /// The strip does NOT take ownership of the icon; the daemon must keep it
 /// alive for the strip's lifetime, which is trivially true since icons
 /// belong to the windows that already outlive the strip's render call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabLabel {
     pub title: String,
     pub icon: Option<isize>,
@@ -102,7 +102,7 @@ pub struct TabActionEvent {
 }
 
 /// Color/style configuration for the tab strip.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabStripColors {
     /// Strip background color as 0xBBGGRR.
     pub bg: u32,
@@ -128,8 +128,25 @@ impl Default for TabStripColors {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct StripContent {
+    tabs: Vec<TabLabel>,
+    active_idx: usize,
+    width: i32,
+    height: i32,
+    colors: TabStripColors,
+    close_min: i32,
+    title_min: i32,
+    close_action: TabCloseAction,
+    hovered_tab: Option<usize>,
+    hovered_close: Option<usize>,
+}
+
 /// State shared between the daemon (caller) and the overlay's WndProc thread.
 struct TabStripState {
+    rendered_content: Option<StripContent>,
+    renders_in_flight: usize,
+    render_overlapped: bool,
     /// Last shown tabs (used for re-rendering and hit-test cache).
     tabs: Vec<TabLabel>,
     /// Currently active tab index (highlighted).
@@ -260,8 +277,37 @@ const TOOLTIP_FADE_INTERVAL_MS: u32 = 16;
 /// custom message and break the loop explicitly when it lands.
 const WM_QUIT_TAB_STRIP_THREAD: u32 = WM_USER + 4;
 
+impl TabStripState {
+    fn content(&self) -> StripContent {
+        StripContent {
+            tabs: self.tabs.clone(),
+            active_idx: self.active_idx,
+            width: self.strip_w,
+            height: self.strip_h,
+            colors: self.colors,
+            close_min: self.close_min_tab_w_px,
+            title_min: self.title_min_tab_w_px,
+            close_action: self.close_action,
+            hovered_tab: self.hovered_tab_idx,
+            hovered_close: self.hovered_close_idx,
+        }
+    }
+
+    fn can_reuse_render(&self) -> bool {
+        self.visible
+            && self.transition.is_none()
+            && self
+                .rendered_content
+                .as_ref()
+                .is_some_and(|rendered| *rendered == self.content())
+    }
+}
+
 fn default_tab_strip_state() -> TabStripState {
     TabStripState {
+        rendered_content: None,
+        renders_in_flight: 0,
+        render_overlapped: false,
         tabs: Vec::new(),
         active_idx: 0,
         strip_w: 0,
@@ -636,25 +682,26 @@ impl TabStripOverlay {
         // The window swap itself is instant; only the strip's highlight
         // bar slides between tabs.
         let new_active = active_idx.min(n.saturating_sub(1));
-        let (prev_active, prev_visible) = {
-            let reg = registry();
-            reg.states
-                .get(&(self.hwnd.0 as isize))
-                .map(|s| (s.active_idx, s.visible))
-                .unwrap_or((new_active, false))
-        };
+        let mut reg = registry();
+        let (prev_active, prev_visible, prev_transition) = reg
+            .states
+            .get(&(self.hwnd.0 as isize))
+            .map(|s| (s.active_idx, s.visible, s.transition))
+            .unwrap_or((new_active, false, None));
         let transition = if prev_visible && prev_active != new_active {
             Some(HighlightTransition {
                 from_idx: prev_active,
                 to_idx: new_active,
                 started_at: std::time::Instant::now(),
             })
+        } else if prev_visible {
+            prev_transition
         } else {
             None
         };
 
         // Update shared state (used by WndProc for hit testing).
-        let mut reg = registry();
+        let mut reuse_render = false;
         if let Some(state) = reg.states.get_mut(&(self.hwnd.0 as isize)) {
             // Preserve hover state across re-renders triggered by
             // icon-poll / title-change ticks (otherwise the X flickers
@@ -689,13 +736,30 @@ impl TabStripOverlay {
             state.close_min_tab_w_px = close_min_tab_w_px;
             state.title_min_tab_w_px = title_min_tab_w_px;
             state.close_action = close_action;
+            reuse_render = prev_visible && state.can_reuse_render();
         }
         drop(reg);
+
+        if reuse_render {
+            unsafe {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOP),
+                    strip_x,
+                    strip_y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+                let _ = ShowWindow(self.hwnd, SW_SHOWNA);
+            }
+            return;
+        }
 
         // Kick off animation timer if we started a transition. The WndProc
         // ticks every ~16ms, re-renders the strip with an interpolated
         // highlight, and kills the timer when the slide completes.
-        if transition.is_some() {
+        if transition.is_some() && prev_active != new_active {
             unsafe {
                 let _ = SetTimer(Some(self.hwnd), HIGHLIGHT_ANIM_TIMER_ID, 16, None);
             }
@@ -1122,40 +1186,46 @@ fn render_strip_now(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
     if w <= 0 || h <= 0 {
         return;
     }
-    let (tabs, active_idx, colors, transition, hovered, hovered_close, close_min, title_min) = {
-        let reg = registry();
-        let Some(s) = reg.states.get(&(hwnd.0 as isize)) else {
+    let (mut content, transition) = {
+        let mut reg = registry();
+        let Some(s) = reg.states.get_mut(&(hwnd.0 as isize)) else {
             return;
         };
-        (
-            s.tabs.clone(),
-            s.active_idx,
-            s.colors,
-            s.transition,
-            s.hovered_tab_idx,
-            s.hovered_close_idx,
-            s.close_min_tab_w_px,
-            s.title_min_tab_w_px,
-        )
+        if s.tabs.is_empty() {
+            return;
+        }
+        s.render_overlapped = s.renders_in_flight != 0;
+        s.renders_in_flight += 1;
+        s.rendered_content = None;
+        (s.content(), s.transition)
     };
-    if tabs.is_empty() {
-        return;
-    }
-    render_strip_inner(
+    content.width = w;
+    content.height = h;
+    let rendered = render_strip_inner(
         hwnd,
         x,
         y,
         w,
         h,
-        &tabs,
-        active_idx,
-        colors,
+        &content.tabs,
+        content.active_idx,
+        content.colors,
         transition,
-        hovered,
-        hovered_close,
-        close_min,
-        title_min,
+        content.hovered_tab,
+        content.hovered_close,
+        content.close_min,
+        content.title_min,
     );
+    let mut reg = registry();
+    if let Some(s) = reg.states.get_mut(&(hwnd.0 as isize)) {
+        // Overlapping paints cannot certify which bitmap won the race.
+        s.renders_in_flight -= 1;
+        s.rendered_content = if rendered && transition.is_none() && !s.render_overlapped {
+            Some(content)
+        } else {
+            None
+        };
+    }
 }
 
 /// Internal helper that does the actual GDI rendering. Separated from
@@ -1176,9 +1246,9 @@ fn render_strip_inner(
     hovered_close_idx: Option<usize>,
     close_min_tab_w_px: i32,
     title_min_tab_w_px: i32,
-) {
+) -> bool {
     if w <= 0 || h <= 0 {
-        return;
+        return false;
     }
     unsafe {
         // 32-bit top-down DIB. We use per-pixel alpha (AC_SRC_ALPHA)
@@ -1200,7 +1270,7 @@ fn render_strip_inner(
 
         let mut bits: *mut c_void = std::ptr::null_mut();
         let Ok(hbitmap) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
-            return;
+            return false;
         };
 
         // Fill bitmap on a memory DC so we can draw text into it.
@@ -1551,7 +1621,7 @@ fn render_strip_inner(
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
 
-        let _ = UpdateLayeredWindow(
+        let rendered = UpdateLayeredWindow(
             hwnd,
             Some(hdc_screen),
             Some(&pt_dst),
@@ -1586,6 +1656,7 @@ fn render_strip_inner(
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
         let _ = ShowWindow(hwnd, SW_SHOWNA);
+        rendered.is_ok()
     }
 }
 
@@ -2878,6 +2949,71 @@ pub(crate) const FONT_PIPELINE_DEFAULT_PITCH_AND_FAMILY: u32 = 0; // DEFAULT_PIT
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn render_reuse_requires_visible_settled_matching_pixels() {
+        let mut state = super::default_tab_strip_state();
+        state.tabs = vec![super::TabLabel {
+            title: "Editor".into(),
+            icon: Some(42),
+        }];
+        state.strip_w = 400;
+        state.strip_h = 28;
+        state.visible = true;
+        assert!(!state.can_reuse_render(), "unpainted content must render");
+        state.rendered_content = Some(state.content());
+        assert!(state.can_reuse_render());
+        state.strip_screen_x = 500;
+        state.strip_screen_y = 300;
+        assert!(
+            state.can_reuse_render(),
+            "position alone does not change pixels"
+        );
+        let changes: &[fn(&mut super::TabStripState)] = &[
+            |s| s.tabs[0].title.push('!'),
+            |s| s.tabs[0].icon = Some(43),
+            |s| {
+                s.tabs.push(super::TabLabel {
+                    title: "Other".into(),
+                    icon: None,
+                })
+            },
+            |s| s.active_idx = 1,
+            |s| s.strip_w += 1,
+            |s| s.strip_h += 1,
+            |s| s.colors.bg += 1,
+            |s| s.colors.active_bg += 1,
+            |s| s.colors.active_text -= 1,
+            |s| s.colors.inactive_text += 1,
+            |s| s.colors.opacity -= 1,
+            |s| s.close_min_tab_w_px += 1,
+            |s| s.title_min_tab_w_px += 1,
+            |s| s.close_action = super::TabCloseAction::Untab,
+            |s| s.hovered_tab_idx = Some(0),
+            |s| s.hovered_close_idx = Some(0),
+            |s| s.visible = false,
+            |s| {
+                s.transition = Some(super::HighlightTransition {
+                    from_idx: 0,
+                    to_idx: 0,
+                    started_at: std::time::Instant::now(),
+                })
+            },
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut changed = super::default_tab_strip_state();
+            changed.tabs = state.tabs.clone();
+            changed.strip_w = state.strip_w;
+            changed.strip_h = state.strip_h;
+            changed.visible = true;
+            changed.rendered_content = Some(changed.content());
+            change(&mut changed);
+            assert!(
+                !changed.can_reuse_render(),
+                "change {index} must invalidate pixels"
+            );
+        }
+    }
+
     use super::*;
 
     const BLUE_COLORREF: u32 = 0x00FF0000;
