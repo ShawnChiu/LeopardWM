@@ -1797,8 +1797,9 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
         }
     }
     drop(guard);
+    // The records went under the lock; clearing positions here could drop a newer queued move.
     for window_id in &deferrals.probe_expired {
-        clear_async_position(*window_id);
+        clear_queued_recovery(*window_id);
     }
     for entry in entries {
         if !entry.flags.contains(SWP_ASYNCWINDOWPOS) && mover::seal(entry) {
@@ -2003,7 +2004,8 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
             // Remove under the lock so a concurrent check of this expiry cannot spend the credit twice.
             submissions.remove(&window_id);
             drop(guard);
-            clear_async_position(window_id);
+            // Clearing positions here could drop a move queued after the lock was released.
+            clear_queued_recovery(window_id);
             false
         }
         AsyncPositionState::Expired => false,
@@ -2029,6 +2031,10 @@ fn clear_async_position(window_id: WindowId) {
     if let Some(positions) = lock_async_positions().as_mut() {
         positions.remove(&window_id);
     }
+    clear_queued_recovery(window_id);
+}
+
+fn clear_queued_recovery(window_id: WindowId) {
     if let Some(recoveries) = lock_queued_recoveries().as_mut() {
         recoveries.remove(&window_id);
     }
