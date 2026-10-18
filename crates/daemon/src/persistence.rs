@@ -1,5 +1,3 @@
-//! Workspace state persistence: save, load, and restore snapshots.
-
 use crate::helpers::ScaledLayoutParams;
 use crate::state::*;
 use anyhow::Result;
@@ -9,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
 impl AppState {
-    /// Save current workspace state to disk.
     pub(crate) fn save_state(&self) -> Result<()> {
         let json = self.build_state_json()?;
         Self::write_state_file(&json)?;
@@ -39,17 +36,13 @@ impl AppState {
         Ok(())
     }
 
-    /// Build the persisted-state JSON string (StateSnapshot serialized).
-    /// Does everything `save_state` does except the filesystem write, so
-    /// the debounced background task can build under the lock and write
-    /// outside it.
+    /// Build under the state lock so the background task can write outside it.
     pub(crate) fn build_state_json(&self) -> Result<String> {
         let mut snapshots: Vec<WorkspaceSnapshot> = Vec::new();
         for (monitor_id, ws_vec) in &self.workspaces {
             let active_idx = self.active_workspace_idx(*monitor_id);
             if let Some(monitor) = self.monitors.get(monitor_id) {
                 for (idx, workspace) in ws_vec.iter().enumerate() {
-                    // Save non-empty workspaces and the active workspace (even if empty)
                     if !workspace.all_window_ids().is_empty() || idx == active_idx {
                         snapshots.push(WorkspaceSnapshot {
                             monitor_device_name: monitor.device_name.clone(),
@@ -67,7 +60,6 @@ impl AppState {
             .map(|m| m.device_name.clone())
             .unwrap_or_default();
 
-        // Build active workspace map by device name
         let mut active_ws_map = HashMap::new();
         for (&monitor_id, &ws_idx) in &self.active_workspace {
             if let Some(monitor) = self.monitors.get(&monitor_id) {
@@ -125,7 +117,6 @@ impl AppState {
                             wid.hash(&mut hasher);
                         }
                     }
-                    // Floating windows: id + rect.
                     for f in workspace.floating_windows() {
                         f.id.hash(&mut hasher);
                         f.rect.x.hash(&mut hasher);
@@ -133,13 +124,11 @@ impl AppState {
                         f.rect.width.hash(&mut hasher);
                         f.rect.height.hash(&mut hasher);
                     }
-                    // Scroll offset rounded to whole pixels.
                     (workspace.scroll_offset().round() as i64).hash(&mut hasher);
                 }
             }
         }
 
-        // Tab title overrides: sorted keys + value lengths (cheap).
         let mut overrides: Vec<(u64, usize)> = self
             .tab_title_overrides
             .iter()
@@ -165,7 +154,6 @@ impl AppState {
         }
     }
 
-    /// Load saved workspace state from disk.
     pub(crate) fn load_state() -> Option<StateSnapshot> {
         let state_path = Self::state_file_path();
         match std::fs::read_to_string(&state_path) {
@@ -180,7 +168,6 @@ impl AppState {
         }
     }
 
-    /// Get the path for the state file.
     pub(crate) fn state_file_path() -> std::path::PathBuf {
         directories::ProjectDirs::from("", "", "leopardwm")
             .map(|dirs| dirs.data_dir().join("workspace-state.json"))
@@ -218,10 +205,6 @@ impl AppState {
         restored_slots
     }
 
-    /// Testable core of `restore_workspace_structure`: the `keep`
-    /// predicate decides which HWNDs survive pruning. Production passes the
-    /// real validity, class exclusion, and elevation checks; tests pass a fake so the
-    /// structure-rebuild logic can be exercised without Win32.
     pub(crate) fn restore_workspace_structure_with(
         &mut self,
         snapshot: &StateSnapshot,
@@ -248,10 +231,7 @@ impl AppState {
             // pathological length on startup.
             let ws_idx = ws_snapshot.workspace_index.min(8);
 
-            // Clone the saved workspace and drop windows that should not be
-            // restored (closed while the daemon was down, or now unmanageable).
-            // Mirror reconcile/migration pruning: use the type-preserving remove
-            // APIs (remove_window / remove_floating).
+            // Preserve each window's tiled/floating type when pruning the snapshot.
             let mut ws = ws_snapshot.workspace.clone();
             let to_drop: Vec<u64> = ws
                 .all_window_ids()
@@ -298,8 +278,6 @@ impl AppState {
             ws.set_scroll_offset(ws_snapshot.workspace.scroll_offset());
             ws.reconcile_scroll_bounds(vw);
 
-            // Install into the per-monitor vec, extending with fresh empty
-            // workspaces as needed.
             let entry = self.workspaces.entry(monitor_id).or_default();
             while entry.len() <= ws_idx {
                 let mut empty = Workspace::with_directional_gaps(
@@ -346,7 +324,6 @@ impl AppState {
         let mut restored_monitors = HashSet::new();
 
         for ws_snapshot in &snapshot.workspaces {
-            // Find matching monitor by device name
             let monitor_id = self
                 .monitors
                 .iter()
@@ -356,7 +333,6 @@ impl AppState {
             if let Some(id) = monitor_id {
                 let ws_idx = ws_snapshot.workspace_index;
                 if let Some(ws_vec) = self.workspaces.get_mut(&id) {
-                    // Extend the vec with empty workspaces if needed
                     let scale = self
                         .monitors
                         .get(&id)
@@ -393,7 +369,6 @@ impl AppState {
                         );
                         ws_vec.push(ws);
                     }
-                    // Restore scroll offset from saved workspace
                     let saved_offset = ws_snapshot.workspace.scroll_offset();
                     ws_vec[ws_idx]
                         .set_center_single_column(self.config.layout.center_single_column);
@@ -413,14 +388,12 @@ impl AppState {
             }
         }
 
-        // Restore active workspace indices (validate in range)
         for (device_name, &ws_idx) in &snapshot.active_workspace {
             if let Some((&id, _)) = self
                 .monitors
                 .iter()
                 .find(|(_, m)| &m.device_name == device_name)
             {
-                // Clamp to valid range — index must be within the workspace vec
                 let max_idx = self
                     .workspaces
                     .get(&id)
@@ -430,7 +403,6 @@ impl AppState {
             }
         }
 
-        // Restore focused monitor
         if let Some((&id, _)) = self
             .monitors
             .iter()

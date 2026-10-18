@@ -1,5 +1,3 @@
-//! Animation transitions: layout/workspace-switch transitions, the ghost-thumbnail path, and motion settings.
-
 use crate::animation_worker;
 use crate::state::*;
 use std::collections::HashMap;
@@ -14,7 +12,6 @@ pub(crate) fn reduce_motion_enabled(
 }
 
 impl AppState {
-    /// Check if any workspace has an active animation or layout transition.
     pub(crate) fn is_animating(&self) -> bool {
         self.layout_transition.is_some()
             || self
@@ -23,8 +20,6 @@ impl AppState {
                 .any(|ws_vec| ws_vec.iter().any(|w| w.is_animating()))
     }
 
-    /// Tick all active animations by the given delta time.
-    /// Returns true if any animation is still running.
     pub(crate) fn tick_animations(&mut self, delta_ms: u64) -> bool {
         let mut still_animating = false;
         let mut scroll_anims_settled = false;
@@ -54,7 +49,6 @@ impl AppState {
             .as_mut()
             .is_some_and(|transition| !transition.tick(delta_ms));
         if transition_complete {
-            // Transition complete — move exiting windows offscreen.
             for wid in self.layout_transition_exit_windows_to_park() {
                 let _ = leopardwm_platform_win32::park_window_for_placement(wid);
             }
@@ -110,8 +104,7 @@ impl AppState {
         true
     }
 
-    /// Snapshot the current placement rects for all tiled windows.
-    /// Call this *before* a structural layout change.
+    /// Capture placements *before* a structural layout change.
     pub(crate) fn snapshot_layout(
         &self,
     ) -> std::collections::HashMap<u64, leopardwm_core_layout::Rect> {
@@ -130,9 +123,7 @@ impl AppState {
         rects
     }
 
-    /// Start a layout transition animation from a pre-change snapshot.
-    /// Call this *after* the structural change and ensure_focused_visible_animated.
-    /// No-op when reduce_motion is active.
+    /// Call after the structural change and `ensure_focused_visible_animated`.
     pub(crate) fn start_layout_transition(
         &mut self,
         start_rects: std::collections::HashMap<u64, leopardwm_core_layout::Rect>,
@@ -155,18 +146,14 @@ impl AppState {
         // sources, and tells the worker to abort the fade.
         self.abort_active_ghost_transition();
 
-        // Determine which (if any) windows in this transition are eligible
-        // for the ghost-animation path. Targets are evaluated against the
-        // structural placements that will be live after this transition.
         let mut ghosted_wids = std::collections::HashSet::new();
         if self.config.behavior.swap_chain_ghost_animation {
             self.register_ghosts_for_transition(&start_rects, &mut ghosted_wids);
         }
 
-        // Start with one frame (~16ms) already elapsed so the first
-        // apply_layout/send_animation_frame shows visible movement.
-        // Carry a deferred focus border onto the replacement. Aborting
-        // would paint it on the rect this transition is about to leave.
+        // Start with one frame (~16ms) elapsed so the first applied frame moves.
+        // Carry the deferred focus border onto the replacement: aborting would
+        // paint it on the rect this transition is about to leave.
         let defer_focus_border = self.clear_layout_transition();
         self.layout_transition = Some(LayoutTransition {
             start_rects,
@@ -181,14 +168,9 @@ impl AppState {
         });
     }
 
-    /// Start a workspace switch transition that animates both entering and
-    /// exiting windows simultaneously (continuous vertical scroll effect).
-    /// No-op when reduce_motion is active.
-    ///
-    /// Workspace-switch transitions never use the ghost path: every window
-    /// either slides off-screen (exit_rects) or slides in from off-screen,
-    /// neither of which is the rapid-async-burst-while-visible scenario
-    /// that the swap-chain bug exhibits.
+    /// Workspace-switch transitions never use ghosts: windows slide offscreen
+    /// or enter from offscreen, rather than the rapid visible async bursts
+    /// that trigger the swap-chain bug.
     pub(crate) fn start_workspace_switch_transition(
         &mut self,
         start_rects: std::collections::HashMap<u64, leopardwm_core_layout::Rect>,
@@ -231,8 +213,8 @@ impl AppState {
         });
     }
 
-    /// Drop the in-flight layout transition without touching the focus border.
-    /// Returns whether that transition was still deferring the border.
+    /// Return the border deferral so a replacement can inherit it without
+    /// briefly painting the border at the old rect.
     fn clear_layout_transition(&mut self) -> bool {
         let deferred = self
             .layout_transition
@@ -347,12 +329,8 @@ impl AppState {
             .collect()
     }
 
-    /// Drop any in-flight ghost-animation handles, retaining unsafe sources
-    /// cloaked until a confirmed landing, then signal the worker to abort any
-    /// running crossfade.
-    ///
-    /// Routed through by every code path that mutates or clears
-    /// `layout_transition`. No-op when no ghost state is alive.
+    /// Keep unsafe sources cloaked until a confirmed landing, even after their
+    /// thumbnail handles have been dropped.
     pub(crate) fn abort_active_ghost_transition(&mut self) {
         // Each GhostEntry::Drop calls thumbnail::unregister_raw, so dropping
         // the handles is enough — no manual cleanup needed.
@@ -389,16 +367,11 @@ impl AppState {
         self.bump_physical_invalidation();
     }
 
-    /// Send `AbortCrossfade { epoch }` to the worker if a fade is in
-    /// flight. The worker checks between fade iterations and exits
-    /// early; CrossfadeComplete arrives within ~16ms (one DwmFlush).
-    ///
-    /// Daemon-side `active_crossfade` is cleared immediately so any
-    /// subsequent `should_ghost` evaluation doesn't see stale state,
-    /// but `crossfade_sources` stays populated until CrossfadeComplete
-    /// confirms the worker has stopped using the entries. This avoids
-    /// re-registering a thumbnail for the same source HWND while the
-    /// worker may still be updating the old one (Microsoft Q&A 3229922).
+    /// The worker checks aborts between fade iterations (normally one DwmFlush,
+    /// ~16ms). Clear `active_crossfade` immediately, but retain source barriers
+    /// until `CrossfadeComplete` confirms the worker stopped using the entries.
+    /// Re-registering the same source while the old thumbnail is still being
+    /// updated can break it (Microsoft Q&A 3229922).
     pub(crate) fn abort_active_crossfade(&mut self) {
         if let Some(state) = self.active_crossfade.take() {
             if let Some(ref ctrl) = self.animation_worker_control {
@@ -429,10 +402,6 @@ impl AppState {
             .retain(|_, (_, at)| at.elapsed() < crate::state::CROSSFADE_BARRIER_MAX_AGE);
     }
 
-    /// Walk the placements that will be live after the structural change,
-    /// register thumbnails for swap-chain-sensitive windows whose rect
-    /// is changing, and cloak the sources via GHOST_CLOAKED. Populates
-    /// `ghosted_wids` with the WindowIds we successfully registered.
     fn register_ghosts_for_transition(
         &mut self,
         start_rects: &std::collections::HashMap<u64, leopardwm_core_layout::Rect>,
@@ -452,8 +421,6 @@ impl AppState {
         let host_origin = leopardwm_platform_win32::thumbnail::host().origin();
         let focused = self.previous_focused_hwnd;
 
-        // Build a (wid -> (target_rect, monitor_id)) map from the
-        // animated placements on each monitor's active workspace.
         let mut targets: std::collections::HashMap<
             u64,
             (
@@ -475,8 +442,6 @@ impl AppState {
             }
         }
 
-        // Identify which monitor the focused window is on (used to gate
-        // cross-monitor moves out of the ghost path).
         let focused_monitor = focused
             .and_then(|wid| targets.get(&wid).map(|(_, mon)| *mon))
             .unwrap_or(self.focused_monitor);
@@ -549,13 +514,11 @@ impl AppState {
         }
     }
 
-    /// Apply layout transition interpolation to placements, including exit windows.
     pub(crate) fn apply_transition_interpolation(
         transition: &LayoutTransition,
         placements: &mut Vec<leopardwm_core_layout::WindowPlacement>,
     ) {
         let t = transition.eased_progress();
-        // Interpolate entering/morphing windows.
         for p in placements.iter_mut() {
             if let Some(start) = transition.start_rects.get(&p.window_id) {
                 p.rect = leopardwm_core_layout::Rect::new(
@@ -566,7 +529,6 @@ impl AppState {
                 );
             }
         }
-        // Interpolate exiting windows (e.g., old workspace sliding out).
         for (wid, target) in &transition.exit_rects {
             if let Some(start) = transition.start_rects.get(wid) {
                 placements.push(leopardwm_core_layout::WindowPlacement {
@@ -584,13 +546,8 @@ impl AppState {
         }
     }
 
-    /// Split animated placements into (live, ghost) streams. Ghosted wids
-    /// — those in `LayoutTransition.ghosted_wids` with a matching entry in
-    /// `ghost_handles` — get a `GhostFrame` per frame instead of a per-
-    /// frame SetWindowPos on the live HWND.
-    ///
-    /// Pure function: no Win32 calls, no mutation. Unit-testable with
-    /// stub `GhostEntry` values.
+    /// Ghost placements use thumbnail frames instead of moving the live HWND.
+    /// Coordinates are converted using the current thumbnail-host origin.
     pub(crate) fn partition_for_animation(
         placements: Vec<leopardwm_core_layout::WindowPlacement>,
         transition: Option<&LayoutTransition>,
@@ -623,10 +580,8 @@ impl AppState {
                         visible: true,
                     });
                 }
-                // If transition has the wid but ghost_handles doesn't —
-                // e.g., registration failed earlier — drop the placement
-                // entirely. The window will land at its target rect via
-                // the post-animation landing pass.
+                // A missing handle must not fall back to moving the live HWND during
+                // the ghost animation; the post-animation landing pass positions it.
             } else {
                 live.push(p);
             }
@@ -635,8 +590,6 @@ impl AppState {
         (live, ghosts)
     }
 
-    /// Recompute `reduce_motion` from the accessibility setting and power state,
-    /// propagating to all workspaces when the value changes.
     pub(crate) fn refresh_reduce_motion(&mut self) {
         let should_reduce = reduce_motion_enabled(
             leopardwm_platform_win32::are_animations_enabled(),

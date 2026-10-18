@@ -23,9 +23,7 @@ pub(crate) struct SubscribeStartup {
     pub(crate) receiver: broadcast::Receiver<IpcEvent>,
 }
 
-/// Events that the daemon event loop processes.
 pub(crate) enum DaemonEvent {
-    /// An IPC command from a CLI client.
     IpcCommand {
         cmd: IpcCommand,
         responder: oneshot::Sender<IpcResponse>,
@@ -39,20 +37,14 @@ pub(crate) enum DaemonEvent {
         events: BTreeSet<EventKind>,
         responder: oneshot::Sender<SubscribeStartup>,
     },
-    /// A window lifecycle event from Win32.
     WindowEvent(WindowEvent),
-    /// A global hotkey was pressed.
     Hotkey(HotkeyEvent),
-    /// Settings recorded a chord through the global keyboard hook.
     RecordedHotkey {
         modifiers: Modifiers,
         vk: u32,
     },
-    /// A touchpad gesture was detected.
     Gesture(GestureEvent),
-    /// A tray menu event.
     Tray(tray::TrayEvent),
-    /// A settings window event.
     Settings(settings::SettingsEvent),
     /// An animation frame was applied by the worker thread.
     AnimationFrameApplied(animation_worker::FrameResult),
@@ -62,27 +54,21 @@ pub(crate) enum DaemonEvent {
         epoch: u64,
         window_id: u64,
     },
-    /// A worker-driven crossfade for the given epoch completed (normal
-    /// end-of-fade OR aborted). Daemon clears `active_crossfade` and
-    /// releases the `crossfade_sources` re-registration barrier when the
-    /// epoch matches.
+    /// Normal or aborted completion releases that epoch's source barrier.
+    /// Clear `active_crossfade` only if its epoch also matches.
     CrossfadeComplete {
         epoch: u64,
     },
-    /// Hide snap hint overlay after timeout.
     HideSnapHint,
-    /// Apply focus-follows-mouse focus after delay.
     FocusFollowsMouse {
         window_id: u64,
     },
     /// Debounced display change — fires after WM_DISPLAYCHANGE settles.
     DisplayChangeSettled,
-    /// Power state changed (AC/battery or power saver toggled).
     PowerStateChanged {
         on_battery_or_saver: bool,
     },
     SuspendResume(leopardwm_platform_win32::SuspendResumeEvent),
-    /// Update checker observed a newer release tag (e.g. `v0.1.11`).
     UpdateAvailable(String),
     /// User invoked an action on a tab in the tab strip overlay. The
     /// strip captures the column identity (`monitor`, `workspace_idx`,
@@ -109,9 +95,6 @@ pub(crate) enum DaemonEvent {
     /// Tick that prunes tracked focus which vanished without a WinEvent and
     /// re-checks off-screen moves dropped during placement suppression.
     PeriodicCheck,
-    /// User action from the overview overlay (activate a window, switch
-    /// workspace, close a window, or dismiss). The overlay hit-tests its
-    /// own model copy; the daemon routes the resulting intent here.
     Overview(OverviewEvent),
     /// Rename-dialog result delivered from the spawned modal thread.
     /// `new_title: None` means cancel; `Some("")` means clear the
@@ -141,7 +124,6 @@ pub(crate) enum DaemonEvent {
     /// through the event loop (rather than locking `AppState` directly in
     /// the spawned task) because `AppState` is not `Send`.
     PersistStateNow,
-    /// Shutdown signal.
     Shutdown,
 }
 

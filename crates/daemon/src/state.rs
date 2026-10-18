@@ -1,5 +1,3 @@
-//! AppState struct definition, constructor, and basic accessors.
-
 use crate::config::{self, Config};
 use crate::physical_placement::PhysicalPresentation;
 use leopardwm_core_layout::{Rect, Visibility, Workspace};
@@ -21,23 +19,14 @@ pub(crate) enum DragPreviewMode {
     SafeBand,
 }
 
-/// Tracks an in-progress window drag for column reorder.
 pub(crate) struct DragState {
-    /// HWND being dragged.
     pub(crate) hwnd: u64,
-    /// Whether the dragged window is tiled (vs floating).
     pub(crate) is_tiled: bool,
-    /// Source monitor at drag start.
     pub(crate) source_monitor: MonitorId,
-    /// Source workspace index at drag start (0-based).
     pub(crate) source_workspace_idx: usize,
-    /// Original slot within the source column at drag start.
     pub(crate) source_window_slot: usize,
-    /// Current column index (initialized to source, changes as we live-reorder during drag).
     pub(crate) current_column_index: usize,
-    /// Last computed drop target (for change detection).
     pub(crate) last_drop_target: Option<DropTarget>,
-    /// Last time the drop target hint was updated (for throttling).
     pub(crate) last_hint_update: Option<std::time::Instant>,
     /// Whether the window was removed from its source column during drag
     /// (multi-window columns only; single-window columns keep the window to
@@ -57,7 +46,6 @@ pub(crate) struct DragState {
     pub(crate) source_column_peers: Vec<u64>,
 }
 
-/// Where a column would be inserted if dropped at the current position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DropTarget {
     pub(crate) monitor: MonitorId,
@@ -102,16 +90,12 @@ pub(crate) struct MoveOrigin {
     pub(crate) sibling: Option<u64>,
 }
 
-/// Action to show/hide the drag hint overlay, communicated from event handler to main loop.
 #[derive(Debug, Clone)]
 pub(crate) enum DragHintAction {
-    /// Show a semi-transparent ghost rectangle at the target column position.
     ShowGhost { rect: Rect },
-    /// Hide the drag hint overlay.
     Hide,
 }
 
-/// Fallback viewport dimensions when no monitor is detected.
 pub(crate) const FALLBACK_VIEWPORT_WIDTH: i32 = 1920;
 pub(crate) const FALLBACK_VIEWPORT_HEIGHT: i32 = 1080;
 pub(crate) const FALLBACK_WORK_AREA_HEIGHT: i32 = 1040;
@@ -121,12 +105,8 @@ pub(crate) const MAX_SET_WIDTH_FRACTION: f64 = 1.0;
 /// target column without moving the real window.
 pub(crate) const DRAG_PLACEHOLDER_HWND: u64 = u64::MAX;
 
-/// Maximum time to wait for the layout-apply worker before giving up and
-/// pausing the daemon. Raised from 1500ms to 5000ms so that transient CPU
-/// pressure (e.g. a `cargo build` or other all-cores workload running in the
-/// background) cannot trip the timeout and force a daemon pause + recovery.
-/// Genuinely hung windows hit Windows' own ~5s hung-app timeout anyway, so
-/// this doesn't materially weaken responsiveness guarantees.
+/// Allow transient all-core CPU pressure without pausing tiling; 5s also matches
+/// Windows' approximate hung-app timeout.
 pub(crate) const APPLY_LAYOUT_TIMEOUT: Duration = Duration::from_millis(5000);
 pub(crate) const DISPLAY_CHANGE_APPLY_RETRY_DELAY: Duration = Duration::from_secs(3);
 /// Suppress MovedOrResized events after placements are applied, so the
@@ -267,7 +247,6 @@ pub(crate) fn derive_native_swipe_status(
     }
 }
 
-/// Admission-time snapshot for a window the daemon left unmanaged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ElevationBlockedRecord {
     pub title: String,
@@ -292,7 +271,6 @@ pub(crate) struct ResizeAnimationRequest {
     pub(crate) target_rect: Rect,
 }
 
-/// Duration of resize preview transition animation in milliseconds.
 pub(crate) const RESIZE_PREVIEW_DURATION_MS: u64 = 100;
 
 pub(crate) fn lerp_i32(a: i32, b: i32, t: f64) -> i32 {
@@ -304,23 +282,15 @@ pub(crate) struct ExitProjectionProvenance {
     pub(crate) eligible: bool,
 }
 
-/// Tracks an in-progress layout transition animation.
-/// Interpolates window positions from a pre-change snapshot to the new layout.
 pub(crate) struct LayoutTransition {
-    /// Per-window starting rects (before the structural change).
     pub(crate) start_rects: HashMap<u64, Rect>,
-    /// Windows exiting the screen during the transition.
-    /// Maps window_id → target rect (offscreen). Start rects are in `start_rects`.
-    /// These windows are included in animation frames alongside entering windows.
-    /// When the transition completes, they are moved offscreen.
+    /// Exit-window targets are offscreen; starting rects live in `start_rects`.
+    /// They remain in animation frames until completion parks them.
     pub(crate) exit_rects: HashMap<u64, Rect>,
     /// Pre-mutation owner and projection eligibility for synthetic exit placements.
     pub(crate) exit_provenance: HashMap<u64, ExitProjectionProvenance>,
-    /// Elapsed time in milliseconds.
     pub(crate) elapsed_ms: u64,
-    /// Total duration in milliseconds.
     pub(crate) duration_ms: u64,
-    /// Easing curve for this transition (from `[animation].easing`).
     pub(crate) easing: leopardwm_core_layout::Easing,
     /// Window IDs being driven via a DWM thumbnail "ghost" rather than
     /// per-frame `SetWindowPos` on the live HWND. Pure data — the owning
@@ -427,7 +397,6 @@ impl LayoutTransition {
         self.elapsed_ms >= self.duration_ms
     }
 
-    /// Eased progress using this transition's configured easing curve.
     pub(crate) fn eased_progress(&self) -> f64 {
         self.easing.apply(self.progress())
     }
@@ -444,9 +413,7 @@ pub(crate) struct StashedMonitorLayout {
     pub(crate) source_viewport_width: i32,
 }
 
-/// Application state supporting multiple monitors.
 pub(crate) struct AppState {
-    /// Per-monitor workspace lists (multiple workspaces per monitor).
     pub(crate) workspaces: HashMap<MonitorId, Vec<Workspace>>,
     /// Active workspace index (0-based) per monitor.
     pub(crate) active_workspace: HashMap<MonitorId, usize>,
@@ -454,17 +421,11 @@ pub(crate) struct AppState {
     /// restored by the workspace's column state on switch, but floating
     /// focus is not, so we remember it here and re-focus it on return.
     pub(crate) floating_focus: HashMap<(MonitorId, usize), u64>,
-    /// Monitor info indexed by monitor ID.
     pub(crate) monitors: HashMap<MonitorId, MonitorInfo>,
-    /// Currently focused monitor.
     pub(crate) focused_monitor: MonitorId,
-    /// Platform configuration.
     pub(crate) platform_config: PlatformConfig,
-    /// User configuration.
     pub(crate) config: Config,
-    /// Pre-compiled window rules for efficient matching.
     pub(crate) compiled_rules: Vec<config::CompiledWindowRule>,
-    /// The designated scratchpad window and its shown/hidden state, if any.
     pub(crate) scratchpad: Option<ScratchpadState>,
     /// Windows pinned visible on every workspace. A sticky window is kept
     /// floating and re-homed to the active workspace on each switch.
@@ -480,7 +441,6 @@ pub(crate) struct AppState {
     /// clearing so the extra post-complete frame can still consume it.
     /// Cleared on consume, abort, or a newer transition start.
     pub(crate) pending_suppress_landing_focus_resync: bool,
-    /// Previously focused window for border color tracking.
     pub(crate) previous_focused_hwnd: Option<u64>,
     /// Suppresses delayed focus notifications for the exact window left by a
     /// successful workspace switch whose destination has no visible focus.
@@ -505,9 +465,7 @@ pub(crate) struct AppState {
     pub(crate) last_focus_change_at: Option<std::time::Instant>,
     /// Last time stale-window pruning ran (throttled to 1/sec).
     pub(crate) last_prune_at: Option<std::time::Instant>,
-    /// Border frame overlay for the active window.
     pub(crate) border_frame: Option<leopardwm_platform_win32::border::BorderFrame>,
-    /// Transparent foreground target used when the selected workspace is empty.
     pub(crate) focus_placeholder:
         Option<leopardwm_platform_win32::focus_placeholder::FocusPlaceholder>,
     #[cfg(test)]
@@ -533,13 +491,10 @@ pub(crate) struct AppState {
         (isize, usize, usize),
         leopardwm_platform_win32::tab_strip::TabStripOverlay,
     >,
-    /// Cached `mpsc::Sender<TabActionEvent>` used when spawning new tab
-    /// strip overlays on demand. Set once during startup (in `state.rs`
-    /// `init_tab_strip_overlay`) and reused for every strip created
-    /// afterward.
+    /// Shared action sender for lazily created tab strips, installed by
+    /// `install_tab_strip` during startup.
     pub(crate) tab_strip_action_tx:
         Option<std::sync::mpsc::Sender<leopardwm_platform_win32::tab_strip::TabActionEvent>>,
-    /// Whether the workspace overview overlay is currently shown.
     pub(crate) overview_open: bool,
     /// Overview overlay. NOT constructed in `new` — lazily created on the
     /// first `show_overview` so tests (and headless runs) never spawn the
@@ -555,9 +510,7 @@ pub(crate) struct AppState {
     /// the state lock. HICONs are app-owned shared handles — never
     /// destroyed here. Evicted on real window destroy.
     pub(crate) overview_icon_cache: HashMap<u64, Option<isize>>,
-    /// Whether tiling is paused.
     pub(crate) paused: bool,
-    /// Guard flag to suppress MovedOrResized events during apply_layout().
     pub(crate) applying_layout: bool,
     /// Guard flag: prevents recursive re-apply after a size-violation
     /// propagation. The first apply_layout call may detect fresh min-width
@@ -580,17 +533,13 @@ pub(crate) struct AppState {
     /// column widths and shift partially-visible windows. Reset after the
     /// settle handler runs.
     pub(crate) display_change_needs_full: bool,
-    /// Active drag state: tracks the window being dragged, source position, and drop target.
     pub(crate) drag_state: Option<DragState>,
     /// HWND being actively resized via border drag (not title bar move).
     /// Set on MoveSizeStart when cursor is on resize border, cleared on MoveSizeEnd.
     /// While set, layout snap-back is suppressed to prevent jitter.
     pub(crate) resize_hwnd: Option<u64>,
-    /// Throttle timestamp for resize preview hint updates (~60fps).
     pub(crate) last_resize_hint_update: Option<std::time::Instant>,
-    /// Current snap target rect during resize (for change detection).
     pub(crate) resize_preview_target: Option<Rect>,
-    /// Current displayed rect for overlay/border during resize preview.
     pub(crate) resize_preview_display_rect: Option<Rect>,
     /// Pending animation request (consumed by main loop to spawn DwmFlush thread).
     pub(crate) pending_resize_animation: Option<ResizeAnimationRequest>,
@@ -600,7 +549,6 @@ pub(crate) struct AppState {
     pub(crate) resize_animation_active: Arc<AtomicBool>,
     /// Pending overlay action from drag event handler (consumed by main loop).
     pub(crate) pending_drag_hint: Option<DragHintAction>,
-    /// Per-window suppression deadline for MovedOrResized events after apply_layout().
     pub(crate) moved_or_resized_suppression: HashMap<u64, std::time::Instant>,
     pub(crate) deferred_moved_or_resized: HashSet<u64>,
     pub(crate) deferred_physical_landings: HashSet<u64>,
@@ -616,7 +564,6 @@ pub(crate) struct AppState {
     /// rect within a few pixels, the layout is already correct and we skip
     /// the expensive full-retile snap-back.
     pub(crate) last_placed_layout_rects: HashMap<u64, leopardwm_core_layout::Rect>,
-    /// Intended/confirmed physical disposition keyed by HWND.
     pub(crate) last_physical_presentations: HashMap<u64, PhysicalPresentation>,
     pub(crate) pending_physical_presentations: HashMap<u64, PhysicalPresentation>,
     pub(crate) inflight_origins: HashMap<u64, HashMap<u64, PhysicalPresentation>>,
@@ -639,14 +586,10 @@ pub(crate) struct AppState {
     pub(crate) pending_apply_workers: Vec<std::thread::JoinHandle<()>>,
     /// Workers whose late visibility recovery is deferred to a replacement apply.
     pub(crate) suppressed_late_recovery_workers: HashMap<std::thread::ThreadId, Arc<AtomicBool>>,
-    /// Max time allowed for Win32 placement calls before auto-pausing tiling.
     pub(crate) layout_apply_timeout: Duration,
-    /// One-shot report consumed by the main loop after an automatic timeout pause.
     pub(crate) pending_layout_apply_timeout_report: Option<LayoutApplyTimeoutReport>,
-    /// Startup snapshot of native three-finger swipe activation.
     pub(crate) native_swipes: NativeSwipeStatus,
     pub(crate) daemon_log: Option<crate::daemon_log::LogHealth>,
-    /// Daemon start time for uptime reporting.
     pub(crate) start_time: std::time::Instant,
     /// HWNDs hidden while managed only briefly, used to suppress re-creation of
     /// Electron popup windows that show and hide the same HWND. The stored token
@@ -688,13 +631,9 @@ pub(crate) struct AppState {
     /// original column instead of right of focus. Cleared when consumed or when
     /// the window dies. Session-only, never persisted.
     pub(crate) move_origins: HashMap<u64, MoveOrigin>,
-    /// Layout of monitors that disconnected this session, keyed by the stable
-    /// `device_name` (e.g. `\\.\DISPLAY2`) rather than the volatile HMONITOR.
-    /// When a monitor with a matching device name reconnects, its saved
-    /// workspaces (columns, widths, minimized state) and active index are
-    /// restored, so a screen powering off overnight or an undock/redock no
-    /// longer flattens the layout. Windows are migrated to primary while the
-    /// monitor is gone and pulled back on return. Session-only, never persisted.
+    /// Disconnected-monitor layouts use stable `device_name` keys rather than
+    /// volatile HMONITORs. Windows migrate to primary while disconnected and
+    /// return with their saved layout when the device reconnects. Session-only.
     pub(crate) stashed_monitor_layouts: HashMap<String, StashedMonitorLayout>,
     /// Tracks when each managed window was added to a workspace. Used to
     /// distinguish transient popups (managed briefly) from real windows
@@ -713,13 +652,12 @@ pub(crate) struct AppState {
     /// Lightweight daemon-side mirror — the platform-layer global static is
     /// the authoritative recovery set.
     pub(crate) snap_disabled_hwnds: HashSet<u64>,
-    /// System is on battery power or Windows power saver is active.
     pub(crate) on_battery_or_saver: bool,
-    /// Skip animations and snap instantly (accessibility setting off or on battery/power saver).
+    /// Skip animations when accessibility disables them, or on battery/power
+    /// saver when `animation.reduce_motion_on_battery` is enabled.
     pub(crate) reduce_motion: bool,
     /// Windows High Contrast mode is active — override border color with system highlight.
     pub(crate) high_contrast: bool,
-    /// Active layout transition animation (window position interpolation).
     pub(crate) layout_transition: Option<LayoutTransition>,
     /// DWM thumbnail handles owned across a ghost-animated transition.
     /// Survives `LayoutTransition` clearing (so the landing pass can drain
@@ -733,25 +671,15 @@ pub(crate) struct AppState {
     /// `epoch` lets us discriminate stale `CrossfadeComplete` events
     /// (from fades aborted by a newer transition).
     pub(crate) active_crossfade: Option<CrossfadeState>,
-    /// Window IDs whose thumbnails the worker is currently fading out.
-    /// Per-epoch map of source wids currently in a worker-side crossfade
-    /// (live or aborted-but-pending-ack). An entry is inserted when sending
-    /// `WorkerCommand::Crossfade` and removed when the matching
-    /// `CrossfadeComplete { epoch }` arrives. `should_ghost` refuses to
-    /// register a new thumbnail for any wid that appears in ANY entry's
-    /// value set — Microsoft Q&A 3229922 documents that registering a
-    /// second thumbnail for the same source while the first is still alive
-    /// can break the first on Win10 1903. Tracking per-epoch (rather than
-    /// a flat union) is required because abort paths can leave multiple
-    /// crossfades pending-ack simultaneously; clearing on any completion
-    /// would prematurely release the barrier for a still-live epoch.
+    /// Per-epoch source HWNDs in worker-side crossfades, including aborted fades
+    /// awaiting acknowledgement. `register_ghosts_for_transition` refuses sources
+    /// present in any epoch: Microsoft Q&A 3229922 documents that registering a
+    /// second thumbnail for the same source can break the first on Win10 1903.
+    /// Per-epoch tracking prevents one completion from releasing another fade
+    /// that still owns the source.
     ///
-    /// Each entry carries the dispatch `Instant`. Normally the entry is
-    /// removed when its `CrossfadeComplete` arrives; the timestamp is a
-    /// safety net: if a worker ever dies without acking (today only at
-    /// shutdown), `register_ghosts_for_transition` sweeps any epoch older
-    /// than `CROSSFADE_BARRIER_MAX_AGE` so the barrier self-heals instead
-    /// of stranding those wids out of the ghost path forever.
+    /// Dispatch timestamps let registration sweep barriers older than
+    /// `CROSSFADE_BARRIER_MAX_AGE` if a worker fails to acknowledge completion.
     pub(crate) crossfade_sources:
         std::collections::HashMap<u64, (HashSet<u64>, std::time::Instant)>,
     /// Monotonic counter minted at each new crossfade. Used to tag
@@ -780,8 +708,6 @@ pub(crate) struct AppState {
     /// retained after the bounded retry budget is exhausted so a later normal
     /// layout apply can still complete it.
     pub(crate) idle_layout_reapply_failures: u8,
-    /// Injected window info for testing. When set, `lookup_window_info()` returns
-    /// entries from this map instead of calling `enumerate_windows()`.
     #[cfg(test)]
     pub(crate) injected_window_info: HashMap<u64, leopardwm_platform_win32::WindowInfo>,
     #[cfg(test)]
@@ -819,23 +745,19 @@ pub(crate) struct AppState {
     pub(crate) injected_enumerated_windows: Option<Vec<leopardwm_platform_win32::WindowInfo>>,
     #[cfg(test)]
     pub(crate) injected_native_restore_error: Option<String>,
-    /// Count of uncloak requests that production would issue to DWM.
     #[cfg(test)]
     pub(crate) injected_native_uncloak_count: AtomicUsize,
-    /// Test-only snap-disable result that skips `remove_maximizebox`.
     #[cfg(test)]
     pub(crate) injected_snap_disable_override: Option<Result<bool, String>>,
     /// Snap-disable attempts that passed pause, config, and tracking guards.
     #[cfg(test)]
     pub(crate) injected_snap_disable_attempt_count: AtomicUsize,
-    /// Per-window native maximize responses for deterministic daemon tests.
     #[cfg(test)]
     pub(crate) injected_window_maximized: HashMap<u64, bool>,
     #[cfg(test)]
     pub(crate) injected_press_count: Option<u64>,
     #[cfg(test)]
     pub(crate) departing_foreground_evidence_reads: usize,
-    /// Test-only GetTickCount stand-in for last-window departure arming.
     #[cfg(test)]
     pub(crate) injected_event_time_ms: Option<u32>,
     /// Lets a test park real probe windows. Default tests leave this off so a
@@ -850,25 +772,20 @@ pub(crate) struct AppState {
     pub(crate) injected_stale_hwnds: Vec<u64>,
     #[cfg(test)]
     pub(crate) injected_iconic_hwnds: HashSet<u64>,
-    /// Optional test-only behavior override for placement application.
     #[cfg(test)]
     pub(crate) injected_apply_placements_behavior: Option<TestApplyPlacementsBehavior>,
     #[cfg(test)]
     pub(crate) injected_apply_placements_call_count: Arc<AtomicUsize>,
     #[cfg(test)]
     pub(crate) injected_apply_placements_batches: Arc<std::sync::Mutex<Vec<Vec<u64>>>>,
-    /// Test-only cascade result and observations for release-all behavior.
     #[cfg(test)]
     pub(crate) injected_release_cascade_result: Option<std::result::Result<(), String>>,
     #[cfg(test)]
     pub(crate) released_window_id_batches: Vec<Vec<u64>>,
-    /// Number of late-worker recovery passes executed after cancellation.
     #[cfg(test)]
     pub(crate) late_worker_recovery_count: Arc<AtomicUsize>,
-    /// Number of paused display retries that request layout recovery.
     #[cfg(test)]
     pub(crate) paused_display_retry_recovery_count: Arc<AtomicUsize>,
-    /// Number of late-worker reaping recovery passes requested, including test no-ops.
     #[cfg(test)]
     pub(crate) late_apply_worker_reap_recovery_count: Arc<AtomicUsize>,
     /// Test-only display-change topology so `on_display_change` does not
@@ -890,7 +807,6 @@ pub(crate) struct AppState {
     /// used to dedup repeat emissions when the layout signature is
     /// unchanged (e.g. animation frames between settled positions).
     pub(crate) last_emitted_layout_sig: Option<u64>,
-    /// Last complete workspace model and its daemon-session identity.
     pub(crate) workspace_ipc_state: crate::workspace_ipc::WorkspaceIpcState,
     /// Sender for debounced workspace-state saves. Installed at startup
     /// via `install_save_channel`; left `None` under cfg(test) and before
@@ -945,7 +861,6 @@ impl PendingWorkspaceSwitchFocus {
     }
 }
 
-/// How the last-window departure focus guard was armed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LastWindowDepartureOrigin {
     DirectDestroyedOrHidden,
@@ -1013,16 +928,13 @@ pub(crate) struct PendingTabFocus {
 }
 
 impl PendingTabFocus {
-    /// TTL after which the flag is considered stale and ignored.
     pub(crate) const TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
-    /// Whether this pending intent still applies (within TTL).
     pub(crate) fn is_fresh(&self) -> bool {
         self.set_at.elapsed() < Self::TTL
     }
 }
 
-/// Snapshot of workspace state for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkspaceSnapshot {
     /// Monitor device name (stable across restarts, unlike MonitorId/HMONITOR).
@@ -1031,18 +943,13 @@ pub(crate) struct WorkspaceSnapshot {
     /// Defaults to 0 for backward compatibility with old snapshots.
     #[serde(default)]
     pub(crate) workspace_index: usize,
-    /// Saved workspace state.
     pub(crate) workspace: Workspace,
 }
 
-/// Full daemon state snapshot for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StateSnapshot {
-    /// Timestamp when state was saved.
     pub(crate) saved_at: String,
-    /// Per-monitor workspace snapshots.
     pub(crate) workspaces: Vec<WorkspaceSnapshot>,
-    /// Which monitor was focused (by device name).
     pub(crate) focused_monitor_name: String,
     /// Active workspace index per monitor (by device name).
     /// Defaults to empty for backward compatibility.
@@ -1061,7 +968,6 @@ impl AppState {
         config
     }
 
-    /// Create new state with config and monitors.
     pub(crate) fn new_with_config(config: Config, monitors: Vec<MonitorInfo>) -> Self {
         use crate::helpers::ScaledLayoutParams;
 
@@ -1109,12 +1015,10 @@ impl AppState {
             monitor_map.insert(monitor.id, monitor);
         }
 
-        // If no primary found, use first monitor (defensive pattern avoids unwrap)
         if focused_monitor == 0 {
             if let Some(&first_id) = monitor_map.keys().next() {
                 focused_monitor = first_id;
             }
-            // If map is empty, focused_monitor stays 0; focused_workspace() returns None
         }
 
         let platform_config = PlatformConfig::default();
@@ -1160,10 +1064,6 @@ impl AppState {
             tab_strip_hide_count: AtomicUsize::new(0),
             #[cfg(test)]
             tab_strip_update_count: AtomicUsize::new(0),
-            // Tab strip overlays are spawned on demand by `update_tab_strip`
-            // — there's no global "the strip" anymore. `install_tab_strip`
-            // just stashes the action sender so subsequent spawns can wire
-            // it to the same DaemonEvent drain.
             tab_icon_cache: std::collections::HashMap::new(),
             tab_strip_overlays: std::collections::HashMap::new(),
             tab_strip_action_tx: None,
@@ -1371,7 +1271,6 @@ impl AppState {
             .retain(|hwnd, _| managed.contains(hwnd));
     }
 
-    /// Get the active workspace index (0-based) for a given monitor.
     pub(crate) fn active_workspace_idx(&self, monitor_id: MonitorId) -> usize {
         self.active_workspace.get(&monitor_id).copied().unwrap_or(0)
     }
@@ -1397,11 +1296,8 @@ impl AppState {
         let _ = self.workspace_event_broadcaster.send(event);
     }
 
-    /// Broadcast `FocusedWindowChanged` if `hwnd` differs from the last
-    /// broadcast. Centralizes the dedup so OS-driven and command-driven
-    /// focus paths emit through the same gate. Looks up window info for
-    /// the title/class/executable payload; pass `hwnd: None` when focus
-    /// was cleared.
+    /// Deduplicate OS-driven and command-driven focus broadcasts by both monitor
+    /// and HWND; moving the same window across monitors must still emit an event.
     pub(crate) fn broadcast_focused_window_if_changed(&mut self, monitor: i64, hwnd: Option<u64>) {
         if self.last_broadcast_focused == Some((monitor, hwnd)) {
             return;
@@ -1473,7 +1369,6 @@ impl AppState {
         hasher.finish()
     }
 
-    /// Build the column summary list for a `LayoutChanged` event payload.
     pub(crate) fn focused_layout_columns(&self) -> Vec<leopardwm_ipc::ColumnSummary> {
         let ws_idx = self.active_workspace_idx(self.focused_monitor);
         self.workspaces
@@ -1502,13 +1397,11 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Get the currently focused workspace (active workspace on the focused monitor).
     pub(crate) fn focused_workspace(&self) -> Option<&Workspace> {
         let idx = self.active_workspace_idx(self.focused_monitor);
         self.workspaces.get(&self.focused_monitor)?.get(idx)
     }
 
-    /// Get the currently focused workspace mutably.
     pub(crate) fn focused_workspace_mut(&mut self) -> Option<&mut Workspace> {
         let idx = self.active_workspace_idx(self.focused_monitor);
         self.workspaces.get_mut(&self.focused_monitor)?.get_mut(idx)
@@ -1544,24 +1437,13 @@ impl AppState {
         }
     }
 
-    /// Install the tab strip overlay. Called once during daemon startup
-    /// after the action channel pair has been created in main.rs scope —
-    /// the overlay receives `tab_action_tx` and posts to it on
-    /// WM_LBUTTONDOWN / WM_MBUTTONUP / WM_RBUTTONUP / close-X hit; main.rs
-    /// drains the matching receiver and routes the action.
     pub(crate) fn install_tab_strip(
         &mut self,
         tab_action_tx: std::sync::mpsc::Sender<leopardwm_platform_win32::tab_strip::TabActionEvent>,
     ) {
-        // Stash the sender for on-demand spawning. `update_tab_strip`
-        // creates one `TabStripOverlay` per tabbed column the next time
-        // it runs — all of them share this cloned sender so click /
-        // close / rename actions land in the same DaemonEvent drain.
         self.tab_strip_action_tx = Some(tab_action_tx);
     }
 
-    /// Install the overview event sender. The overlay itself is created
-    /// lazily on first `show_overview`; this just stashes the channel.
     pub(crate) fn install_overview(
         &mut self,
         event_tx: std::sync::mpsc::Sender<leopardwm_platform_win32::overview::OverviewEvent>,
@@ -1636,8 +1518,6 @@ impl AppState {
         }
     }
 
-    /// Ensure workspace index exists for a monitor, creating empty workspaces as needed.
-    /// Returns a mutable reference to the workspace at the given index.
     pub(crate) fn ensure_workspace_exists(
         &mut self,
         monitor_id: MonitorId,
@@ -1693,7 +1573,6 @@ impl AppState {
         });
     }
 
-    /// Get the focused monitor's viewport.
     pub(crate) fn focused_viewport(&self) -> Rect {
         self.monitors
             .get(&self.focused_monitor)
@@ -1701,7 +1580,6 @@ impl AppState {
             .unwrap_or_else(|| Rect::new(0, 0, FALLBACK_VIEWPORT_WIDTH, FALLBACK_VIEWPORT_HEIGHT))
     }
 
-    /// Get the viewport width for a specific monitor.
     pub(crate) fn viewport_width_for(&self, monitor_id: MonitorId) -> i32 {
         self.monitors
             .get(&monitor_id)
