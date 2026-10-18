@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Supervises the daemon, uncloaks windows after abnormal exits, and bounds crash restarts.
+//! Supervises the daemon, restores hidden windows after abnormal exits, and bounds crash restarts.
 
 use anyhow::{Context, Result};
 use std::fs::{self, OpenOptions};
