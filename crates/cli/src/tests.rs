@@ -1510,9 +1510,9 @@ fn native_swipes_check_warns_with_reason_and_passes_when_off() {
 }
 
 #[test]
-fn collect_logs_includes_full_gesture_capture_not_last_100() {
+fn collect_logs_report_includes_full_gesture_capture_not_last_100() {
     let dir = std::env::temp_dir().join(format!(
-        "lwm-collect-logs-{}-{}",
+        "leopardwm-collect-logs-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1527,35 +1527,62 @@ fn collect_logs_includes_full_gesture_capture_not_last_100() {
     fs::write(&daemon, &daemon_body).unwrap();
     fs::write(&capture, &capture_body).unwrap();
 
-    let daemon_section = format_file_section("Daemon Log", &daemon, Some(100));
-    let capture_section = format_file_section("Gesture Capture", &capture, None);
+    let config_path = dir.join("config.toml");
+    let config_body = "[behavior]\nlog_level = \"debug\"\n";
+    fs::write(&config_path, config_body).unwrap();
+    let mut output = Vec::new();
+    let result = write_collect_logs_report(
+        &mut output,
+        (Some(config_path.clone()), config_path),
+        &dir,
+        CollectLogsDaemon::NotRunning,
+        None,
+    );
+    fs::remove_dir_all(&dir).unwrap();
+    result.unwrap();
+    let report = String::from_utf8(output).unwrap();
+    assert!(
+        report.contains(config_body),
+        "temporary config missing from report"
+    );
+    assert!(report.contains("status unavailable because the daemon is not running"));
+    let daemon_section = report
+        .split_once("## Daemon Log (")
+        .unwrap()
+        .1
+        .split_once("## Daemon Error Log (")
+        .unwrap()
+        .0;
+    let capture_section = report
+        .split_once("## Gesture Capture (")
+        .unwrap()
+        .1
+        .split_once("## Daemon Binary:")
+        .unwrap()
+        .0;
 
-    assert!(
-        daemon_section.contains("daemon-line-149"),
-        "{daemon_section}"
+    assert!(daemon_section.contains("daemon-line-149\n"));
+    assert!(daemon_section.contains("daemon-line-50\n"));
+    assert!(!daemon_section.contains("daemon-line-49\n"));
+    assert!(!daemon_section.contains("daemon-line-0\n"));
+    assert_eq!(
+        daemon_section
+            .lines()
+            .filter(|line| line.starts_with("daemon-line-"))
+            .count(),
+        100,
     );
+    assert!(daemon_section.contains("50 earlier lines omitted"));
     assert!(
-        !daemon_section.contains("daemon-line-0"),
-        "{daemon_section}"
+        capture_section.contains("capture-line-0\n"),
+        "report dropped the first gesture capture line"
     );
+    assert!(capture_section.contains("capture-line-149\n"));
     assert!(
-        daemon_section.contains("earlier lines omitted"),
-        "{daemon_section}"
+        capture_section.contains(&capture_body),
+        "report must preserve the entire gesture capture"
     );
-    assert!(
-        capture_section.contains("capture-line-0"),
-        "{capture_section}"
-    );
-    assert!(
-        capture_section.contains("capture-line-149"),
-        "{capture_section}"
-    );
-    assert!(
-        !capture_section.contains("earlier lines omitted"),
-        "{capture_section}"
-    );
-
-    let _ = fs::remove_dir_all(&dir);
+    assert!(!capture_section.contains("earlier lines omitted"));
 }
 
 #[test]
