@@ -46,7 +46,7 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         direction: ScrollDirection,
     },
-    /// Move the focused column left or right
+    /// Move the focused column left, right, or to either end of the strip
     Move {
         #[command(subcommand)]
         direction: MoveDirection,
@@ -341,7 +341,7 @@ pub(crate) enum DoctorAction {
         /// Re-sample for N seconds (1–120; 100ms interval) to catch transient popups
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=120))]
         watch: Option<u64>,
-        /// Wait N seconds before a single snapshot (1–120)
+        /// Wait N seconds before the snapshot or --watch starts (1–120)
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=120))]
         delay: Option<u64>,
         /// Show real window titles (default redacts them for safe pasting)
