@@ -11204,9 +11204,39 @@ fn test_restore_clears_minimized() {
 
 #[test]
 fn test_minimize_unmanaged_window_noop() {
-    let state = AppState::new_with_config(test_config(), test_monitors());
-    // No windows added -- unmanaged window ID
-    assert!(state.find_window_workspace(999).is_none());
+    let mut state = AppState::new_with_config(test_config(), test_monitors());
+    state.paused = false;
+    state.injected_apply_placements_behavior =
+        Some(TestApplyPlacementsBehavior::SleepAndSucceed(Duration::ZERO));
+    state
+        .focused_workspace_mut()
+        .unwrap()
+        .insert_window(100, Some(800))
+        .unwrap();
+    state.previous_focused_hwnd = Some(100);
+    state
+        .injected_window_info
+        .insert(999, make_test_window_info(999));
+
+    state.handle_window_event(WindowEvent::Minimized(999, 0));
+    assert_eq!(state.mark_minimized_and_reflow(999), None);
+
+    let workspace = state.focused_workspace().unwrap();
+    assert!(!workspace.contains_window(999));
+    assert!(!workspace.is_minimized(100));
+    assert_eq!(workspace.minimized_count(), 0);
+    assert_eq!(workspace.focused_window(), Some(100));
+    assert_eq!(state.focused_monitor, 1);
+    assert_eq!(state.previous_focused_hwnd, Some(100));
+    assert!(state.layout_transition.is_none());
+    assert!(state.pending_last_window_departure.is_none());
+    assert_eq!(
+        state
+            .injected_apply_placements_call_count
+            .load(Ordering::SeqCst),
+        0,
+        "an unmanaged minimize must not dispatch a reflow"
+    );
 }
 
 #[test]
@@ -11654,14 +11684,35 @@ fn test_restored_window_becomes_focused() {
 }
 
 #[test]
-fn test_paused_state_skips_events() {
+fn test_paused_focus_command_moves_logical_focus_without_placement() {
     let mut state = AppState::new_with_config(test_config(), test_monitors());
+    state.injected_apply_placements_behavior =
+        Some(TestApplyPlacementsBehavior::SleepAndSucceed(Duration::ZERO));
+    {
+        let workspace = state.focused_workspace_mut().unwrap();
+        workspace.insert_window(100, Some(800)).unwrap();
+        workspace.insert_window(200, Some(800)).unwrap();
+    }
+    assert_eq!(
+        state.focused_workspace().unwrap().focused_window(),
+        Some(200)
+    );
     state.paused = true;
-    // Commands should still return Ok but not cause side effects
-    let resp = state.handle_command(IpcCommand::FocusLeft);
-    assert_eq!(resp, IpcResponse::Ok);
-    let resp = state.handle_command(IpcCommand::Refresh);
-    assert_eq!(resp, IpcResponse::Ok);
+
+    assert_eq!(state.handle_command(IpcCommand::FocusLeft), IpcResponse::Ok);
+
+    assert_eq!(
+        state.focused_workspace().unwrap().focused_window(),
+        Some(100)
+    );
+    assert!(state.paused);
+    assert_eq!(
+        state
+            .injected_apply_placements_call_count
+            .load(Ordering::SeqCst),
+        0,
+        "a paused command must not dispatch placements"
+    );
 }
 
 #[test]
@@ -12159,19 +12210,28 @@ fn test_restored_floating_window_does_not_steal_tiled_focus() {
 #[test]
 fn test_applying_layout_flag_cleared_after_layout_with_windows() {
     let mut state = AppState::new_with_config(test_config(), test_monitors());
+    state.paused = false;
+    state.injected_apply_placements_behavior =
+        Some(TestApplyPlacementsBehavior::SleepAndSucceed(Duration::ZERO));
 
-    // Add windows so apply_layout computes real placements (not empty)
     let ws = &mut state.workspaces.get_mut(&1).unwrap()[0];
     ws.insert_window(100, Some(800)).unwrap();
     ws.insert_window(200, Some(800)).unwrap();
 
-    // Whether apply_layout succeeds or fails depends on Win32 API availability.
-    // The important thing is that applying_layout is always cleared afterwards.
     assert!(!state.applying_layout, "flag should be false before call");
-    let _result = state.apply_layout();
+    state
+        .apply_layout()
+        .expect("injected placement should succeed");
+    assert_eq!(
+        state
+            .injected_apply_placements_call_count
+            .load(Ordering::SeqCst),
+        1,
+        "the unpaused apply must reach the placement worker"
+    );
     assert!(
         !state.applying_layout,
-        "applying_layout must be cleared after apply_layout returns (success or error)"
+        "applying_layout must be cleared after a successful apply"
     );
 }
 
@@ -17705,23 +17765,26 @@ fn test_snap_style_requests_do_not_wait_for_non_pumping_window() {
 }
 
 #[test]
-fn test_snap_disable_on_tile() {
+fn test_snap_disable_failure_leaves_window_untracked() {
     let mut config = test_config();
     config.behavior.disable_snap_layouts = true;
     let mut state = AppState::new_with_config(config, test_monitors());
+    state.paused = false;
+    state.injected_snap_disable_override = Some(Err("fixture failure".into()));
 
-    // Manually insert a tiled window and call disable_snap_for_window
-    let hwnd = 42u64;
-    if let Some(ws) = state.focused_workspace_mut() {
-        ws.insert_window(hwnd, None).unwrap();
-    }
-    state.disable_snap_for_window(hwnd);
+    state.disable_snap_for_window(42);
 
-    // Daemon-side tracking set should contain the window
-    // (Win32 call fails for synthetic HWND, so the set won't be populated
-    //  since remove_maximizebox returns an error for invalid handles)
-    // But we can verify the method doesn't panic
-    assert!(!state.snap_disabled_hwnds.contains(&hwnd));
+    assert_eq!(
+        state
+            .injected_snap_disable_attempt_count
+            .load(Ordering::Relaxed),
+        1,
+        "an active tiling daemon must attempt suppression"
+    );
+    assert!(
+        !state.snap_disabled_hwnds.contains(&42),
+        "a failed removal must not be tracked for later restore"
+    );
 }
 
 #[test]
@@ -17802,10 +17865,22 @@ fn test_snap_disable_when_config_disabled() {
     let mut config = test_config();
     config.behavior.disable_snap_layouts = false;
     let mut state = AppState::new_with_config(config, test_monitors());
+    state.paused = false;
+    state.injected_snap_disable_override = Some(Ok(true));
+    let attempts = |state: &AppState| {
+        state
+            .injected_snap_disable_attempt_count
+            .load(Ordering::Relaxed)
+    };
 
-    // disable_snap_for_window should be a no-op when config is off
     state.disable_snap_for_window(42);
-    assert!(!state.snap_disabled_hwnds.contains(&42));
+    assert_eq!(attempts(&state), 0, "config off must not attempt removal");
+    assert!(state.snap_disabled_hwnds.is_empty());
+
+    state.config.behavior.disable_snap_layouts = true;
+    state.disable_snap_for_window(42);
+    assert_eq!(attempts(&state), 1, "config on must attempt removal");
+    assert_eq!(state.snap_disabled_hwnds, HashSet::from([42]));
 }
 
 #[test]

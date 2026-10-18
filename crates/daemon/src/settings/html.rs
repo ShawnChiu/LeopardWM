@@ -2614,11 +2614,6 @@ mod tests {
     }
 
     #[test]
-    fn scroll_modifier_row_follows_linear_focus_navigation() {
-        assert!(SETTINGS_HTML.contains("tbody.querySelectorAll('tr[data-cmd=\"focus_prev\"]')"));
-    }
-
-    #[test]
     fn gesture_combos_offer_and_preserve_no_action_and_custom_commands() {
         let no_action = "var options = '<div class=\"combobox-option' + (current === '' ? ' selected' : '') + '\" data-value=\"\" data-i18n=\"settings.text.no_action\">' + escHtml(t('settings.text.no_action')) + '</div>' +";
         let catalog_options = "CMD_ORDER.map(function(cmd) {";
@@ -2652,13 +2647,6 @@ mod tests {
         assert!(SETTINGS_HTML
             .contains("setChecked('gestures-wheel_swipes', cfg.gestures.wheel_swipes !== false)"));
         assert!(SETTINGS_HTML.contains("wheel_swipes: checked('gestures-wheel_swipes')"));
-    }
-
-    #[test]
-    fn recorder_accepts_hook_delivered_chords() {
-        assert!(SETTINGS_HTML.contains("function onRecordedChord(chord) {"));
-        assert!(SETTINGS_HTML.contains("activeRecorder = input;"));
-        assert!(SETTINGS_HTML.contains("action: 'set_recording', recording: active"));
     }
 
     #[test]

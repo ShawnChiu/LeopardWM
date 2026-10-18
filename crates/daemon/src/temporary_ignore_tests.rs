@@ -902,6 +902,7 @@ fn unmanage_clears_owned_tab_title_and_survives_hwnd_reuse() {
 #[test]
 fn identity_mismatch_reflows_peers_without_restoring_native() {
     let mut state = managed_state();
+    record_peer_placements(&mut state);
     state.injected_native_restore_error = Some("must not restore onto replacement".into());
     state.injected_identity_read_override = Some(Ok(Some(u64::MAX)));
     set_foreground(&mut state, 10);
@@ -915,6 +916,16 @@ fn identity_mismatch_reflows_peers_without_restoring_native() {
     assert!(!state.temporary_ignores.contains_key(&10));
     assert!(state.find_window_workspace(20).is_some());
     assert!(state.find_window_workspace(30).is_some());
+    let batches = state.injected_apply_placements_batches.lock().unwrap();
+    assert_eq!(batches.len(), 1, "peers reflow in one placement batch");
+    assert!(
+        batches[0].contains(&20),
+        "peer 20 must be placed: {batches:?}"
+    );
+    assert!(
+        !batches[0].contains(&10),
+        "the replaced window must not be placed: {batches:?}"
+    );
 }
 
 #[test]

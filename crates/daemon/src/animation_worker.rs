@@ -708,53 +708,166 @@ mod tests {
         );
     }
 
+    struct PumpingWindow {
+        window_id: u64,
+        settle: Option<std_mpsc::Sender<std_mpsc::Sender<()>>>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl PumpingWindow {
+        fn new() -> Self {
+            use windows::core::w;
+            use windows::Win32::Foundation::RECT;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, GetQueueStatus, GetWindowRect,
+                PeekMessageW, MSG, PM_REMOVE, QS_ALLINPUT, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                WS_POPUP,
+            };
+
+            let (ready_tx, ready_rx) = std_mpsc::channel();
+            let (settle_tx, settle_rx) = std_mpsc::channel::<std_mpsc::Sender<()>>();
+            let join = std::thread::spawn(move || unsafe {
+                let hwnd = CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    w!(""),
+                    WS_POPUP,
+                    100,
+                    100,
+                    300,
+                    200,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+                let mut message = MSG::default();
+                let pump = |message: &mut MSG| {
+                    while PeekMessageW(message, None, 0, 0, PM_REMOVE).as_bool() {
+                        DispatchMessageW(message);
+                    }
+                };
+                pump(&mut message);
+                ready_tx.send(hwnd.0 as usize as u64).unwrap();
+                loop {
+                    pump(&mut message);
+                    match settle_rx.recv_timeout(Duration::from_millis(1)) {
+                        Ok(ack) => {
+                            // Queued async moves land in the owner's own pump, so wait
+                            // until the queue is empty and the rect stops changing.
+                            let mut last = RECT::default();
+                            let mut stable_since = Instant::now();
+                            let deadline = Instant::now() + Duration::from_secs(5);
+                            while stable_since.elapsed() < Duration::from_millis(50)
+                                && Instant::now() < deadline
+                            {
+                                pump(&mut message);
+                                let mut current = RECT::default();
+                                GetWindowRect(hwnd, &mut current).unwrap();
+                                if current != last || GetQueueStatus(QS_ALLINPUT) >> 16 != 0 {
+                                    last = current;
+                                    stable_since = Instant::now();
+                                }
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            let _ = ack.send(());
+                        }
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                DestroyWindow(hwnd).unwrap();
+            });
+            Self {
+                window_id: ready_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                settle: Some(settle_tx),
+                join: Some(join),
+            }
+        }
+
+        fn settled_position(&self) -> (i32, i32) {
+            let (ack_tx, ack_rx) = std_mpsc::channel();
+            self.settle.as_ref().unwrap().send(ack_tx).unwrap();
+            ack_rx.recv_timeout(Duration::from_secs(6)).unwrap();
+            let rect = leopardwm_platform_win32::get_window_chrome_rect(self.window_id).unwrap();
+            (rect.x, rect.y)
+        }
+    }
+
+    impl Drop for PumpingWindow {
+        fn drop(&mut self) {
+            self.settle.take();
+            if let Some(join) = self.join.take() {
+                join.join().unwrap();
+            }
+            leopardwm_platform_win32::clear_suspected_oversize(self.window_id);
+        }
+    }
+
     #[test]
     fn stale_physical_frame_skips_native_dispatch() {
+        let window = PumpingWindow::new();
+        let home = window.settled_position();
+        let target = Rect::new(home.0 + 400, home.1, 300, 200);
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
         let worker = AnimationWorkerHandle::spawn(event_tx, Arc::new(AtomicBool::new(false)))
             .expect("spawn animation worker");
-        let current_request = Arc::new(AtomicU64::new(1));
-        let current_invalidation = Arc::new(AtomicU64::new(5));
-        worker
-            .send_frame(FrameRequest {
-                placements: vec![WindowPlacement {
-                    window_id: 100,
-                    rect: Rect::new(0, 0, 100, 100),
-                    visibility: leopardwm_core_layout::Visibility::Visible,
-                    column_index: 0,
-                }],
-                ghost_updates: Vec::new(),
-                platform_config: PlatformConfig::default(),
-                physical_request_id: 1,
-                physical_invalidation_id: 4,
-                physical_dispatch_request_id: current_request,
-                physical_invalidation: current_invalidation,
-            })
-            .expect("queue stale frame");
-
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .unwrap();
-        let result = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_millis(500), event_rx.recv()).await
-        });
-        assert!(matches!(
-            result,
-            Ok(Some(super::super::DaemonEvent::AnimationFrameApplied(FrameResult {
-                apply_result: Ok(()),
-                width_violations,
-                height_violations,
-                maximized_skipped_window_ids,
-                landings,
-                physical_request_id: 1,
-                physical_invalidation_id: 4,
-                ..
-            }))) if width_violations.is_empty()
-                && height_violations.is_empty()
-                && maximized_skipped_window_ids.is_empty()
-                && landings.is_empty()
-        ));
+        let mut run_frame = |dispatch_request: u64, invalidation: u64| {
+            worker
+                .send_frame(FrameRequest {
+                    placements: vec![WindowPlacement {
+                        window_id: window.window_id,
+                        rect: target,
+                        visibility: leopardwm_core_layout::Visibility::Visible,
+                        column_index: 0,
+                    }],
+                    ghost_updates: Vec::new(),
+                    platform_config: PlatformConfig::default(),
+                    physical_request_id: 1,
+                    physical_invalidation_id: 4,
+                    physical_dispatch_request_id: Arc::new(AtomicU64::new(dispatch_request)),
+                    physical_invalidation: Arc::new(AtomicU64::new(invalidation)),
+                })
+                .expect("queue frame");
+            let event = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await
+            });
+            let Ok(Some(super::super::DaemonEvent::AnimationFrameApplied(result))) = event else {
+                panic!("the worker must report every queued frame");
+            };
+            assert!(result.apply_result.is_ok());
+            assert_eq!(result.physical_request_id, 1);
+            assert_eq!(result.physical_invalidation_id, 4);
+            result
+        };
+
+        for (name, dispatch_request, invalidation) in [
+            ("superseded dispatch request", 2, 4),
+            ("stale invalidation", 1, 5),
+        ] {
+            let result = run_frame(dispatch_request, invalidation);
+            assert!(result.width_violations.is_empty(), "{name}");
+            assert!(result.height_violations.is_empty(), "{name}");
+            assert!(result.maximized_skipped_window_ids.is_empty(), "{name}");
+            assert!(result.landings.is_empty(), "{name}");
+            assert_eq!(
+                window.settled_position(),
+                home,
+                "{name} must not reach the native window"
+            );
+        }
+
+        run_frame(1, 4);
+        assert_eq!(
+            window.settled_position(),
+            (target.x, target.y),
+            "a current frame must move the same window"
+        );
     }
 
     #[test]

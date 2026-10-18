@@ -203,7 +203,7 @@ function eventElement() {
       contains: name => classes.has(name)
     },
     addEventListener(name, callback) { (listeners[name] ||= []).push(callback); },
-    emit(name) { for (const callback of listeners[name] || []) callback({ stopPropagation() {} }); }
+    emit(name, event = {}) { for (const callback of listeners[name] || []) callback({ stopPropagation() {}, ...event }); }
   };
 }
 function presetFixture(values = [0.333, 0.5, 0.667]) {
@@ -328,6 +328,7 @@ function commandFixture({ saving = false } = {}) {
   const fields = {};
   const saves = [];
   let saveCallback;
+  let scheduledSaves = 0;
   const doc = {
     documentElement: { lang: 'en' }, addEventListener() {}, querySelectorAll: () => [],
     getElementById: () => null, querySelector: () => null
@@ -341,6 +342,7 @@ function commandFixture({ saving = false } = {}) {
     setTimeout(callback) {
       if (!saving) throw new Error('Language refresh scheduled a save');
       saveCallback = callback;
+      scheduledSaves++;
     }, clearTimeout() { saveCallback = undefined; }
   });
   vm.runInContext(script, ctx);
@@ -407,7 +409,7 @@ function commandFixture({ saving = false } = {}) {
     fields[id] = cb; combos.push(cb); ctx.initGestureCombo(id);
     return { cb, text, options };
   }
-  return { ctx, rows, combos, addCombo, saves, flush() { saveCallback(); } };
+  return { ctx, rows, combos, addCombo, saves, scheduledSaves: () => scheduledSaves, flush() { saveCallback(); } };
 }
 
 const shortcuts = commandFixture({ saving: true });
@@ -462,12 +464,54 @@ const previousRows = rowsFor('focus_prev');
 assert.equal(previousRows.length, 2);
 assert.equal(shortcuts.rows[shortcuts.rows.indexOf(previousRows[0]) + 1], previousRows[1]);
 assert.equal(shortcuts.rows[shortcuts.rows.indexOf(previousRows[1]) + 1].dataset.special, 'scroll_modifier');
+const catalogIds = hotkeyCatalog.map(action => action.id);
+assert.equal(shortcuts.rows[shortcuts.rows.indexOf(previousRows[1]) + 2].dataset.cmd,
+  catalogIds[catalogIds.indexOf('focus_prev') + 1]);
 shortcuts.ctx.loadHotkeysSorted(shortcuts.ctx.DEFAULT_HOTKEYS, 'Ctrl+Alt');
 saved = savedShortcuts();
 assert.deepEqual(saved, { ...shortcuts.ctx.DEFAULT_HOTKEYS, scroll_modifier: 'Ctrl+Alt', disabled: [] });
 shortcuts.ctx.loadHotkeysSorted({}, 'Ctrl+Alt', ['focus_left']);
 assert.equal(rowsFor('focus_left')[0].input.value, '');
 assert.ok(savedShortcuts().disabled.includes('focus_left'));
+
+const recorder = commandFixture({ saving: true });
+recorder.ctx.loadHotkeysSorted({ 'Ctrl+Alt+Left': 'focus_left' }, 'Ctrl+Alt');
+const [leftRow] = recorder.rows.filter(row => row.dataset.cmd === 'focus_left');
+const [rightRow] = recorder.rows.filter(row => row.dataset.cmd === 'focus_right');
+const boundValues = () => recorder.rows.map(row => row.input.value);
+assert.equal(leftRow.input.value, 'Ctrl+Alt+Left');
+function assertChordIgnored(chord) {
+  const values = boundValues();
+  const sent = recorder.saves.length;
+  const scheduled = recorder.scheduledSaves();
+  recorder.ctx.onRecordedChord(chord);
+  assert.deepEqual(boundValues(), values);
+  assert.equal(recorder.saves.length, sent);
+  assert.equal(recorder.scheduledSaves(), scheduled);
+}
+assertChordIgnored('Ctrl+Alt+H');
+rightRow.input.emit('mousedown', { button: 0 });
+rightRow.input.emit('blur');
+assert.ok(!rightRow.input.classList.contains('recording'));
+recorder.saves.length = 0;
+assertChordIgnored('Ctrl+Alt+H');
+leftRow.input.emit('mousedown', { button: 0 });
+assert.ok(leftRow.input.classList.contains('recording'));
+assert.deepEqual(recorder.saves, [{ action: 'set_recording', recording: true }]);
+recorder.ctx.onRecordedChord('Ctrl+Alt+H');
+assert.equal(leftRow.input.value, 'Ctrl+Alt+H');
+assert.ok(!leftRow.input.classList.contains('recording'));
+assert.deepEqual(recorder.saves, [
+  { action: 'set_recording', recording: true },
+  { action: 'set_recording', recording: false }
+]);
+assert.equal(recorder.scheduledSaves(), 1);
+recorder.flush();
+const recordedBindings = recorder.saves.at(-1).config.hotkeys;
+assert.equal(recorder.saves.at(-1).action, 'save');
+assert.equal(recordedBindings['Ctrl+Alt+H'], 'focus_left');
+assert.ok(!Object.hasOwn(recordedBindings, 'Ctrl+Alt+Left'));
+assertChordIgnored('Ctrl+Alt+X');
 
 for (const [full, short] of [
   ['Command (detail)', 'Command'], ['Command(detail)', 'Command'],
