@@ -17766,24 +17766,31 @@ fn test_snap_style_requests_do_not_wait_for_non_pumping_window() {
 
 #[test]
 fn test_snap_disable_failure_leaves_window_untracked() {
+    let _serial = REAL_WINDOW_STYLE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut config = test_config();
     config.behavior.disable_snap_layouts = true;
     let mut state = AppState::new_with_config(config, test_monitors());
     state.paused = false;
-    state.injected_snap_disable_override = Some(Err("fixture failure".into()));
+    let owner = OffscreenResizeOwner::create(true);
+    let hwnd = owner.hwnd;
 
-    state.disable_snap_for_window(42);
-
-    assert_eq!(
-        state
-            .injected_snap_disable_attempt_count
-            .load(Ordering::Relaxed),
-        1,
-        "an active tiling daemon must attempt suppression"
-    );
+    state.disable_snap_for_window(hwnd);
     assert!(
-        !state.snap_disabled_hwnds.contains(&42),
-        "a failed removal must not be tracked for later restore"
+        state.snap_disabled_hwnds.contains(&hwnd),
+        "a live window with WS_MAXIMIZEBOX must be tracked"
+    );
+    state.restore_snap_for_window(hwnd);
+    assert!(leopardwm_platform_win32::wait_for_window_style_requests(
+        Duration::from_secs(5)
+    ));
+    drop(owner);
+
+    state.disable_snap_for_window(hwnd);
+    assert!(
+        !state.snap_disabled_hwnds.contains(&hwnd),
+        "a failed removal on a destroyed window must not be tracked for later restore"
     );
 }
 

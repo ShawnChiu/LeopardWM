@@ -374,7 +374,11 @@ function commandFixture({ saving = false } = {}) {
   const tbody = {
     appendChild: row => rows.push(row),
     insertBefore: (row, anchor) => rows.splice(rows.indexOf(anchor), 0, row),
-    querySelectorAll: () => rows.filter(row => row.dataset.cmd === 'focus_prev')
+    querySelectorAll(selector) {
+      const match = /^tr\[data-cmd="([^"]+)"\]$/.exec(selector);
+      assert.ok(match, `Unsupported hotkey table selector: ${selector}`);
+      return rows.filter(row => row.dataset.cmd === match[1]);
+    }
   };
   Object.defineProperty(tbody, 'innerHTML', { set() { rows.length = 0; } });
   fields['hotkeys-body'] = tbody;
