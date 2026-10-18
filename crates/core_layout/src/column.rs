@@ -234,7 +234,8 @@ impl Column {
     }
 
     /// Set a single window's height weight, distributing the remainder
-    /// equally among siblings. Each sibling keeps at least 5% weight.
+    /// equally among siblings. Each window keeps at least 5% weight, or 1/n
+    /// for columns with more than 20 windows.
     pub fn set_height_weight(&mut self, index: usize, weight: f64) {
         let n = self.windows.len();
         if n <= 1 || index >= n {
@@ -243,8 +244,8 @@ impl Column {
         self.ensure_height_weights();
 
         let siblings = n - 1;
-        let min_sibling = 0.05;
-        let max_weight = 1.0 - (siblings as f64 * min_sibling);
+        let min_sibling = 0.05_f64.min(1.0 / n as f64);
+        let max_weight = (1.0 - (siblings as f64 * min_sibling)).max(min_sibling);
         let weight = weight.clamp(min_sibling, max_weight);
 
         self.height_weights[index] = weight;

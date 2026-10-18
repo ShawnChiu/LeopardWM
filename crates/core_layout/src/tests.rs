@@ -4437,6 +4437,31 @@ mod tests {
     }
 
     #[test]
+    fn test_cycle_height_many_windows_keeps_positive_normalized_weights() {
+        for windows in [20, 21, 22, 23, 100] {
+            let mut ws = Workspace::with_gaps(0, 0);
+            ws.insert_window(1, Some(800)).unwrap();
+            for window in 2..=windows {
+                ws.insert_window_in_column(window, 0).unwrap();
+            }
+            ws.set_focus(0, 0).unwrap();
+
+            for _ in 0..3 {
+                ws.cycle_height(&[0.25, 0.5, 0.75]);
+                let weights = ws.columns()[0].height_weights();
+                assert_eq!(weights.len(), windows as usize);
+                assert!(weights
+                    .iter()
+                    .all(|&weight| weight.is_finite() && weight > 0.0));
+                assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+                for &weight in weights {
+                    assert!((weight - 1.0 / windows as f64).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_cycle_height_up_still_stops_at_sibling_cap() {
         let cases: &[(u64, &[f64], usize, f64)] = &[
             (8, &[0.333, 0.5, 0.667], 3, 0.65),
