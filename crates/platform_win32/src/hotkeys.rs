@@ -78,27 +78,11 @@ pub fn fn_mod_bit(vk: u32) -> Option<u16> {
 }
 
 impl Modifiers {
-    /// Create modifiers with only the Win key.
-    pub fn win() -> Self {
-        Self {
-            win: true,
-            ..Default::default()
-        }
-    }
-
     /// Create modifiers with Win + Shift.
     pub fn win_shift() -> Self {
         Self {
             win: true,
             shift: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create modifiers with Alt.
-    pub fn alt() -> Self {
-        Self {
-            alt: true,
             ..Default::default()
         }
     }
@@ -959,7 +943,10 @@ mod tests {
             Hotkey::stable_id(ctrl_alt, 0xBE)
         );
         // Same vk, different mods -> different id.
-        let win = Modifiers::win();
+        let win = Modifiers {
+            win: true,
+            ..Default::default()
+        };
         assert_eq!(Hotkey::stable_id(win, 0x1B), 0x081B);
         assert_ne!(
             Hotkey::stable_id(ctrl_alt, 0x1B),

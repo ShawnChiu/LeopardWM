@@ -880,6 +880,20 @@ mod tests {
         }
     }
 
+    fn win() -> Modifiers {
+        Modifiers {
+            win: true,
+            ..Default::default()
+        }
+    }
+
+    fn alt() -> Modifiers {
+        Modifiers {
+            alt: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn overview_release_preserves_held_key_until_key_up() {
         let mut owned = vec![0x48];
@@ -1033,7 +1047,7 @@ mod tests {
     #[test]
     fn overview_hotkey_press_owns_repeats_until_release() {
         let modifiers = win_ctrl();
-        let binds = [bind(modifiers, 0x25), bind(Modifiers::alt(), 0x25)];
+        let binds = [bind(modifiers, 0x25), bind(alt(), 0x25)];
         let mut owned = Vec::new();
         let first = decide(
             KeyMsg::Down,
@@ -1052,7 +1066,7 @@ mod tests {
             retain_overview_press(KeyMsg::Down, 0x25, first, true, &mut owned),
             Action::SwallowHotkey { emit: true, .. }
         ));
-        for held in [modifiers, Modifiers::default(), Modifiers::alt()] {
+        for held in [modifiers, Modifiers::default(), alt()] {
             let repeat = decide(
                 KeyMsg::Down,
                 0x25,
@@ -1323,10 +1337,7 @@ mod tests {
 
     #[test]
     fn recording_chords_mask_start_and_alt_menus() {
-        for (held, vk, mask) in [
-            (Modifiers::win(), 0x24, Some(0x11)),
-            (Modifiers::alt(), 0x4A, Some(0xE8)),
-        ] {
+        for (held, vk, mask) in [(win(), 0x24, Some(0x11)), (alt(), 0x4A, Some(0xE8))] {
             assert_eq!(
                 decide(KeyMsg::Down, vk, held, true, &[], 0, 0, 0, true, true, None,),
                 Action::SwallowRecorded {
@@ -1341,36 +1352,30 @@ mod tests {
     #[test]
     fn hotkeys_mask_menus_only_on_new_presses_without_ctrl() {
         for (modifiers, mask) in [
-            (Modifiers::alt(), Some(0xE8)),
+            (alt(), Some(0xE8)),
             (
                 Modifiers {
                     shift: true,
-                    ..Modifiers::alt()
+                    ..alt()
                 },
                 Some(0xE8),
             ),
-            (
-                Modifiers {
-                    win: true,
-                    ..Modifiers::alt()
-                },
-                Some(0xE8),
-            ),
+            (Modifiers { win: true, ..alt() }, Some(0xE8)),
             (
                 Modifiers {
                     fn_mods: fn_mod_bit(0x7C).unwrap(),
-                    ..Modifiers::alt()
+                    ..alt()
                 },
                 Some(0xE8),
             ),
             (
                 Modifiers {
                     ctrl: true,
-                    ..Modifiers::alt()
+                    ..alt()
                 },
                 None,
             ),
-            (Modifiers::win(), Some(0x11)),
+            (win(), Some(0x11)),
             (win_ctrl(), None),
             (
                 Modifiers {
@@ -1458,7 +1463,7 @@ mod tests {
 
     #[test]
     fn recorded_key_repeat_stays_swallowed_until_key_up() {
-        let held = Modifiers::win();
+        let held = win();
         assert_eq!(
             decide(
                 KeyMsg::Down,

@@ -114,16 +114,6 @@ pub fn position_window(window_id: WindowId, rect: Rect) -> Result<(), Win32Error
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) fn move_offscreen_rect_for(rect: &Rect) -> Rect {
-    Rect::new(
-        MOVE_OFFSCREEN_SENTINEL_COORD,
-        MOVE_OFFSCREEN_SENTINEL_COORD,
-        rect.width,
-        rect.height,
-    )
-}
-
 fn compute_restore_rect_from_offscreen(current_rect: &Rect, work_area: &Rect) -> Rect {
     let max_width = work_area.width.max(1);
     let max_height = work_area.height.max(1);

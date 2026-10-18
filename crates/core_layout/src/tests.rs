@@ -1393,10 +1393,6 @@ mod tests {
         assert_eq!(ws.default_column_width(), 500);
         ws.set_default_column_width(50);
         assert_eq!(ws.default_column_width(), 100);
-
-        assert_eq!(ws.centering_mode(), CenteringMode::Center);
-        ws.set_centering_mode(CenteringMode::JustInView);
-        assert_eq!(ws.centering_mode(), CenteringMode::JustInView);
     }
 
     #[test]

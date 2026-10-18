@@ -374,19 +374,10 @@ impl Workspace {
         self.default_column_width = width.max(MIN_COLUMN_WIDTH);
     }
 
-    /// Get the pixels reserved at the top of Tabbed columns for the tab strip overlay.
-    pub fn tab_strip_reserve_px(&self) -> i32 {
-        self.tab_strip_reserve_px
-    }
-
     /// Set the pixels reserved at the top of Tabbed columns for the tab strip overlay.
     /// Value is clamped to >= 0. Vertical columns ignore this value.
     pub fn set_tab_strip_reserve_px(&mut self, px: i32) {
         self.tab_strip_reserve_px = px.max(0);
-    }
-
-    pub fn centering_mode(&self) -> CenteringMode {
-        self.centering_mode
     }
 
     pub fn set_centering_mode(&mut self, mode: CenteringMode) {

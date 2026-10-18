@@ -109,10 +109,6 @@ pub fn pipe_name_candidates() -> Vec<String> {
     }
 }
 
-pub fn protocol_id() -> u32 {
-    IPC_PROTOCOL_VERSION
-}
-
 /// Whether a remote protocol version is supported by this crate.
 pub fn is_protocol_version_supported(version: u32) -> bool {
     (IPC_MIN_SUPPORTED_PROTOCOL_VERSION..=IPC_PROTOCOL_VERSION).contains(&version)
@@ -1223,7 +1219,6 @@ mod tests {
 
     #[test]
     fn test_protocol_version_helpers() {
-        assert_eq!(protocol_id(), IPC_PROTOCOL_VERSION);
         assert!(is_protocol_version_supported(IPC_PROTOCOL_VERSION));
         assert!(!is_protocol_version_supported(0));
         assert!(!is_protocol_version_supported(IPC_PROTOCOL_VERSION + 1));
