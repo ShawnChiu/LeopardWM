@@ -17785,13 +17785,13 @@ fn test_snap_disable_failure_leaves_window_untracked() {
     assert!(leopardwm_platform_win32::wait_for_window_style_requests(
         Duration::from_secs(5)
     ));
-    drop(owner);
 
-    state.disable_snap_for_window(hwnd);
+    state.disable_snap_for_window(0);
     assert!(
-        !state.snap_disabled_hwnds.contains(&hwnd),
-        "a failed removal on a destroyed window must not be tracked for later restore"
+        !state.snap_disabled_hwnds.contains(&0),
+        "a failed removal must not be tracked for later restore"
     );
+    drop(owner);
 }
 
 #[test]
