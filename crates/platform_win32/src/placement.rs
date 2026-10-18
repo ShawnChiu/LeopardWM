@@ -375,7 +375,7 @@ pub(crate) fn can_recover_placement_owner(
     if !placement_owner_answers(hwnd, 50) {
         tracing::warn!(
             window_id,
-            "Skipping recovery of unresponsive marked placement owner"
+            "Marked placement owner did not answer the recovery probe"
         );
         return false;
     }
