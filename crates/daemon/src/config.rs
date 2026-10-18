@@ -1480,7 +1480,10 @@ impl Config {
         Ok(config)
     }
 
-    /// Merge defaults without replacing explicitly bound or disabled commands.
+    /// Re-add default bindings for commands the user has neither bound nor
+    /// disabled. This surfaces new hotkeys to existing configs across updates
+    /// without overriding customizations — and without resurrecting a binding
+    /// the user intentionally cleared (those go in `hotkeys.disabled`).
     fn merge_default_hotkeys(hotkeys: &mut HotkeyConfig) {
         let user_commands: HashSet<String> = hotkeys.bindings.values().cloned().collect();
         let disabled: HashSet<&String> = hotkeys.disabled.iter().collect();

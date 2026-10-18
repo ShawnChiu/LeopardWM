@@ -923,7 +923,8 @@ impl AppState {
                     let _ = workspace.insert_window(hwnd, None);
                 }
             }
-            // Dropping into a tabbed column must activate the inserted tab.
+            // A drop activates the inserted window in vertical and tabbed targets;
+            // in a tabbed target, this makes it the visible tab.
             if let Err(e) = workspace.focus_window(hwnd) {
                 debug!("Failed to focus merged window {}: {}", hwnd, e);
             }
@@ -1035,7 +1036,8 @@ impl AppState {
                         let _ = ws.insert_window(hwnd, None);
                     }
                 }
-                // Activate the inserted tab, as in `execute_window_merge`.
+                // As in `execute_window_merge`, activate the inserted window in vertical
+                // and tabbed targets; in a tabbed target, this makes it the visible tab.
                 if let Err(e) = ws.focus_window(hwnd) {
                     debug!("Failed to focus merged window {}: {}", hwnd, e);
                 }

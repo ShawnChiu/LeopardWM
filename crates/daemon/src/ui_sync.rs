@@ -171,8 +171,9 @@ impl AppState {
                 }
             }
             // DWM bounds lag SetWindowPos by 1-2 frames after drag, resize, or scroll
-            // landing. Use the interpolated layout slot for tiled borders to avoid
-            // visible drift. Floating windows instead track their actual chrome bounds.
+            // landing; tiled borders use interpolated layout slots to avoid drift.
+            // Floating windows have no layout slot: `frame.show(hwnd)` queries DWM
+            // extended frame bounds, falling back to GetWindowRect.
             if self.config.appearance.active_border {
                 if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
                     let is_floating = self
