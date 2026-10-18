@@ -1,13 +1,11 @@
-//! DWM thumbnail bindings for ghost-animation of swap-chain-sensitive windows.
+//! DWM thumbnails for ghost-animation of swap-chain-sensitive windows.
 //!
-//! Chromium/Electron/Mozilla/Cascadia renderers can't keep up with per-frame
-//! `SetWindowPos` cadence — their swap chains desync. This module composites
-//! a DWM thumbnail of a cloaked source HWND onto a hidden host window and
-//! animates the thumbnail's destination rect instead of moving the live HWND.
+//! Chromium/Electron/Mozilla/Cascadia renderers can desync under per-frame
+//! `SetWindowPos`. Animate a cloaked source HWND's thumbnail destination
+//! instead of moving the live window.
 //!
-//! See `crates/daemon/src/animation_worker.rs` for the per-frame update path
-//! and `crates/daemon/src/helpers.rs::start_layout_transition` for the
-//! registration site.
+//! Registration is in `crates/daemon/src/transitions.rs`; per-frame updates
+//! are in `crates/daemon/src/animation_worker.rs`.
 
 use crate::{window_id_to_hwnd, Win32Error};
 use leopardwm_core_layout::{Rect, WindowId};
@@ -41,9 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// our own overlay.
 pub(crate) const THUMBNAIL_HOST_CLASS: &str = "LeopardWMThumbnailHost";
 
-/// Process-global counter of currently-registered DWM thumbnails. Used
-/// by tests and the `lwm health` IPC field to assert no leaks. Mirrors
-/// `Z_ORDER_STATE.balance` for lock-free reads.
+/// Lock-free mirror of `Z_ORDER_STATE.balance` for the health metric.
 static REGISTER_BALANCE: AtomicI64 = AtomicI64::new(0);
 
 /// Serializes register/unregister z-order side effects so concurrent
@@ -68,8 +64,8 @@ static Z_ORDER_STATE: Mutex<ZOrderState> = Mutex::new(ZOrderState {
     host_balance: 0,
 });
 
-/// Return the current outstanding-registration count. Should converge to 0
-/// after any animation cycle completes.
+/// Outstanding owned thumbnail registrations, including overview thumbnails.
+/// Returns to zero when all owners release their handles.
 pub fn current_register_balance() -> i64 {
     REGISTER_BALANCE.load(Ordering::Relaxed)
 }
@@ -89,9 +85,8 @@ pub struct ThumbnailHandle {
     host_z: bool,
 }
 
-// SAFETY: HTHUMBNAIL is a process-wide DWM handle, not bound to any HWND
-// owner thread for updates. Codex's Microsoft-Learn check confirmed no
-// apartment-affinity requirement post-registration.
+// SAFETY: HTHUMBNAIL is a process-wide DWM handle; updates have no HWND-owner
+// thread or COM apartment affinity after registration.
 unsafe impl Send for ThumbnailHandle {}
 unsafe impl Sync for ThumbnailHandle {}
 
@@ -104,14 +99,11 @@ impl Drop for ThumbnailHandle {
 }
 
 impl ThumbnailHandle {
-    /// Consume this handle without firing Drop, returning the raw `isize`.
-    /// The caller takes responsibility for eventually calling
-    /// [`unregister_raw`] on the returned value (or wrapping it in a new
-    /// owning type that does).
-    ///
-    /// Used at landing to transfer handle ownership from the daemon's
-    /// `AppState.ghost_handles` into `WorkerCommand::Crossfade` entries
-    /// owned by the worker thread.
+    /// Transfer ownership as a raw `isize` without unregistering on drop.
+    /// Only host-destined registrations may be transferred this way, because
+    /// [`unregister_raw`] uses host z-order accounting. The caller must
+    /// eventually unregister the returned handle or transfer it to an owner
+    /// that does.
     pub fn into_isize(mut self) -> isize {
         // unregister_raw assumes host z-order accounting; only
         // host-destined handles may be transferred raw.
@@ -128,7 +120,6 @@ impl ThumbnailHandle {
         self.handle
     }
 
-    /// Test-only stand-in (handle 0): Drop's unregister no-ops.
     #[cfg(test)]
     pub(crate) fn fake() -> Self {
         Self {
@@ -138,8 +129,8 @@ impl ThumbnailHandle {
     }
 }
 
-/// Register a DWM thumbnail of `source` against the singleton host window.
-/// On success, returns an owning handle whose `Drop` unregisters.
+/// Register a DWM thumbnail of `wid` against the singleton host window.
+/// Returns an owning handle whose `Drop` unregisters it.
 pub fn register(wid: WindowId) -> Result<ThumbnailHandle, Win32Error> {
     let host_hwnd = host().hwnd();
     if host_hwnd.0.is_null() {
@@ -305,14 +296,10 @@ fn unregister_impl(handle: isize, host_z: bool) {
     }
 }
 
-/// Convert a screen-coordinate rect to client coordinates of the host
-/// window. The host is positioned at the virtual-screen origin
-/// (`SM_XVIRTUALSCREEN`, `SM_YVIRTUALSCREEN`), so the conversion is a
-/// simple subtraction.
+/// Convert a screen rect to host-client coordinates by subtracting `host_origin`.
 ///
-/// CRITICAL: `SM_XVIRTUALSCREEN` can be negative when a secondary monitor
-/// extends to the left of the primary. The single most likely bug class
-/// in this whole module is a sign error here. Unit-tested.
+/// The virtual-screen origin can be negative when monitors extend left of or
+/// above the primary; preserve the sign when converting coordinates.
 pub fn screen_to_host_client(screen: Rect, host_origin: (i32, i32)) -> Rect {
     Rect {
         x: screen.x - host_origin.0,
@@ -366,18 +353,11 @@ fn class_name_hwnd(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..len as usize])
 }
 
-// ----------------------------------------------------------------------
-// ThumbnailHost — singleton invisible host window covering the virtual screen.
-// ----------------------------------------------------------------------
-
-/// Singleton invisible host window used as the destination for all
-/// thumbnails. Created lazily on first `host()` call. Lives until process
-/// exit.
+/// Lazily created, transparent thumbnail destination covering the virtual screen.
+/// Lives until process exit.
 ///
-/// Style choice: `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-/// | WS_EX_TRANSPARENT` with a 1×1 fully-transparent UpdateLayeredWindow
-/// backing, mirroring `border.rs`. This is the proven-working pattern for
-/// click-through composite overlays in our codebase.
+/// A layered, click-through, non-activating tool window with transparent
+/// UpdateLayeredWindow backing gives DWM a valid surface for composition.
 pub struct ThumbnailHost {
     hwnd_raw: isize,
     /// Virtual-screen origin captured at host creation, updated by
@@ -394,9 +374,8 @@ pub fn host() -> &'static ThumbnailHost {
     HOST.get_or_init(|| match ThumbnailHost::new() {
         Ok(h) => h,
         Err(e) => {
-            // Construct-failure path: panic in dev, but in production
-            // surface a recoverable host with a null HWND so callers can
-            // detect and fall back to legacy animation.
+            // Keep a null-HWND host so callers can detect failure and fall back
+            // to live-window animation.
             warn!(
                 "ThumbnailHost::new failed: {} — ghost animation disabled",
                 e
@@ -505,8 +484,7 @@ impl ThumbnailHost {
         }
     }
 
-    /// HWND of the host window. `HWND(0)` if construction failed (e.g.
-    /// under cfg(test) or genuine init failure).
+    /// Host HWND, or a null HWND if construction failed.
     pub fn hwnd(&self) -> HWND {
         HWND(self.hwnd_raw as *mut c_void)
     }
@@ -528,10 +506,9 @@ impl ThumbnailHost {
         self.hwnd_raw != 0
     }
 
-    /// Resize and reposition the host to the current virtual-screen
-    /// geometry. Called from the daemon's display-change recovery so
-    /// thumbnail destination rects use post-change coordinates. Subsequent
-    /// `register` calls see the new origin via `origin()`.
+    /// Resize and reposition the host to the current virtual-screen geometry
+    /// during display-change recovery. Subsequent [`Self::origin`] calls
+    /// return the updated coordinate origin.
     pub fn resize_to_virtual_screen(&self) {
         if self.hwnd_raw == 0 {
             return;
@@ -607,7 +584,6 @@ unsafe fn init_layered_transparent(hwnd: HWND) {
     let screen_dc: HDC = GetDC(None);
     let mem_dc = CreateCompatibleDC(Some(screen_dc));
 
-    // 1×1 BGRA bitmap, alpha = 0 (fully transparent).
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -630,7 +606,6 @@ unsafe fn init_layered_transparent(hwnd: HWND) {
             return;
         }
     };
-    // Zero the pixel (alpha = 0).
     if !bits.is_null() {
         std::ptr::write_bytes(bits as *mut u8, 0, 4);
     }
@@ -680,9 +655,6 @@ fn virtual_screen_size() -> (i32, i32) {
     }
 }
 
-// Silence unused-warning hint: SWP_NOZORDER, SET_WINDOW_POS_FLAGS,
-// CW_USEDEFAULT, WS_POPUP are kept for completeness even when not all
-// are used directly.
 #[allow(dead_code)]
 const _UNUSED_IMPORTS: (SET_WINDOW_POS_FLAGS, i32) = (SWP_NOZORDER, CW_USEDEFAULT);
 

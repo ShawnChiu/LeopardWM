@@ -1,21 +1,12 @@
-//! Tab strip overlay rendered above the focused tabbed column.
+//! Tab strip overlays for visible tabbed columns.
 //!
-//! Mirrors `BorderFrame`'s structure (background thread, layered window,
-//! `UpdateLayeredWindow`) but with two key differences:
-//! 1. Drops `WS_EX_TRANSPARENT` so mouse clicks on the strip are delivered
-//!    to this window's WndProc — clicking a tab activates it.
-//! 2. Uses GDI text rendering (`CreateFontW` + `TextOutW`) for tab labels.
-//!    Uses `ConstantAlpha` blend mode (`AlphaFormat=0`) so per-pixel alpha
-//!    isn't required — keeps the rendering path simple while still getting
-//!    a translucent strip via `SourceConstantAlpha`.
+//! Each instance owns a layered window, a background message-pump thread,
+//! and a tooltip popup. A global registry maps strip HWNDs to state and
+//! tooltip HWNDs to their parent strips.
 //!
-//! Multi-instance: the daemon owns one `TabStripOverlay` per visible
-//! tabbed column (across all monitors / workspaces). Each instance has
-//! its own hwnd, its own background message-pump thread, and its own
-//! tooltip popup. State is stored in a shared global registry keyed by
-//! the strip's hwnd — the WndProc looks up its instance's state by
-//! `hwnd`, and the tooltip popup's WndProc looks up its parent strip's
-//! state via a `tooltip_hwnd → strip_hwnd` mapping populated at create.
+//! The strip omits `WS_EX_TRANSPARENT` to receive tab clicks. GDI renders
+//! labels, while per-pixel alpha preserves transparent rounded corners;
+//! `SourceConstantAlpha` applies the configured opacity.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -47,22 +38,16 @@ fn snap_to_parity(target: i32, parity_of: i32) -> i32 {
 
 /// One tab label rendered in the strip.
 ///
-/// `icon` is the raw HICON handle (passed as `isize` to keep this struct
-/// `Send`/`Sync` — actual `HICON` is `!Send`). `None` means render text only.
-/// The strip does NOT take ownership of the icon; the daemon must keep it
-/// alive for the strip's lifetime, which is trivially true since icons
-/// belong to the windows that already outlive the strip's render call.
+/// `icon` is a borrowed raw HICON, represented as `isize` because `HICON`
+/// is not `Send`. `None` renders text only. The caller must keep the icon
+/// alive while the strip may render it; the strip never destroys it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabLabel {
     pub title: String,
     pub icon: Option<isize>,
 }
 
-/// Discrete user-initiated action targeting a specific tab.
-///
-/// Emitted by the strip's WndProc on click/middle-click/right-click and
-/// dispatched by the daemon. `Activate` is the left-click flow;
-/// `Close`/`Untab`/`Rename` are the affordances wired in later.
+/// User-initiated tab action dispatched to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabAction {
     Activate,
@@ -147,11 +132,8 @@ struct TabStripState {
     rendered_content: Option<StripContent>,
     renders_in_flight: usize,
     render_overlapped: bool,
-    /// Last shown tabs (used for re-rendering and hit-test cache).
     tabs: Vec<TabLabel>,
-    /// Currently active tab index (highlighted).
     active_idx: usize,
-    /// Strip dimensions (window-relative).
     strip_w: i32,
     strip_h: i32,
     /// Strip screen-coord origin (top-left of the layered window).
@@ -163,25 +145,17 @@ struct TabStripState {
     visible: bool,
     /// Tab hit rects (window-relative, in pixels). Parallel to `tabs`.
     hit_rects: Vec<RECT>,
-    /// Colors used on last render.
     colors: TabStripColors,
     /// Identity of the column this strip is currently rendered for.
     /// Captured at click time so the daemon doesn't race focus changes.
     target_monitor: isize,
     target_workspace_idx: usize,
     target_column_idx: usize,
-    /// Animation state for sliding the highlight when `active_idx` changes.
-    /// `None` while the strip is settled; `Some` during a ~150ms transition.
+    /// `None` when settled; `Some` during a highlight slide.
     transition: Option<HighlightTransition>,
-    /// Channel back to the daemon for action events.
     action_tx: Option<mpsc::Sender<TabActionEvent>>,
-    /// Currently hovered tab (under the mouse). Used to render the
-    /// per-tab close-X glyph only on the active hover target.
     hovered_tab_idx: Option<usize>,
-    /// Currently hovered close-X glyph (mouse over the X itself, not
-    /// just over the tab). Used to render a button-style hover bg
-    /// behind the glyph so the X reads as a clickable button rather
-    /// than incidental decoration.
+    /// A separate close-X hover target allows button feedback within a hovered tab.
     hovered_close_idx: Option<usize>,
     /// Close-X hit rects (window-relative). Parallel to `tabs` when
     /// the strip is wide enough that the X is rendered; empty when
@@ -197,8 +171,6 @@ struct TabStripState {
     /// Physical-pixel threshold above which the title text is drawn.
     /// Below this width tabs render icon-only.
     title_min_tab_w_px: i32,
-    /// Behavior for implicit close gestures (X-button click, middle-click).
-    /// Updated on every `show()` from `BehaviorConfig.tab_close_action`.
     close_action: TabCloseAction,
     /// Custom tooltip popup HWND as a raw `isize`. Stored as integer
     /// so this static `Mutex<TabStripState>` stays `Sync` (HWND wraps
@@ -208,33 +180,23 @@ struct TabStripState {
     /// the user hovers a close-X for longer than `TOOLTIP_DELAY_MS`.
     /// `0` means the popup hasn't been created yet.
     tooltip_hwnd_raw: isize,
-    /// Tooltip text currently rendered into the popup (the popup's
-    /// `WM_PAINT` reads from here). Updated before each show.
+    /// Read by the tooltip's fade timer; updated before each show.
     tooltip_text: String,
     /// Tab index that started the current hover countdown, if any.
     /// Tracked so the timer callback can verify the user is still over
     /// the same close-X when the delay elapses (mouse may have moved
     /// to a different tab in the meantime).
     tooltip_pending_tab: Option<usize>,
-    /// Anchor rect (screen coords) used to re-render the tooltip during
-    /// the fade animation. Set when the tooltip is first shown, cleared
-    /// when hidden. `RECT` is plain `i32` fields so it's `Send + Sync`.
+    /// Screen-coordinate anchor retained across tooltip fade frames.
+    /// RECT's plain integer fields are Send + Sync.
     tooltip_anchor_rect: Option<RECT>,
-    /// Wall-clock instant the fade-in animation started. `None` means
-    /// not animating (tooltip is either fully shown or hidden).
     tooltip_fade_start: Option<std::time::Instant>,
 }
 
-/// In-flight highlight slide state. Used by the `WM_TIMER`-driven
-/// animation loop to interpolate the highlight rect between the
-/// previous and new active tab positions.
 #[derive(Debug, Clone, Copy)]
 struct HighlightTransition {
-    /// Active idx at the moment the transition started.
     from_idx: usize,
-    /// Target active idx the transition is sliding toward.
     to_idx: usize,
-    /// Monotonic timestamp captured at transition start.
     started_at: std::time::Instant,
 }
 
@@ -247,26 +209,19 @@ const CLOSE_BTN_MIN_TAB_W_LOGICAL: i32 = 80;
 /// Logical (96-DPI) minimum tab width at which the title text is drawn.
 /// Below this, tabs render icon-only.
 const TITLE_VISIBLE_MIN_TAB_W_LOGICAL: i32 = 60;
-/// Context-menu item ids. Returned by `TrackPopupMenu` and translated
-/// back into `TabAction` variants. Distinct from the dialog module's
-/// own IDs (`crate::dialog::*`) because each WndProc has its own
-/// namespace.
+/// Menu command IDs are local to each WndProc's namespace.
 const MENU_ID_CLOSE: usize = 1001;
 const MENU_ID_UNTAB: usize = 1002;
 const MENU_ID_RENAME: usize = 1003;
-/// `WM_TIMER` id used to drive the animation. `WM_USER+N` is fine since
-/// the strip's WndProc doesn't use any other timers.
+/// Distinct timer IDs separate highlight, tooltip-delay, and tooltip-fade messages.
 const HIGHLIGHT_ANIM_TIMER_ID: usize = 0xA1;
-/// `WM_TIMER` id used to delay the custom tooltip popup. One-shot.
 const TOOLTIP_DELAY_TIMER_ID: usize = 0xA2;
-/// `WM_TIMER` id used to drive the tooltip fade-in animation.
 const TOOLTIP_FADE_TIMER_ID: usize = 0xA3;
 /// Tooltip popup appears this many ms after the user enters a close-X.
 /// Matches the "fast reshow" timing WinUI XAML uses inside an already-
 /// hovered window: snappy enough to feel instant, just long enough to
 /// suppress flashes during quick fly-over.
 const TOOLTIP_DELAY_MS: u32 = 30;
-/// Duration of the tooltip fade-in animation in ms.
 const TOOLTIP_FADE_MS: u64 = 80;
 /// Frame interval for the fade animation. 60-ish fps.
 const TOOLTIP_FADE_INTERVAL_MS: u32 = 16;
@@ -356,9 +311,6 @@ fn registry() -> MutexGuard<'static, StripRegistry> {
     REGISTRY.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Resolve the strip hwnd that owns the given hwnd. If the hwnd is a
-/// strip hwnd, returns it as-is. If it's a tooltip popup hwnd, returns
-/// the strip it belongs to. Returns 0 if neither.
 fn owner_strip_isize(hwnd: HWND, reg: &StripRegistry) -> isize {
     let h = hwnd.0 as isize;
     if reg.states.contains_key(&h) {
@@ -380,16 +332,9 @@ pub struct TabStripHit {
     pub tab_idx: usize,
 }
 
-// `tab_screen_rect`, `current_colors`, and `hit_test_screen` are now
-// methods on `TabStripOverlay` — see the `impl` block below. With
-// multiple strips alive, "the strip" is ambiguous without a handle.
-
-/// Tab strip overlay handle.
+/// One tab strip overlay per visible tabbed column.
 ///
-/// Created once per daemon lifetime. The daemon calls `show(...)` whenever
-/// the focused workspace's focused column is Tabbed (every `apply_layout`
-/// pass and every animation frame, mirroring `BorderFrame`'s
-/// continuously-repositioned lifecycle).
+/// The daemon repositions it during layout and animation updates.
 pub struct TabStripOverlay {
     hwnd: HWND,
     /// Win32 thread id of the UI thread — kept for the PostThreadMessageW
@@ -409,9 +354,6 @@ impl TabStripOverlay {
         panic!("TabStripOverlay::new spawns a layered DWM window; gate the call behind cfg(test)");
         #[allow(unreachable_code)]
         {
-            // Channel stashed inside the per-instance state once the
-            // strip hwnd is allocated below. `action_tx` is moved into
-            // the spawned closure verbatim.
             let action_tx_for_thread = action_tx;
 
             let (tx, rx) = mpsc::channel::<Result<(isize, u32), Win32Error>>();
@@ -459,9 +401,6 @@ impl TabStripOverlay {
                         None,
                     ) {
                         Ok(h) => {
-                            // Register the per-instance state keyed by
-                            // this strip's hwnd. The WndProc and the
-                            // daemon-side methods both look it up here.
                             let strip_hwnd_isize = h.0 as isize;
                             {
                                 let mut reg = registry();
@@ -540,14 +479,12 @@ impl TabStripOverlay {
         }
     }
 
-    /// Show the tab strip above the given target rect (the column rect).
-    /// The strip is rendered at `target_rect.y - strip_h`, full column
-    /// width, at `strip_h` pixels tall (DPI-scaled by the caller if needed).
+    /// Show the strip above the column rect, separated by `bottom_gap_px`.
+    /// `strip_height` and `bottom_gap_px` are physical pixels; the caller
+    /// supplies any DPI scaling.
     ///
-    /// The `(target_monitor, target_workspace_idx, target_column_idx)`
-    /// triplet is captured for click events — the click handler routes
-    /// the activation to this column even if focus changed between the
-    /// strip being drawn and the user clicking it.
+    /// The target monitor/workspace/column identity is captured for click
+    /// events, so dispatch does not depend on subsequent focus changes.
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &self,
@@ -612,7 +549,6 @@ impl TabStripOverlay {
         let strip_x = overlay.x;
         let strip_y = overlay.y;
 
-        // Compute hit rects (window-relative).
         let n = tabs.len();
         let tab_w = strip_w / n as i32;
         let mut hit_rects = Vec::with_capacity(n);
@@ -629,25 +565,14 @@ impl TabStripOverlay {
             });
         }
 
-        // DPI-scaled thresholds for narrow-tab rendering.
         let close_min_tab_w_px = (CLOSE_BTN_MIN_TAB_W_LOGICAL as f64 * scale_factor).round() as i32;
         let title_min_tab_w_px =
             (TITLE_VISIBLE_MIN_TAB_W_LOGICAL as f64 * scale_factor).round() as i32;
 
-        // Close-X hit rects — only populated when the strip is wide
-        // enough to render the glyph. Empty vec when every tab is below
-        // the threshold; that keeps the WM_LBUTTONDOWN close-first path
-        // a no-op without an extra guard.
-        //
-        // Pill and glyph dimensions are snapped to the same parity as
-        // `strip_h` so `(strip_h - bg_h) / 2` yields an exact integer
-        // — without parity matching, integer rounding biases the pill
-        // 0.5px upward and the X looks visibly off-center.
-        //
-        // Even spacing: `right_breathing` (pill→tab edge) matches the
-        // inside `bg_pad` (glyph→pill edge) so the X reads as evenly
-        // padded both inside its button and from the tab boundary.
-        // Geometry must mirror render_strip_inner exactly.
+        // Empty close-hit geometry makes narrow tabs' close-first click path a no-op.
+        // Match render_strip_inner's geometry: parity matching keeps the pill and
+        // glyph centered without a half-pixel rounding bias. Outer spacing is at
+        // least the glyph's inner padding, with h_inset as a minimum.
         let h_inset = (strip_h / 6).max(4);
         let pill_size_target = (strip_h * 2 / 3).max(16).min(strip_h - 4);
         let pill_size = snap_to_parity(pill_size_target, strip_h);
@@ -665,7 +590,6 @@ impl TabStripOverlay {
                 let bg_w = pill_size;
                 let bg_h = pill_size;
                 let bg_left = bg_right - bg_w;
-                // Both even-or-both-odd, so exact integer center.
                 let bg_top = (strip_h - bg_h) / 2;
                 let bg_bottom = bg_top + bg_h;
                 close_hit_rects.push(RECT {
@@ -676,11 +600,8 @@ impl TabStripOverlay {
                 });
             }
         }
-        let _ = bg_pad; // computed for parity assertion; render path re-derives it
+        let _ = bg_pad;
 
-        // Detect active-tab change to start a highlight slide animation.
-        // The window swap itself is instant; only the strip's highlight
-        // bar slides between tabs.
         let new_active = active_idx.min(n.saturating_sub(1));
         let mut reg = registry();
         let (prev_active, prev_visible, prev_transition) = reg
@@ -700,7 +621,6 @@ impl TabStripOverlay {
             None
         };
 
-        // Update shared state (used by WndProc for hit testing).
         let mut reuse_render = false;
         if let Some(state) = reg.states.get_mut(&(self.hwnd.0 as isize)) {
             // Preserve hover state across re-renders triggered by
@@ -755,9 +675,6 @@ impl TabStripOverlay {
             return;
         }
 
-        // Kick off animation timer if we started a transition. The WndProc
-        // ticks every ~16ms, re-renders the strip with an interpolated
-        // highlight, and kills the timer when the slide completes.
         if transition.is_some() && prev_active != new_active {
             unsafe {
                 let _ = SetTimer(Some(self.hwnd), HIGHLIGHT_ANIM_TIMER_ID, 16, None);
@@ -904,10 +821,6 @@ fn pixel_coverage_rounded(
         return 1.0;
     }
 
-    // Corner-center coords are the inner anchor of the radius — the
-    // pixel grid points where the curve transitions from straight edge
-    // to arc. Sub-pixel samples within this pixel get tested against
-    // `dx² + dy² <= r²`.
     let cx = if in_left {
         (left + radius) as f32
     } else {
@@ -1140,11 +1053,10 @@ pub(crate) fn aa_fill_line_stroke(
 
     for y in by_min..by_max {
         for x in bx_min..bx_max {
-            // Pixel-center sample.
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            // Project (px, py) onto the line; clamp t to [0, 1] so the
-            // stroke has flat (not infinitely long) endpoints.
+            // Clamp the projection to the segment so coverage uses the nearest endpoint
+            // beyond either end, rather than extending the stroke indefinitely.
             let t = (((px - x1) * dx + (py - y1) * dy) / line_len_sq).clamp(0.0, 1.0);
             let qx = x1 + dx * t;
             let qy = y1 + dy * t;
@@ -1181,11 +1093,8 @@ pub(crate) fn aa_fill_line_stroke(
     }
 }
 
-/// Render the tab strip bitmap and update the layered window. Reads
-/// tabs/active_idx/colors/transition from the strip's registry entry,
-/// computes the interpolated highlight rect, and pushes the result via
-/// `UpdateLayeredWindow`. Called both from `TabStripOverlay::show` and
-/// from the WndProc's `WM_TIMER` handler during a highlight slide.
+/// Snapshot state before rendering, whether called by daemon updates or the
+/// UI thread's timer and hover handlers.
 fn render_strip_now(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
     if w <= 0 || h <= 0 {
         return;
@@ -1232,9 +1141,7 @@ fn render_strip_now(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-/// Internal helper that does the actual GDI rendering. Separated from
-/// `render_strip_now` so callers (`show()`) that already hold the data
-/// don't pay an extra mutex acquisition.
+/// Render from a state snapshot without holding the registry lock.
 #[allow(clippy::too_many_arguments)]
 fn render_strip_inner(
     hwnd: HWND,
@@ -1277,7 +1184,6 @@ fn render_strip_inner(
             return false;
         };
 
-        // Fill bitmap on a memory DC so we can draw text into it.
         let hdc_screen = GetDC(None);
         let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
         let old_bm = SelectObject(hdc_mem, hbitmap.into());
@@ -1290,14 +1196,7 @@ fn render_strip_inner(
         let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
         pixels.fill(0);
 
-        // Strip outer corner radius — tuned to match Win11's
-        // standard window corner radius (~8 px at 100% DPI).
-        // `h * 2 / 7` gives 8 at h=28 (default strip height) and
-        // scales linearly with the strip's DPI-scaled height, so a
-        // 200% display gets a 16px radius — same proportion as
-        // Win11's own scaled corners. Visually the strip sits as a
-        // sibling to the active window rather than a different
-        // design language.
+        // Match Win11's ~8px corners at the default h=28, scaling with DPI.
         let strip_corner = (h * 2 / 7).max(6);
 
         // AA fill the strip background. GDI's RoundRect is aliased
@@ -1306,17 +1205,6 @@ fn render_strip_inner(
         // composite smoothly into the surrounding transparency.
         aa_fill_rounded(pixels, w, h, 0, 0, w, h, strip_corner, colors.bg);
 
-        // Active tab background highlight. When a transition is
-        // in-flight, the highlight slides from the previous tab's
-        // x to the new tab's x over `HIGHLIGHT_ANIM_MS`, using cubic
-        // ease-out so it lands snappy.
-        //
-        // The highlight is drawn as a *rounded* rect inset from the
-        // tab cell: horizontal inset creates a visual gap between
-        // adjacent tabs; vertical inset keeps the rounded shape from
-        // butting against the strip's top/bottom edges. Corner radius
-        // and insets scale with strip height so the look stays
-        // proportional under DPI changes.
         let n = tabs.len() as i32;
         let tab_w = w / n;
         let ai = active_idx.min((n as usize).saturating_sub(1)) as i32;
@@ -1327,7 +1215,6 @@ fn render_strip_inner(
             let elapsed = t.started_at.elapsed().as_millis() as f64;
             let dur = HIGHLIGHT_ANIM_MS as f64;
             let raw_t = (elapsed / dur).clamp(0.0, 1.0);
-            // easeOutCubic: 1 - (1-t)^3
             let eased = 1.0 - (1.0 - raw_t).powi(3);
             let from_x = (from * tab_w) as f64;
             let to_x = (to * tab_w) as f64;
@@ -1342,14 +1229,7 @@ fn render_strip_inner(
             (active_x_settled, right)
         };
 
-        // Inset and corner-radius derived from strip height — keeps
-        // the look proportional across DPIs without separate pixel
-        // constants. Horizontal inset gives adjacent tabs room to
-        // read as separated pills. The active-tab corner radius
-        // sits 2 px tighter than the strip's outer radius so the
-        // inner curve is consistently smaller (outer > inner) —
-        // matches the visual hierarchy Win11 uses for nested
-        // rounded shapes (e.g. context menus inside flyouts).
+        // Keep inset pills proportional across DPIs, with tighter inner corners.
         let h_inset = (h / 6).max(4);
         let v_inset = (h / 8).max(3);
         let corner = strip_corner.saturating_sub(2).max(4);
@@ -1358,10 +1238,6 @@ fn render_strip_inner(
         let hr_top = v_inset;
         let hr_bottom = (h - v_inset).max(hr_top + 1);
 
-        // AA-fill the active highlight on top of the strip bg —
-        // same supersampled rasterizer, source-over composites the
-        // highlight over the bg so the highlight's rounded corners
-        // are smooth.
         aa_fill_rounded(
             pixels,
             w,
@@ -1470,23 +1346,12 @@ fn render_strip_inner(
                     wide.push(0);
                 }
 
-                // Use DrawTextW with DT_END_ELLIPSIS so over-long titles
-                // ellipsize automatically rather than overflow into the
-                // next tab. Right padding mirrors the icon's
-                // inside-padding so the text has matching breathing
-                // room from the highlight's right edge.
-                //
-                // Reserve room on the right for the close-X glyph
-                // (only when this tab is the hover target AND the
-                // strip is wide enough to draw it) — otherwise the
-                // ellipsis lands underneath the X.
+                // Ellipsize within the tab and reserve the hovered close button's space
+                // so the title cannot run underneath it.
                 let mut padded = tab_rect;
                 padded.left = text_left;
                 let mut right_pad = h_inset + icon_inside_pad;
                 if tab_w >= close_min_tab_w_px && hovered_tab_idx == Some(i) {
-                    // Reserve space for the bg pill + its outer
-                    // breathing room so the title ellipsis lands
-                    // well clear of the button.
                     let pill_target = (h * 2 / 3).max(16).min(h - 4);
                     let pill = snap_to_parity(pill_target, h);
                     let glyph_target = (pill * 4 / 9).max(8);
@@ -1504,17 +1369,11 @@ fn render_strip_inner(
                 );
             }
 
-            // Close-X glyph on hover. Geometry mirrors
-            // `close_hit_rects` in `show()` exactly — parity-snapped
-            // pill so the pill centers cleanly in the strip and the
-            // glyph centers cleanly in the pill. Inside pad (glyph
-            // → pill edge) equals outside pad (pill → tab edge) for
-            // visually even spacing on both sides.
+            // Match show_overlay_rect's hit geometry. Parity matching centers the
+            // pill and glyph; outer spacing is at least the glyph's inner padding.
             if tab_w >= close_min_tab_w_px && hovered_tab_idx == Some(i) {
                 let pill_target = (h * 2 / 3).max(16).min(h - 4);
                 let pill = snap_to_parity(pill_target, h);
-                // Glyph is a touch smaller than 1/2 the pill so the
-                // X has room to breathe inside the button.
                 let glyph_target = (pill * 4 / 9).max(8);
                 let glyph = snap_to_parity(glyph_target, pill);
                 let bg_pad = (pill - glyph) / 2;
@@ -1592,9 +1451,7 @@ fn render_strip_inner(
                 pixels[i + 3] = a;
             }
             if a < 0xFF {
-                // Premultiply: stored = color * alpha / 255. At a=0
-                // RGB stays at whatever it was, but the composite
-                // ignores those bytes since the layer is transparent.
+                // AC_SRC_ALPHA requires premultiplied RGB, including zero RGB at alpha 0.
                 let af = a as u32;
                 pixels[i] = ((pixels[i] as u32 * af) / 255) as u8;
                 pixels[i + 1] = ((pixels[i + 1] as u32 * af) / 255) as u8;
@@ -1603,18 +1460,9 @@ fn render_strip_inner(
             i += 4;
         }
 
-        // Push to the layered window with per-pixel-alpha blending.
-        // `AC_SRC_ALPHA` requires the bitmap to be premultiplied; we
-        // satisfy this because all of our explicitly-drawn pixels are
-        // fully opaque (alpha=0xFF after the fixup above, and
-        // premultiplication is a no-op at full alpha). Outer-corner
-        // pixels are (0,0,0,0), the valid premultiplied representation
-        // of fully transparent.
-        //
-        // `SourceConstantAlpha` still applies as a uniform multiplier
-        // on top of per-pixel alpha, so the configured strip opacity
-        // setting keeps working — the strip stays translucent over
-        // the underlying window/desktop.
+        // AC_SRC_ALPHA consumes the premultiplied buffer above, including fractional
+        // corner coverage. SourceConstantAlpha multiplies that per-pixel alpha
+        // uniformly to apply the configured strip opacity.
         let pt_dst = POINT { x, y };
         let sz = SIZE { cx: w, cy: h };
         let pt_src = POINT { x: 0, y: 0 };
@@ -1696,9 +1544,6 @@ impl Drop for TabStripOverlay {
     }
 }
 
-/// Tooltip text the daemon wants displayed for a given close-action.
-/// Mirrors the menu-item wording from the right-click context menu so
-/// the user sees consistent vocabulary across surfaces.
 fn tooltip_text_for(close_action: TabCloseAction) -> &'static str {
     match close_action {
         TabCloseAction::CloseWindow => "Close window",
@@ -1706,10 +1551,7 @@ fn tooltip_text_for(close_action: TabCloseAction) -> &'static str {
     }
 }
 
-/// Whether the user has the system "Apps use dark theme" toggle on.
-/// Read from the standard Personalize registry key — the same value
-/// File Explorer / Settings / WinUI apps check. Cached cheaply; lookup
-/// happens once per tooltip show.
+/// Read the system app-theme preference without caching.
 fn is_dark_mode() -> bool {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
@@ -1743,33 +1585,22 @@ pub(crate) unsafe fn tooltip_theme_colors() -> (u32, u32, u32) {
         );
     }
     if is_dark_mode() {
-        // Matches Terminal / Win11 system tooltip in dark mode:
-        // - bg is dark gray (not pure black)
-        // - border is near-black, barely perceptible — separation
-        //   comes from the drop shadow, not the border line
-        // - text is near-white with a hair of warmth for legibility
         (0x202020, 0xE6E6E6, 0x0F0F0F)
     } else {
-        // Matches Win11 system tooltip in light mode.
         (0xF9F9F9, 0x1C1C1C, 0xC8C8C8)
     }
 }
 
-/// Create the custom tooltip popup window on the strip's UI thread.
-/// The popup is a borderless, non-layered, top-level window — a
-/// `WS_EX_LAYERED` parent doesn't reliably route mouse events into the
-/// comctl32 `TOOLTIPS_CLASS` control, so this avoids that path
-/// entirely. The popup stays hidden until the strip's WndProc decides
-/// it should appear (see `TOOLTIP_DELAY_TIMER_ID`).
+/// Create the custom layered tooltip on the strip's UI thread.
+/// A layered parent does not reliably route mouse events to comctl32's
+/// `TOOLTIPS_CLASS`, so the strip drives this popup's hover timing itself.
 unsafe fn create_tooltip_popup(strip_hwnd: HWND) {
     let class_name: Vec<u16> = "LeopardWMTabTooltip\0".encode_utf16().collect();
     let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
-    // No hbrBackground — `UpdateLayeredWindow` writes the pixel buffer
-    // directly. CS_DROPSHADOW is intentionally NOT set: it draws a
-    // classic rectangular shadow that ignores the layered window's
-    // transparent rounded corners, so the bottom-right corner of the
-    // rectangle pokes through as a visible artifact. Win11 already
-    // gives top-level popups a proper DWM compositor shadow.
+    // UpdateLayeredWindow supplies the backing; no background brush is needed.
+    // Omit CS_DROPSHADOW because its rectangular shadow ignores transparent
+    // rounded corners. DWM's compositor shadow is disabled below for the same
+    // reason; the bitmap carries a rounded soft shadow instead.
     let wc = WNDCLASSW {
         style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(tooltip_popup_proc),
@@ -1818,9 +1649,6 @@ unsafe fn create_tooltip_popup(strip_hwnd: HWND) {
                 &policy as *const _ as *const c_void,
                 std::mem::size_of_val(&policy) as u32,
             );
-            // Stash the tooltip's hwnd in the parent strip's state and
-            // register the reverse `tooltip_hwnd → strip_hwnd` mapping
-            // so the tooltip's WndProc can find its parent state.
             let strip_hwnd_isize = strip_hwnd.0 as isize;
             let popup_isize = popup.0 as isize;
             let mut reg = registry();
@@ -1836,10 +1664,8 @@ unsafe fn create_tooltip_popup(strip_hwnd: HWND) {
     }
 }
 
-/// Create a font matching the system tooltip / message dialog look.
-/// On Win11 this resolves to Segoe UI Variable Text at the user's
-/// chosen size — exactly the same font and weight Terminal / Settings
-/// use for their tooltips. Falls back to Segoe UI on older Windows.
+/// Use the system message-area font, falling back to Segoe UI if the
+/// NONCLIENTMETRICS query fails.
 pub(crate) unsafe fn create_tooltip_font() -> HFONT {
     use windows::Win32::UI::WindowsAndMessaging::{
         SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
@@ -1862,7 +1688,6 @@ pub(crate) unsafe fn create_tooltip_font() -> HFONT {
         let lf = &ncm.lfMessageFont;
         return windows::Win32::Graphics::Gdi::CreateFontIndirectW(lf as *const _);
     }
-    // Fallback: Segoe UI at a sensible size.
     let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
     let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
     let height_px = (14i32 * dpi as i32 / 96).max(11);
@@ -1884,9 +1709,6 @@ pub(crate) unsafe fn create_tooltip_font() -> HFONT {
     )
 }
 
-/// Show the tooltip popup beneath the given close-X hit rect, sized to
-/// fit the supplied text. Coordinates are in screen space. Safe to
-/// call when the popup hasn't been created (no-op).
 unsafe fn show_tooltip_popup(strip_hwnd: HWND, text: &str, anchor_screen_rect: RECT) {
     let popup_hwnd_raw = {
         let mut reg = registry();
@@ -1926,16 +1748,12 @@ unsafe fn show_tooltip_popup(strip_hwnd: HWND, text: &str, anchor_screen_rect: R
     let _ = DeleteObject(font.into());
     ReleaseDC(None, hdc_screen);
 
-    // Padding to match Win11 Terminal tooltip chrome — generous
-    // horizontal pad, modest vertical pad. 1px AA border is rendered
-    // into the bitmap as the outer rounded shape minus an inset
-    // rounded fill (no extra space needed inside the padding).
+    // Match Win11 tooltip spacing: generous horizontal padding, modest vertical padding.
     let pad_x = 14i32;
     let pad_y = 8i32;
     let popup_w = (measure.right - measure.left) + pad_x * 2;
     let popup_h = (measure.bottom - measure.top) + pad_y * 2;
 
-    // Center horizontally under the anchor; sit a few px below it.
     let anchor_w = anchor_screen_rect.right - anchor_screen_rect.left;
     let anchor_cx = anchor_screen_rect.left + anchor_w / 2;
     let popup_x = anchor_cx - popup_w / 2;
@@ -1953,8 +1771,6 @@ unsafe fn show_tooltip_popup(strip_hwnd: HWND, text: &str, anchor_screen_rect: R
     render_tooltip_layered(popup, popup_x, popup_y, popup_w, popup_h, text, 0);
     let _ = ShowWindow(popup, SW_SHOWNOACTIVATE);
 
-    // Record the anchor + fade start in state so the fade timer can
-    // recompute the same position+size on each tick.
     {
         let mut reg = registry();
         if let Some(state) = reg.states.get_mut(&(strip_hwnd.0 as isize)) {
@@ -1962,10 +1778,8 @@ unsafe fn show_tooltip_popup(strip_hwnd: HWND, text: &str, anchor_screen_rect: R
             state.tooltip_fade_start = Some(std::time::Instant::now());
         }
     }
-    // Drive the fade from the strip's WndProc, where WM_TIMER is
-    // already pumped. The strip HWND is the popup's owner conceptually,
-    // but `SetTimer` here uses the popup hwnd so the timer message
-    // routes into `tooltip_popup_proc`.
+    // Use the popup HWND so the fade timer reaches tooltip_popup_proc on the
+    // shared UI message loop.
     let _ = SetTimer(
         Some(popup),
         TOOLTIP_FADE_TIMER_ID,
@@ -1974,10 +1788,8 @@ unsafe fn show_tooltip_popup(strip_hwnd: HWND, text: &str, anchor_screen_rect: R
     );
 }
 
-/// Render the tooltip into a 32-bpp BGRA DIB and push it via
-/// `UpdateLayeredWindow`. Mirrors the strip's render pipeline: AA
-/// rounded fill for bg + border, GDI text overlay, alpha fixup,
-/// premultiplied composite. Drop shadow follows the rendered alpha.
+/// Render a BGRA tooltip with a rounded fill, baked shadow, and GDI text.
+/// Alpha fixup and premultiplication prepare it for UpdateLayeredWindow.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn render_tooltip_layered(
     popup: HWND,
@@ -2055,8 +1867,6 @@ pub(crate) unsafe fn render_tooltip_layered(
         bg,
     );
 
-    // Text — same font we measured with, themed text color. Drawn
-    // through GDI inside the content rect (offset by shadow margin).
     let font = create_tooltip_font();
     let old_font = SelectObject(hdc_mem, font.into());
     SetTextColor(hdc_mem, windows::Win32::Foundation::COLORREF(text_color));
@@ -2122,11 +1932,9 @@ pub(crate) unsafe fn render_tooltip_layered(
     };
     let sz = SIZE { cx: w, cy: h };
     let pt_src = POINT { x: 0, y: 0 };
-    // SourceConstantAlpha scales the per-pixel alpha uniformly — drives
-    // the fade-in. The DWM compositor shadow is disabled on this popup
-    // (see `create_tooltip_popup`), so the SCA-vs-shadow interaction
-    // bug we saw earlier doesn't apply: SCA < 255 only fades the
-    // already-baked-in content + shadow.
+    // SourceConstantAlpha drives the fade. With DWM's compositor shadow disabled,
+    // it fades only the bitmap's content and baked shadow, avoiding the
+    // compositor-shadow interaction described above.
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
@@ -2172,9 +1980,7 @@ unsafe fn hide_tooltip_popup(strip_hwnd: HWND) {
     let _ = ShowWindow(popup, SW_HIDE);
 }
 
-/// WndProc for the custom tooltip popup. Renders a dark rounded
-/// rectangle with white text via GDI; opts out of activation so it
-/// doesn't steal focus when shown.
+/// Keep the tooltip non-activating and drive its layered fade on the UI thread.
 unsafe extern "system" fn tooltip_popup_proc(
     hwnd: HWND,
     msg: u32,
@@ -2185,7 +1991,7 @@ unsafe extern "system" fn tooltip_popup_proc(
         return LRESULT(MA_NOACTIVATE as isize);
     }
     if msg == WM_ERASEBKGND {
-        // We paint everything in WM_PAINT.
+        // UpdateLayeredWindow supplies the pixels; suppress background erasure.
         return LRESULT(1);
     }
     // Fade-in animation: scale `SourceConstantAlpha` from 0 → 255 over
@@ -2211,11 +2017,9 @@ unsafe extern "system" fn tooltip_popup_proc(
         };
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let progress = (elapsed_ms.min(TOOLTIP_FADE_MS) as f32) / TOOLTIP_FADE_MS as f32;
-        // Ease-out cubic for a snappy reveal that settles smoothly.
         let eased = 1.0 - (1.0 - progress).powi(3);
         let alpha = (eased * 255.0).round().clamp(0.0, 255.0) as u8;
 
-        // Recompute position + size from the anchor (cheap text measure).
         render_tooltip_at_alpha(hwnd, &text, &anchor, alpha);
 
         if elapsed_ms >= TOOLTIP_FADE_MS {
@@ -2228,15 +2032,10 @@ unsafe extern "system" fn tooltip_popup_proc(
         }
         return LRESULT(0);
     }
-    // Layered windows render via `UpdateLayeredWindow` only; WM_PAINT
-    // doesn't fire. No paint handler needed.
+    // UpdateLayeredWindow supplies layered pixels, not WM_PAINT.
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-/// Re-measure, position, and render the tooltip at a given overall
-/// alpha — used by the fade-in WM_TIMER to drive the animation. Factored
-/// out of `show_tooltip_popup` so the initial show and each fade tick
-/// can share the same measurement and positioning code path.
 unsafe fn render_tooltip_at_alpha(popup: HWND, text: &str, anchor_screen_rect: &RECT, alpha: u8) {
     let hdc_screen = GetDC(None);
     let font = create_tooltip_font();
@@ -2428,7 +2227,6 @@ pub(crate) unsafe fn create_glyph_bitmap_at_size(glyph: u16, color_bgr: u32, siz
     hbitmap
 }
 
-/// Handles the highlight slide-animation `WM_TIMER` tick.
 unsafe fn on_highlight_anim_tick(hwnd: HWND) -> LRESULT {
     let (strip_x, strip_y, strip_w, strip_h, finished) = {
         let mut reg = registry();
@@ -2456,7 +2254,6 @@ unsafe fn on_highlight_anim_tick(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_MOUSEMOVE`: hover tracking and tooltip-delay arming.
 unsafe fn on_strip_mouse_move(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let raw = lparam.0 as u32;
     let mouse_x = (raw & 0xFFFF) as i16 as i32;
@@ -2484,10 +2281,6 @@ unsafe fn on_strip_mouse_move(hwnd: HWND, lparam: LPARAM) -> LRESULT {
                 None
             }
         });
-        // Whether the mouse is over a close-X glyph specifically.
-        // Drives the button-style hover bg behind the X — so the X
-        // reads as a clickable button when targeted, plain when the
-        // user is just hovering the tab body.
         let new_close_hover = state.close_hit_rects.iter().enumerate().find_map(|(i, r)| {
             if mouse_x >= r.left && mouse_x < r.right && mouse_y >= r.top && mouse_y < r.bottom {
                 Some(i)
@@ -2517,10 +2310,7 @@ unsafe fn on_strip_mouse_move(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if needs_repaint {
         render_strip_now(hwnd, strip_x, strip_y, strip_w, strip_h);
     }
-    // Tooltip-delay timer: on every close-X hover transition,
-    // (1) hide any currently-showing tooltip so it doesn't linger
-    //     on the wrong X, (2) kill any pending one-shot, (3) start
-    //     a fresh one-shot if we're now over a close-X.
+    // Reset tooltip timing when the target changes so it cannot linger on the wrong X.
     if close_hover_changed {
         let _ = KillTimer(Some(hwnd), TOOLTIP_DELAY_TIMER_ID);
         hide_tooltip_popup(hwnd);
@@ -2531,7 +2321,6 @@ unsafe fn on_strip_mouse_move(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_MOUSELEAVE`: clears hover state and hides the tooltip.
 unsafe fn on_strip_mouse_leave(hwnd: HWND) -> LRESULT {
     let (strip_x, strip_y, strip_w, strip_h, had_hover) = {
         let mut reg = registry();
@@ -2559,7 +2348,6 @@ unsafe fn on_strip_mouse_leave(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles the tooltip-delay `WM_TIMER` one-shot.
 unsafe fn on_tooltip_delay_fired(hwnd: HWND) -> LRESULT {
     let _ = KillTimer(Some(hwnd), TOOLTIP_DELAY_TIMER_ID);
     // Snapshot what we need to position the popup, then drop the
@@ -2569,9 +2357,6 @@ unsafe fn on_tooltip_delay_fired(hwnd: HWND) -> LRESULT {
         let Some(state) = reg.states.get(&(hwnd.0 as isize)) else {
             return LRESULT(0);
         };
-        // Verify the user is still over the same close-X we armed
-        // the timer for. If pending was cleared or hover diverged,
-        // bail without showing.
         let idx = match state.tooltip_pending_tab {
             Some(i) if state.hovered_close_idx == Some(i) => i,
             _ => return LRESULT(0),
@@ -2596,7 +2381,6 @@ unsafe fn on_tooltip_delay_fired(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_LBUTTONDOWN`: activates a tab or triggers its close-X.
 unsafe fn on_tab_left_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     // LPARAM low word = x, high word = y, both window-relative.
     let raw = lparam.0 as u32;
@@ -2656,7 +2440,6 @@ unsafe fn on_tab_left_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
                 }
             }
         }
-        // Send via channel while we still hold a borrow of state.tx.
         if let Some(ref h) = hit {
             let ev = match h {
                 LClick::Close { ev, .. } => *ev,
@@ -2675,7 +2458,6 @@ unsafe fn on_tab_left_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_LBUTTONDBLCLK`: renames the double-clicked tab.
 unsafe fn on_tab_double_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     // Double-click on a tab title → rename. Ignore double-clicks on
     // the close-X (single-click already closes/untabs there); ignore
@@ -2685,7 +2467,6 @@ unsafe fn on_tab_double_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let click_y = ((raw >> 16) & 0xFFFF) as i16 as i32;
     let reg = registry();
     if let Some(state) = reg.states.get(&(hwnd.0 as isize)) {
-        // Skip if the click landed in any close-X hit rect.
         for rect in state.close_hit_rects.iter() {
             if click_x >= rect.left
                 && click_x < rect.right
@@ -2717,7 +2498,6 @@ unsafe fn on_tab_double_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_MBUTTONUP`: closes/untabs the middle-clicked tab.
 unsafe fn on_tab_middle_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let raw = lparam.0 as u32;
     let click_x = (raw & 0xFFFF) as i16 as i32;
@@ -2750,7 +2530,6 @@ unsafe fn on_tab_middle_click(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_RBUTTONUP`: shows the tab context menu and dispatches the result.
 unsafe fn on_tab_context_menu(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let raw = lparam.0 as u32;
     let click_x = (raw & 0xFFFF) as i16 as i32;
@@ -2901,9 +2680,8 @@ unsafe fn on_tab_context_menu(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// WndProc: handles WM_LBUTTONDOWN to translate clicks into TabActionEvents.
-/// Layered windows with `UpdateLayeredWindow` skip WM_PAINT entirely; we
-/// only care about input here.
+/// Handle tab input and animation timers. UpdateLayeredWindow supplies the
+/// layered pixels instead of a WM_PAINT handler.
 unsafe extern "system" fn tab_strip_wnd_proc(
     hwnd: HWND,
     msg: u32,
