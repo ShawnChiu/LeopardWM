@@ -2,17 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{WindowId, MIN_COLUMN_WIDTH};
 
-/// Display mode for a column.
-///
-/// Vertical (default) renders all non-minimized windows stacked top-to-bottom
-/// using `height_weights`. Tabbed renders only the window at `active_idx`
-/// filling the column rect; siblings are emitted as off-screen so the cloak
-/// machinery hides them. A tab strip overlay (rendered by the daemon) lists
-/// all tabs above the column.
-///
-/// Invariant when this column is the workspace's focused column:
-///   `Tabbed { active_idx } => focused_window_in_column == active_idx`.
-/// `Workspace::set_active_tab` is the canonical mutator that preserves it.
+/// In the focused column, a tabbed active index must match workspace focus; use
+/// `Workspace::set_active_tab`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ColumnMode {
@@ -23,19 +14,14 @@ pub enum ColumnMode {
     Tabbed { active_idx: usize },
 }
 
-/// A column in the infinite strip.
-/// A column contains one or more vertically stacked windows.
+/// A column in the infinite horizontal strip, displayed vertically or as tabs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Column {
-    /// Width of the column in pixels.
     pub(crate) width: i32,
-    /// Windows in this column (vertically stacked).
     pub(crate) windows: Vec<WindowId>,
-    /// Per-window height weights (parallel to `windows`, sums to ~1.0).
-    /// Empty vec means equal distribution (backward compat).
+    /// Parallel to `windows`; an empty vector means equal distribution.
     #[serde(default)]
     pub(crate) height_weights: Vec<f64>,
-    /// Display mode (Vertical or Tabbed).
     #[serde(default)]
     pub(crate) mode: ColumnMode,
     #[serde(skip)]
@@ -60,8 +46,7 @@ impl PartialEq for Column {
 }
 
 impl Column {
-    /// Create a new column with a single window.
-    /// Width is clamped to MIN_COLUMN_WIDTH (100px) minimum.
+    /// Creates a single-window column with width clamped to at least 100 pixels.
     pub fn new(window_id: WindowId, width: i32) -> Self {
         Self {
             width: width.max(MIN_COLUMN_WIDTH),
@@ -72,8 +57,7 @@ impl Column {
         }
     }
 
-    /// Create an empty column with specified width.
-    /// Width is clamped to MIN_COLUMN_WIDTH (100px) minimum.
+    /// Creates an empty column with width clamped to at least 100 pixels.
     pub fn empty(width: i32) -> Self {
         Self {
             width: width.max(MIN_COLUMN_WIDTH),
@@ -84,12 +68,10 @@ impl Column {
         }
     }
 
-    /// Check if the column is empty.
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
     }
 
-    /// Get the number of windows in this column.
     pub fn len(&self) -> usize {
         self.windows.len()
     }
@@ -100,7 +82,6 @@ impl Column {
     pub fn add_window(&mut self, window_id: WindowId) {
         self.windows.push(window_id);
         self.equalize_height_weights();
-        // Append-at-end never disturbs an existing active_idx.
         self.maintain_mode_invariant();
     }
 
@@ -121,11 +102,8 @@ impl Column {
         }
     }
 
-    /// Remove a window from this column by index.
-    /// Returns the removed window ID if the index was valid.
-    /// Used by Workspace operations that already have the index in hand
-    /// (e.g. `move_window_left/right`, `expel_to_left/right`) so they don't
-    /// need to do direct Vec surgery — `mode.active_idx` invariant is handled.
+    /// Returns the removed window, equalizes height weights, and maintains the active-tab index;
+    /// invalid indices return `None`.
     pub fn remove_at_index(&mut self, index: usize) -> Option<WindowId> {
         if index >= self.windows.len() {
             return None;
@@ -139,33 +117,27 @@ impl Column {
         Some(wid)
     }
 
-    /// Get the width of this column.
     pub fn width(&self) -> i32 {
         self.width
     }
 
-    /// Set the width of this column.
-    /// Width is clamped to MIN_COLUMN_WIDTH (100px) minimum.
+    /// Sets width in pixels, clamped to at least 100.
     pub fn set_width(&mut self, width: i32) {
         self.width = width.max(MIN_COLUMN_WIDTH);
     }
 
-    /// Get a slice of windows in this column.
     pub fn windows(&self) -> &[WindowId] {
         &self.windows
     }
 
-    /// Get the height weights for this column.
     pub fn height_weights(&self) -> &[f64] {
         &self.height_weights
     }
 
-    /// Get the column's display mode.
     pub fn mode(&self) -> &ColumnMode {
         &self.mode
     }
 
-    /// Whether this column is in tabbed display mode.
     pub fn is_tabbed(&self) -> bool {
         matches!(self.mode, ColumnMode::Tabbed { .. })
     }
@@ -178,16 +150,8 @@ impl Column {
         }
     }
 
-    /// Pick the tab index that should actually render in Tabbed mode,
-    /// given a `is_minimized` predicate. Returns the active tab if visible;
-    /// otherwise the first non-minimized tab (so the column doesn't render
-    /// blank when `active_idx` is stale on a minimized window). Returns
-    /// `None` for Vertical columns or when every tab is minimized.
-    ///
-    /// Shared between `compute_non_fullscreen_placements` (renders the
-    /// tab) and the daemon's `update_tab_strip` (positions the overlay)
-    /// so both pick the same effective tab — without this, the daemon
-    /// could hide the strip while the layout still showed a fallback tab.
+    /// Returns the active non-minimized tab or the first non-minimized fallback; returns `None` for
+    /// Vertical or fully minimized columns.
     pub fn effective_visible_tab<F>(&self, is_minimized: F) -> Option<usize>
     where
         F: Fn(WindowId) -> bool,
@@ -218,7 +182,6 @@ impl Column {
         };
     }
 
-    /// Switch this column back to Vertical mode.
     pub fn set_vertical(&mut self) {
         self.mode = ColumnMode::Vertical;
     }
@@ -237,12 +200,10 @@ impl Column {
         }
     }
 
-    /// Check if this column contains a specific window.
     pub fn contains(&self, window_id: WindowId) -> bool {
         self.windows.contains(&window_id)
     }
 
-    /// Get a window by index.
     pub fn get(&self, index: usize) -> Option<WindowId> {
         self.windows.get(index).copied()
     }
@@ -283,7 +244,6 @@ impl Column {
 
         let siblings = n - 1;
         let min_sibling = 0.05;
-        // Clamp so siblings can each have at least min_sibling
         let max_weight = 1.0 - (siblings as f64 * min_sibling);
         let weight = weight.clamp(min_sibling, max_weight);
 
@@ -297,7 +257,6 @@ impl Column {
         }
     }
 
-    /// Reset all height weights to equal distribution.
     pub fn equalize_height_weights(&mut self) {
         let n = self.windows.len();
         if n == 0 {
@@ -307,14 +266,13 @@ impl Column {
         }
     }
 
-    /// Ensure height_weights vec matches windows length (backward compat).
+    // Missing or mismatched weights mean equal distribution.
     pub(crate) fn ensure_height_weights(&mut self) {
         if self.height_weights.len() != self.windows.len() {
             self.equalize_height_weights();
         }
     }
 
-    /// Normalize height weights so they sum to 1.0.
     fn normalize_height_weights(&mut self) {
         if self.height_weights.is_empty() {
             return;
@@ -327,14 +285,7 @@ impl Column {
         }
     }
 
-    /// Handle the active_idx invariant after a window was removed at `idx`.
-    ///
-    /// - If active_idx > idx: shift left.
-    /// - If active_idx == idx: pin to the next window (or last, if `idx`
-    ///   was the last); if no windows left, fall back to Vertical.
-    /// - If active_idx < idx: unchanged.
-    ///
-    /// Also auto-reverts to Vertical when the column drops to ≤1 window.
+    // Preserve the active window where possible; otherwise clamp to a remaining tab.
     fn on_windows_removed_at(&mut self, idx: usize) {
         if let ColumnMode::Tabbed { active_idx } = self.mode {
             if self.windows.is_empty() {
@@ -353,9 +304,7 @@ impl Column {
         self.maintain_mode_invariant();
     }
 
-    /// Handle the active_idx invariant after a window was inserted at `idx`.
-    /// If the insert is at or before active_idx, active_idx shifts right
-    /// so the same window remains active.
+    // Preserve the active window when insertion shifts its index.
     fn on_window_inserted_at(&mut self, idx: usize) {
         if let ColumnMode::Tabbed { active_idx } = self.mode {
             let new_active = if idx <= active_idx {
@@ -370,9 +319,7 @@ impl Column {
         self.maintain_mode_invariant();
     }
 
-    /// Handle the active_idx invariant after `swap_windows(a, b)`.
-    /// If active_idx is one of {a, b}, it follows the active window to the
-    /// other index. Otherwise unchanged.
+    // The active tab follows its window through swaps.
     fn on_windows_swapped(&mut self, a: usize, b: usize) {
         if let ColumnMode::Tabbed { active_idx } = self.mode {
             let new_active = if active_idx == a {
@@ -389,10 +336,7 @@ impl Column {
         self.maintain_mode_invariant();
     }
 
-    /// Auto-revert to Vertical when the column drops to ≤1 window.
-    /// A 1-tab tabbed column is visually identical to Vertical; a 0-tab
-    /// one is degenerate. Also clamps any out-of-range active_idx as a
-    /// belt-and-suspenders safety net.
+    // Zero- and one-window columns need no tabbed presentation.
     fn maintain_mode_invariant(&mut self) {
         if let ColumnMode::Tabbed { active_idx } = self.mode {
             if self.windows.len() <= 1 {

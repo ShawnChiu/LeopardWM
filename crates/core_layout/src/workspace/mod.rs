@@ -10,8 +10,7 @@ use crate::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// Focus centering mode.
-/// Determines how the viewport adjusts when focus changes.
+/// Controls how the viewport adjusts when focus changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CenteringMode {
     /// Center the focused column in the viewport.
@@ -24,46 +23,22 @@ pub enum CenteringMode {
     OnOverflow,
 }
 
-/// A floating window that is not part of the tiling layout.
-///
-/// Floating windows are positioned at absolute coordinates and always
-/// remain visible (not scrolled with the workspace).
+/// A window positioned independently of the tiled strip and its scroll offset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingWindow {
-    /// The window identifier.
     pub id: WindowId,
-    /// The position and size of the floating window.
     pub rect: Rect,
     /// Whether the window stays visible above a fullscreen window.
     #[serde(default)]
     pub pinned: bool,
 }
 
-/// The scrollable workspace.
-/// This is the core data structure representing the infinite horizontal strip.
-///
-/// # Invariants
-///
-/// The following invariants are maintained by all methods:
-///
-/// 1. **No duplicate windows:** Each `WindowId` appears at most once.
-/// 2. **Valid focus:** If `columns` is empty, `focused_window()` returns `None`.
-///    Otherwise, `focused_column < columns.len()` and
-///    `focused_window_in_column < columns[focused_column].len()`.
-/// 3. **Valid column widths:** All column widths are >= `MIN_COLUMN_WIDTH` (100px).
-/// 4. **Valid scroll range:** `0.0 <= scroll_offset <= max_scroll` where
-///    `max_scroll = (total_width() - viewport_width).max(0)`.
-///    Exception: `center_single_column` collapses the range to the centered
-///    offset for one fitting active column; `center_past_edges` also allows
-///    negative offsets. When `center_past_edges` is true, `scroll_offset` may be
-///    negative (centering first column) or exceed `max_scroll` (last column).
+/// A horizontal strip of tiled columns with separate floating windows.
+/// Layout operations maintain unique windows, valid focus indices, and minimum column widths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
-    /// Columns in the workspace, ordered left to right.
     pub(crate) columns: Vec<Column>,
-    /// Index of the currently focused column.
     pub(crate) focused_column: usize,
-    /// Index of the focused window within the focused column.
     pub(crate) focused_window_in_column: usize,
     /// Current scroll offset (x position of viewport's left edge on the strip).
     pub(crate) scroll_offset: f64,
@@ -83,68 +58,48 @@ pub struct Workspace {
     pub(crate) outer_gap_bottom: i32,
     /// Default width for new columns (always >= MIN_COLUMN_WIDTH).
     pub(crate) default_column_width: i32,
-    /// Centering mode for focus changes.
     pub(crate) centering_mode: CenteringMode,
-    /// Active scroll animation, if any.
     #[serde(skip)]
     pub(crate) active_animation: Option<ScrollAnimation>,
-    /// Floating windows outside the tiling layout.
     #[serde(default)]
     pub(crate) floating_windows: Vec<FloatingWindow>,
-    /// Window ID in fullscreen mode, if any.
     #[serde(default)]
     pub(crate) fullscreen_window: Option<WindowId>,
     /// Windows that are currently minimized (excluded from layout).
     #[serde(default)]
     pub(crate) minimized_windows: HashSet<WindowId>,
-    /// Known minimum widths for windows that enforce a minimum size.
-    /// Detected by the platform layer and fed back so the layout engine
-    /// can allocate correct column widths from the start.
+    /// Platform-detected minimum widths used to allocate column widths.
     #[serde(skip)]
     pub(crate) window_min_widths: HashMap<WindowId, i32>,
-    /// Known minimum heights for windows that enforce a minimum size.
-    /// Detected by the platform layer and fed back so the layout engine
-    /// can allocate correct intra-column heights from the start.
+    /// Platform-detected minimum heights used to allocate intra-column heights.
     #[serde(skip)]
     pub(crate) window_min_heights: HashMap<WindowId, i32>,
-    /// Windows whose min-size constraints are scheduled for clearing on the
-    /// next apply_layout pass. Populated when column composition changes so
-    /// stale per-sibling constraints learned under the old window count can't
-    /// over-allocate; the actual removal is deferred so a timed-out / paused
-    /// apply path cannot strand the column with cleared constraints.
+    /// Defer clearing composition-dependent constraints until apply-time so paused or timed-out
+    /// layouts retain them.
     #[serde(skip)]
     pub(crate) pending_min_size_clears: HashSet<WindowId>,
-    /// Origin info for windows floated via toggle_floating.
-    /// Stores (left_neighbor, fallback_index) to restore position when unfloating.
-    /// Left neighbor is used to find the right neighborhood even after column changes;
-    /// fallback index is used when the neighbor no longer exists.
+    /// Stores (left_neighbor, fallback_index) for restoring an unfloated window's position.
+    /// Prefer the surviving neighbor after column changes; otherwise use the fallback index.
     #[serde(skip)]
     pub(crate) float_origin_column: HashMap<WindowId, (Option<WindowId>, usize)>,
     /// Snap scroll instantly instead of animating (Windows "Show animations" off).
     #[serde(skip)]
     pub(crate) reduce_motion: bool,
-    /// Duration (ms) for scroll animations. Set by the daemon from
-    /// `[animation].scroll_duration_ms`; defaults to the engine default.
+    /// Scroll duration in milliseconds, supplied by the daemon's `[animation].scroll_duration_ms`.
     #[serde(skip)]
     pub(crate) scroll_duration_ms: u64,
-    /// Easing curve for scroll animations. Set by the daemon from
-    /// `[animation].easing`; defaults to cubic ease-out.
+    /// Scroll easing supplied by the daemon's `[animation].easing`; defaults to cubic ease-out.
     #[serde(skip)]
     pub(crate) scroll_easing: Easing,
-    /// Whether center-column can scroll past content edges.
     #[serde(skip)]
     pub(crate) center_past_edges: bool,
     #[serde(skip)]
     pub(crate) center_single_column: bool,
-    /// State for maximized column toggle (fills viewport width).
     #[serde(skip)]
     pub(crate) maximized_column: Option<MaximizedColumnState>,
-    /// Pixels reserved at the top of each Tabbed column for the tab strip
-    /// overlay. The daemon sets this from `appearance.tab_strip_height` scaled
-    /// by the focused monitor's DPI so the strip has room to render above
-    /// the active tab. `0` (default, used in tests/headless) means no
-    /// reservation — strip would overlap the active tab's top edge or sit
-    /// off-screen above the work area.
+    /// DPI-scaled tab-strip space supplied by the daemon from `appearance.tab_strip_height`.
+    /// Zero reserves no space, allowing the overlay to overlap the active tab or extend above the
+    /// work area.
     #[serde(skip)]
     pub(crate) tab_strip_reserve_px: i32,
 }
@@ -152,7 +107,6 @@ pub struct Workspace {
 /// State saved when a column is maximized to fill the viewport width.
 #[derive(Debug, Clone)]
 pub struct MaximizedColumnState {
-    /// The original column width before maximizing.
     pub original_width: i32,
     pub(crate) width_fraction_cache: Option<crate::column::WidthFractionCache>,
     /// Sentinel window ID used to relocate the column after index shifts.
@@ -231,12 +185,10 @@ impl Workspace {
         }
     }
 
-    /// Check if the workspace is empty.
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
     }
 
-    /// Get the number of columns.
     pub fn column_count(&self) -> usize {
         self.columns.len()
     }
@@ -247,12 +199,10 @@ impl Workspace {
             || self.floating_windows.iter().any(|f| f.id == window_id)
     }
 
-    /// Check if a window is floating.
     pub fn is_floating(&self, window_id: WindowId) -> bool {
         self.floating_windows.iter().any(|f| f.id == window_id)
     }
 
-    /// Get the number of floating windows.
     pub fn floating_count(&self) -> usize {
         self.floating_windows.len()
     }
@@ -306,7 +256,6 @@ impl Workspace {
         }
     }
 
-    /// Update the position/size of a floating window.
     pub fn update_floating(&mut self, window_id: WindowId, rect: Rect) -> bool {
         if let Some(floating) = self.floating_windows.iter_mut().find(|f| f.id == window_id) {
             floating.rect = rect;
@@ -316,16 +265,12 @@ impl Workspace {
         }
     }
 
-    /// Get all floating windows.
     pub fn floating_windows(&self) -> &[FloatingWindow] {
         &self.floating_windows
     }
 
-    /// Get the total width of the strip (sum of all column widths + gaps).
-    ///
-    /// Note: Negative gaps are treated as zero for calculation purposes.
+    /// Sum active columns' effective widths and inter-column gaps, treating negative gaps as zero.
     pub fn total_width(&self) -> i32 {
-        // Only count columns that have at least one non-minimized window
         let active_columns: Vec<&Column> = self
             .columns
             .iter()
@@ -336,10 +281,8 @@ impl Workspace {
             return 0;
         }
 
-        // Defensively clamp gaps to >= 0 in case fields were set directly
         let gap = self.gap.max(0);
 
-        // Strip width = columns + inter-column gaps only.
         // Outer gaps are viewport padding, not strip content.
         let column_widths: i32 = active_columns
             .iter()
@@ -350,17 +293,14 @@ impl Workspace {
         column_widths.saturating_add(gaps)
     }
 
-    /// Get the current scroll offset.
     pub fn scroll_offset(&self) -> f64 {
         self.scroll_offset
     }
 
-    /// Get a slice of all columns.
     pub fn columns(&self) -> &[Column] {
         &self.columns
     }
 
-    /// Get a column by index (safe access).
     pub fn column(&self, index: usize) -> Option<&Column> {
         self.columns.get(index)
     }
@@ -381,9 +321,7 @@ impl Workspace {
         self.columns.iter().map(|c| c.len()).sum()
     }
 
-    /// Get all window IDs in this workspace (both tiled and floating).
-    ///
-    /// Useful for migrating windows when monitors are disconnected.
+    /// Return both tiled and floating window IDs.
     pub fn all_window_ids(&self) -> Vec<WindowId> {
         let mut ids: Vec<WindowId> = self
             .columns
@@ -424,7 +362,6 @@ impl Workspace {
         self.outer_gap_bottom = bottom.max(0);
     }
 
-    /// Get the default width for new columns.
     pub fn default_column_width(&self) -> i32 {
         self.default_column_width
     }
@@ -446,12 +383,10 @@ impl Workspace {
         self.tab_strip_reserve_px = px.max(0);
     }
 
-    /// Get the centering mode for focus changes.
     pub fn centering_mode(&self) -> CenteringMode {
         self.centering_mode
     }
 
-    /// Set the centering mode for focus changes.
     pub fn set_centering_mode(&mut self, mode: CenteringMode) {
         self.centering_mode = mode;
     }
@@ -486,10 +421,7 @@ impl Workspace {
         self.center_past_edges = allow;
     }
 
-    /// Calculate the x-coordinate of a column's left edge on the strip.
-    ///
-    /// Note: Negative gaps are treated as zero for calculation purposes.
-    /// Check if a column has at least one non-minimized window.
+    /// A column is active when at least one window is not minimized.
     pub(crate) fn is_column_active(&self, column: &Column) -> bool {
         column
             .windows()

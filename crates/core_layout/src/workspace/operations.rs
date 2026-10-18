@@ -7,9 +7,7 @@ impl Workspace {
         self.column_x_with_minimized_handling(column_index, true)
     }
 
-    /// Compute the X position of a column, optionally skipping minimized columns.
     fn column_x_with_minimized_handling(&self, column_index: usize, skip_minimized: bool) -> i32 {
-        // Defensively clamp gaps to >= 0
         let gap = self.gap.max(0);
 
         // Strip coordinates start at 0 — outer gaps are viewport padding,
@@ -19,7 +17,6 @@ impl Workspace {
             if i == column_index {
                 return x;
             }
-            // Skip fully-minimized columns when requested
             if skip_minimized && !self.is_column_active(col) {
                 continue;
             }
@@ -30,7 +27,6 @@ impl Workspace {
         x
     }
 
-    /// Get the x-coordinate and width of the focused column.
     fn focused_column_bounds(&self) -> Option<(i32, i32)> {
         self.columns.get(self.focused_column).map(|col| {
             let x = self.column_x(self.focused_column);
@@ -80,9 +76,7 @@ impl Workspace {
         offset.clamp(min_scroll, max_scroll)
     }
 
-    /// Whether the focused column should be centered under the current
-    /// centering mode. `OnOverflow` centers only when the column is wider
-    /// than the visible area (it cannot fit otherwise).
+    // OnOverflow centers columns too wide to fit in the visible area.
     fn should_center(&self, col_width: i32, vis_w: i32) -> bool {
         match self.centering_mode {
             CenteringMode::Center => true,
@@ -91,10 +85,8 @@ impl Workspace {
         }
     }
 
-    /// Ensure the focused column is visible in the viewport.
-    /// Adjusts scroll_offset according to the centering mode.
-    ///
-    /// Note: Negative gaps are treated as zero for calculation purposes.
+    /// Reveals the focused column according to the centering mode.
+    /// Negative gaps are treated as zero.
     pub fn ensure_focused_visible(&mut self, viewport_width: i32) {
         if self.columns.is_empty() {
             return;
@@ -104,7 +96,6 @@ impl Workspace {
             return;
         };
 
-        // Outer gaps are viewport padding — visible strip area is smaller.
         let vis_w = self.visible_width(viewport_width);
 
         if self.should_center(col_width, vis_w) {
@@ -132,7 +123,6 @@ impl Workspace {
             self.clamp_scroll_offset(self.scroll_offset, viewport_width, min_scroll, max_scroll);
     }
 
-    /// Resize the focused column by a delta amount.
     pub fn resize_focused_column(&mut self, delta: i32) {
         if delta == 0 {
             return;
@@ -142,8 +132,7 @@ impl Workspace {
             let new_width = self.effective_column_width(column).saturating_add(delta);
             let column = &mut self.columns[self.focused_column];
             column.set_width(new_width);
-            // Clear cached min-widths and min-heights so constraints will be
-            // re-detected from the actual window size on the next apply cycle.
+            // Resize invalidates measured minima; the next apply re-detects them.
             for wid in column.windows() {
                 self.window_min_widths.remove(wid);
                 self.window_min_heights.remove(wid);
@@ -180,12 +169,10 @@ impl Workspace {
         }
     }
 
-    /// Move the focused column to the start (leftmost) of the strip.
     pub fn move_column_to_start(&mut self) {
         self.reorder_column(self.focused_column, 0);
     }
 
-    /// Move the focused column to the end (rightmost) of the strip.
     pub fn move_column_to_end(&mut self) {
         if !self.columns.is_empty() {
             self.reorder_column(self.focused_column, self.columns.len() - 1);
@@ -201,16 +188,13 @@ impl Workspace {
         let column = self.columns.remove(from);
         self.columns.insert(to, column);
 
-        // Update focused_column to track correctly after the shift.
         if self.focused_column == from {
             self.focused_column = to;
         } else if from < to {
-            // Column moved forward: indices in (from, to] shifted left by 1
             if self.focused_column > from && self.focused_column <= to {
                 self.focused_column -= 1;
             }
         } else {
-            // Column moved backward: indices in [to, from) shifted right by 1
             if self.focused_column >= to && self.focused_column < from {
                 self.focused_column += 1;
             }
@@ -218,8 +202,7 @@ impl Workspace {
         self.clamp_focus_indices();
     }
 
-    /// Remove an entire column and return it. Used for cross-monitor drag.
-    /// Returns `None` if index is out of bounds.
+    /// Removes and returns a column; out-of-bounds indices return `None`.
     pub fn remove_column(&mut self, index: usize) -> Option<Column> {
         if index >= self.columns.len() {
             return None;
@@ -227,7 +210,6 @@ impl Workspace {
         let col = self.columns.remove(index);
         for wid in col.windows() {
             self.minimized_windows.remove(wid);
-            // Clear fullscreen if the removed column contained the fullscreen window
             if self.fullscreen_window == Some(*wid) {
                 self.fullscreen_window = None;
             }
@@ -252,14 +234,12 @@ impl Workspace {
         Some(col)
     }
 
-    /// Insert a column at the given index. Used for cross-monitor drag.
-    /// Index is clamped to `columns.len()`. Empty columns are rejected to
-    /// preserve the invariant that all columns contain at least one window.
+    /// Inserts a column at an index clamped to the column count.
+    /// Rejects empty columns and columns containing a window already in this workspace.
     pub fn insert_column_at(&mut self, column: Column, index: usize) {
         if column.is_empty() {
             return;
         }
-        // Reject if any window already exists in this workspace
         if column
             .windows()
             .iter()
@@ -276,11 +256,10 @@ impl Workspace {
         self.clamp_focus_indices();
     }
 
-    /// Join the nearest active column to the left, skipping minimized-only columns.
-    /// If none exists, unstack to the left (no-op for a lone window).
-    /// Focus follows the moved window. If the source column becomes empty it is removed.
-    /// In a Tabbed receiver, the moved window becomes the new active tab
-    /// (consistent with the "user-initiated keyboard move" intent).
+    /// Moves the focused window into the nearest active left column, or unstacks left if none
+    /// exists.
+    /// Focus follows the window, including the receiver's active tab; empty source columns are
+    /// removed.
     pub fn move_window_left(&mut self) {
         if self.columns.is_empty() {
             return;
@@ -340,8 +319,6 @@ impl Workspace {
         else {
             return;
         };
-        // Clamp focus in old column (column.remove_at_index already adjusted
-        // active_idx for Tabbed; here we clamp focused_window_in_column).
         let old_len = self.columns[self.focused_column].len();
         if self.focused_window_in_column >= old_len {
             self.focused_window_in_column = old_len.saturating_sub(1);
@@ -352,7 +329,6 @@ impl Workspace {
             .width_fraction_cache
             .clone();
         self.columns.insert(self.focused_column, new_col);
-        // Focus the new column (it took the current index)
         self.focused_window_in_column = 0;
         // sync not needed: new column is Vertical.
     }
@@ -421,15 +397,11 @@ impl Workspace {
         }
         self.columns[self.focused_column].add_window(wid);
         self.focused_window_in_column = self.columns[self.focused_column].len().saturating_sub(1);
-        // If the focused column is tabbed, make the consumed window the
-        // active (visible) tab rather than leaving the old tab showing.
         self.sync_active_tab_to_focus();
     }
 
-    /// Swap the focused window with the one above in the same column.
-    /// In a Tabbed column, `swap_windows` keeps `active_idx` tracking the
-    /// same window (handled inside `Column::swap_windows`).
-    /// No-op when there is no focused tiled window or it is already at the top.
+    /// Swaps the focused window upward while preserving its active-tab identity.
+    /// No-op without a valid focused tiled window or at the top.
     pub fn move_window_up_in_column(&mut self) {
         let Some(column) = self.columns.get_mut(self.focused_column) else {
             return;
@@ -462,14 +434,10 @@ impl Workspace {
         self.sync_active_tab_to_focus();
     }
 
-    /// Scroll the viewport by a pixel delta.
-    ///
-    /// Cancels any active scroll animation so the manual scroll takes effect
-    /// immediately. Special float values (NaN, Infinity) are treated as zero.
+    /// Scrolls by a pixel delta and cancels active animation immediately.
+    /// Non-finite deltas are treated as zero.
     pub fn scroll_by(&mut self, delta: f64, viewport_width: i32) {
-        // Cancel any in-flight animation so manual scroll is not overridden
         self.cancel_animation();
-        // Treat NaN and Infinity as zero for safety
         let safe_delta = if delta.is_finite() { delta } else { 0.0 };
         self.scroll_offset += safe_delta;
         let vis_w = self.visible_width(viewport_width);
@@ -518,17 +486,11 @@ impl Workspace {
         self.scroll_offset = self.scroll_offset.clamp(min_scroll, max_scroll);
     }
 
-    // ========================================================================
-    // Animation Methods
-    // ========================================================================
-
-    /// Check if a scroll animation is currently active.
     pub fn is_animating(&self) -> bool {
         self.active_animation.is_some()
     }
 
-    /// Get the current effective scroll offset.
-    /// Returns the animated offset if an animation is active, otherwise the base offset.
+    /// Returns the animated offset when active, otherwise the base offset.
     pub fn effective_scroll_offset(&self) -> f64 {
         match &self.active_animation {
             Some(anim) => anim.current_offset(),
@@ -536,8 +498,7 @@ impl Workspace {
         }
     }
 
-    /// Start an animated scroll to a target offset.
-    /// If an animation is already active, it will be cancelled and a new one started.
+    /// Starts scrolling to a clamped target, replacing any active animation.
     pub fn start_scroll_animation(
         &mut self,
         target: f64,
@@ -545,7 +506,6 @@ impl Workspace {
         duration_ms: Option<u64>,
         easing: Option<Easing>,
     ) {
-        // Clamp target to valid range (visible area = viewport minus outer padding)
         let vis_w = self.visible_width(viewport_width);
         let max_scroll = (self.total_width() - vis_w).max(0);
         let clamped_target =
@@ -557,23 +517,20 @@ impl Workspace {
         // Use current effective position as start (handles interrupting animations)
         let start = self.effective_scroll_offset();
 
-        // If already at target, no animation needed
         if (start - target).abs() < 0.5 {
             self.scroll_offset = target;
             self.active_animation = None;
             return;
         }
 
-        // Explicit args win; otherwise use this workspace's configured
-        // scroll params (set by the daemon from `[animation]`).
+        // Omitted arguments use the workspace's configured animation parameters.
         let duration = duration_ms.unwrap_or(self.scroll_duration_ms);
         let ease = easing.unwrap_or(self.scroll_easing);
 
         self.active_animation = Some(ScrollAnimation::new(start, target, duration, ease));
     }
 
-    /// Advance the active animation by the given delta time in milliseconds.
-    /// Returns true if an animation is still active, false if complete or no animation.
+    /// Advances by milliseconds; returns whether an animation remains active.
     pub fn tick_animation(&mut self, delta_ms: u64) -> bool {
         let Some(anim) = &mut self.active_animation else {
             return false;
@@ -582,7 +539,6 @@ impl Workspace {
         let still_running = anim.tick(delta_ms);
 
         if !still_running {
-            // Animation complete - finalize scroll offset and clear animation
             self.scroll_offset = anim.target();
             self.active_animation = None;
             false
@@ -605,9 +561,7 @@ impl Workspace {
         }
     }
 
-    /// Ensure the focused column is visible with animation.
-    /// Like `ensure_focused_visible` but animates the scroll instead of jumping.
-    /// Snaps instantly when `reduce_motion` is set.
+    /// Animates focus reveal according to centering mode, or snaps when `reduce_motion` is set.
     pub fn ensure_focused_visible_animated(&mut self, viewport_width: i32) {
         if self.reduce_motion {
             self.stop_animation();
@@ -666,9 +620,8 @@ impl Workspace {
         self.animate_scroll_to(target, None, None);
     }
 
-    /// Center the focused column in the viewport, regardless of centering mode.
-    /// When `center_past_edges` is true, first/last columns truly center with
-    /// empty space; otherwise the scroll is clamped to content boundaries.
+    /// Centers the focused column regardless of centering mode.
+    /// Uses content bounds unless `center_past_edges` is set, honoring single-column centering.
     pub fn center_focused_column_animated(&mut self, viewport_width: i32) {
         if self.columns.is_empty() {
             return;
@@ -688,7 +641,6 @@ impl Workspace {
         );
 
         if self.center_past_edges {
-            // Unclamped — allow negative offsets and scrolling past the end
             if self.reduce_motion {
                 self.stop_animation();
                 self.scroll_offset = target;
@@ -697,7 +649,6 @@ impl Workspace {
 
             self.animate_scroll_to(target, None, None);
         } else {
-            // Clamped — use the standard scroll animation path
             if self.reduce_motion {
                 self.stop_animation();
                 let max_scroll = (self.total_width() - vis_w).max(0);
