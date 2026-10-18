@@ -456,16 +456,19 @@ mod tests {
                     None,
                 )
                 .expect("create hidden focus-class window");
+                let mut window = Some(hwnd);
                 ready_tx.send(GetCurrentThreadId()).unwrap();
                 let mut message = MSG::default();
                 while GetMessageW(&mut message, None, 0, 0).0 > 0 {
                     if message.message == WM_APP {
-                        DestroyWindow(hwnd).expect("destroy focus-class window on its owner");
+                        if let Some(hwnd) = window.take() {
+                            DestroyWindow(hwnd).expect("destroy focus-class window on its owner");
+                        }
                     } else {
                         DispatchMessageW(&message);
                     }
                 }
-                if windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() {
+                if let Some(hwnd) = window {
                     DestroyWindow(hwnd).unwrap();
                 }
                 UnregisterClassW(class_name, None).unwrap();

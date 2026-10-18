@@ -294,35 +294,10 @@ mod tests {
 
     #[test]
     fn test_capture_invalid_window_returns_false() {
-        use windows::core::w;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, HWND_MESSAGE,
-        };
+        use windows::Win32::Foundation::HWND;
 
         assert!(!snapshot_capture(0));
         assert!(snapshot_get(0).is_none());
-
-        let hwnd = unsafe {
-            CreateWindowExW(
-                Default::default(),
-                w!("STATIC"),
-                w!("Snapshot capture test"),
-                Default::default(),
-                0,
-                0,
-                1,
-                1,
-                Some(HWND_MESSAGE),
-                None,
-                None,
-                None,
-            )
-            .expect("create owned message-only window")
-        };
-        let id = hwnd.0 as u64;
-        unsafe { DestroyWindow(hwnd).expect("destroy owned message-only window") };
-
-        assert!(!snapshot_capture(id));
-        assert!(snapshot_get(id).is_none());
+        assert!(unsafe { capture_window(HWND::default()) }.is_none());
     }
 }

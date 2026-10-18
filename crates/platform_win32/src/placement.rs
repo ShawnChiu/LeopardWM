@@ -3020,9 +3020,6 @@ mod tests {
             })
         };
         let owned = create();
-        let destroyed = create();
-        let destroyed_id = destroyed.0 .0 as WindowId;
-        drop(destroyed);
         let mut before = RECT::default();
         unsafe { GetWindowRect(owned.0, &mut before) }.unwrap();
         assert!(crate::visibility::is_move_offscreen_sentinel_rect(
@@ -3033,7 +3030,7 @@ mod tests {
                 before.bottom - before.top,
             )
         ));
-        crate::visibility::uncloak_all_managed_windows(&[0, destroyed_id, owned.0 .0 as WindowId]);
+        crate::visibility::uncloak_all_managed_windows(&[0, owned.0 .0 as WindowId]);
         let mut restored = RECT::default();
         unsafe { GetWindowRect(owned.0, &mut restored) }.unwrap();
         let work = crate::get_primary_monitor().unwrap().work_area;

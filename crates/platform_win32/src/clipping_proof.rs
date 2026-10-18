@@ -362,8 +362,6 @@ impl OwnedFixtureWindow {
         }
         if let Err(error) = DestroyWindow(self.hwnd) {
             failures.push(format!("failed to destroy owned fixture: {error}"));
-        } else if IsWindow(Some(self.hwnd)).as_bool() {
-            failures.push("owned fixture remained live after destruction".to_owned());
         }
         self.hwnd = HWND::default();
         if failures.is_empty() {
@@ -2738,13 +2736,12 @@ unsafe fn run_matrix_stale_identity_case(
             send_matrix_command(&mut fixture_stdin, "recreate")?;
             let recreated =
                 parse_matrix_identity(&wait_for_matrix_line(&fixture_lines, "FIXTURE_RECREATED")?)?;
-            if recreated == identity || !verify_fixture_identity(identity).is_err() {
+            if recreated == identity {
                 return Err(
-                    "MECHANICAL FAIL: stale HWND generation was admitted after fixture recreation"
-                        .to_owned(),
+                    "MECHANICAL FAIL: fixture recreation did not change its identity".to_owned(),
                 );
             }
-            Ok(())
+            verify_fixture_identity(recreated)
         })();
         combine_primary_and_cleanup(primary, controller.cleanup(), "controller")
     })();

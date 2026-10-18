@@ -756,11 +756,11 @@ mod tests {
 
     impl Drop for PumpingWindow {
         fn drop(&mut self) {
+            leopardwm_platform_win32::clear_suspected_oversize(self.window_id);
             self.settle.take();
             if let Some(join) = self.join.take() {
                 join.join().unwrap();
             }
-            leopardwm_platform_win32::clear_suspected_oversize(self.window_id);
         }
     }
 
