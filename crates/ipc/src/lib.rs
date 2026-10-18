@@ -1170,27 +1170,6 @@ mod tests {
     }
 
     #[test]
-    fn test_window_info_serialization() {
-        let info = WindowInfo {
-            window_id: 12345,
-            title: "Test Window".to_string(),
-            class_name: "TestClass".to_string(),
-            process_id: 1234,
-            executable: "test.exe".to_string(),
-            rect: IpcRect::new(100, 100, 800, 600),
-            column_index: Some(0),
-            window_index: Some(0),
-            monitor_id: 1,
-            is_floating: false,
-            is_focused: true,
-        };
-
-        let json = serde_json::to_string(&info).unwrap();
-        let roundtrip: WindowInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(info, roundtrip);
-    }
-
-    #[test]
     fn test_query_all_windows_command() {
         let cmd = IpcCommand::QueryAllWindows;
         let json = serde_json::to_string(&cmd).unwrap();
@@ -1223,32 +1202,6 @@ mod tests {
 
         let roundtrip: IpcResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, roundtrip);
-    }
-
-    #[test]
-    fn test_line_delimited_protocol() {
-        // Simulate the actual IPC protocol: JSON + newline
-        let cmd = IpcCommand::QueryWorkspace;
-        let wire_format = serde_json::to_string(&cmd).unwrap() + "\n";
-
-        // Parse as if reading from pipe (trim newline)
-        let parsed: IpcCommand = serde_json::from_str(wire_format.trim()).unwrap();
-        assert_eq!(cmd, parsed);
-
-        // Same for response
-        let resp = IpcResponse::WorkspaceState {
-            columns: 2,
-            windows: 3,
-            focused_column: 0,
-            focused_window: 0,
-            scroll_offset: 0.0,
-            total_width: 1600,
-            active_workspace: 1,
-            active_workspace_name: None,
-        };
-        let wire_format = serde_json::to_string(&resp).unwrap() + "\n";
-        let parsed: IpcResponse = serde_json::from_str(wire_format.trim()).unwrap();
-        assert_eq!(resp, parsed);
     }
 
     #[test]
@@ -1305,15 +1258,8 @@ mod tests {
     }
 
     #[test]
-    fn test_max_message_size_defined() {
-        const { assert!(MAX_IPC_MESSAGE_SIZE > 0) };
-    }
-
-    #[test]
-    fn test_max_message_size_reasonable() {
-        // Between 1 KiB and 1 MiB
-        const { assert!(MAX_IPC_MESSAGE_SIZE >= 1024) };
-        const { assert!(MAX_IPC_MESSAGE_SIZE <= 1024 * 1024) };
+    fn test_max_message_size_is_64_kib() {
+        assert_eq!(MAX_IPC_MESSAGE_SIZE, 64 * 1024);
     }
 
     #[test]
@@ -1588,20 +1534,28 @@ mod tests {
     #[test]
     fn workspace_state_wire_commands_and_filter_deserialize() {
         let query = serde_json::from_str::<IpcCommand>(r#"{"type":"query_workspace_state"}"#);
-        assert!(query.is_ok(), "query_workspace_state must deserialize");
+        assert_eq!(query.unwrap(), IpcCommand::QueryWorkspaceState);
 
         let targeted = serde_json::from_str::<IpcCommand>(
             r#"{"type":"switch_workspace_on_monitor","monitor_device_name":"\\\\.\\DISPLAY2","index":2}"#,
         );
-        assert!(
-            targeted.is_ok(),
-            "targeted workspace switch must deserialize"
+        assert_eq!(
+            targeted.unwrap(),
+            IpcCommand::SwitchWorkspaceOnMonitor {
+                monitor_device_name: r"\\.\DISPLAY2".to_string(),
+                index: 2,
+            }
         );
 
         let subscribe = serde_json::from_str::<IpcCommand>(
             r#"{"type":"subscribe","events":["workspace_state"]}"#,
         );
-        assert!(subscribe.is_ok(), "workspace_state filter must deserialize");
+        assert_eq!(
+            subscribe.unwrap(),
+            IpcCommand::Subscribe {
+                events: [EventKind::WorkspaceState].into_iter().collect(),
+            }
+        );
     }
 
     #[test]

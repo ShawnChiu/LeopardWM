@@ -168,15 +168,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_state_records_round_trip_with_all_fields() {
-        for record in sample_records() {
-            let json = serde_json::to_string(&record).unwrap();
-            let decoded: WorkspaceStateRecord = serde_json::from_str(&json).unwrap();
-            assert_eq!(decoded, record);
-        }
-    }
-
-    #[test]
     fn snapshot_events_round_trip_and_preserve_records() {
         let snapshot = WorkspaceStateSnapshot {
             session_id: "daemon-session".to_string(),

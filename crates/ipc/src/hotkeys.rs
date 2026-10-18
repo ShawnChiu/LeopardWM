@@ -527,25 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_bindings_map_matches_catalog() {
-        let map = default_bindings_map();
-        let bound = hotkey_catalog()
-            .into_iter()
-            .filter(|a| a.default_key.is_some())
-            .count();
-        assert_eq!(map.len(), bound);
-        assert_eq!(map.get("Ctrl+Alt+H"), Some(&"focus_left".to_string()));
-        assert_eq!(
-            map.get("Ctrl+Alt+,"),
-            Some(&"consume_from_left".to_string())
-        );
-        assert_eq!(
-            map.get("Ctrl+Alt+5"),
-            Some(&"switch_workspace_5".to_string())
-        );
-    }
-
-    #[test]
     fn test_default_bindings_match_frozen_expected_set() {
         // Golden set: the complete key-chord -> action map the catalog must
         // produce. Guards against transcription drift (a typo would keep the
@@ -625,7 +606,13 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        assert_eq!(default_bindings_map(), expected_map);
+        let map = default_bindings_map();
+        let bound = hotkey_catalog()
+            .into_iter()
+            .filter(|a| a.default_key.is_some())
+            .count();
+        assert_eq!(map.len(), bound);
+        assert_eq!(map, expected_map);
     }
 
     #[test]
