@@ -1018,8 +1018,7 @@ mod tests {
         // Focus column 2, which is partially out of view
         ws.test_set_focus_unchecked(2, 0);
         ws.ensure_focused_visible(500);
-        // Should scroll just enough to bring column 2 into view
-        assert!(ws.scroll_offset() > 0.0);
+        assert_eq!(ws.scroll_offset(), 140.0);
     }
 
     #[test]
@@ -1110,6 +1109,12 @@ mod tests {
         let viewport = Rect::new(0, 0, 500, 80); // Only 80px tall
         let placements = ws.compute_placements(viewport);
 
+        assert_eq!(placements.len(), 3);
+        assert_eq!(
+            placements.iter().map(|p| p.window_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
         // All heights should be >= 0
         for p in &placements {
             assert!(p.rect.height >= 0, "Height was negative: {}", p.rect.height);
@@ -1154,6 +1159,10 @@ mod tests {
         assert_eq!(col.width(), 100); // Clamped to MIN_COLUMN_WIDTH
         assert!(col.is_empty());
         assert_eq!(col.len(), 0);
+
+        let col = Column::empty(300);
+        assert_eq!(col.width(), 300);
+        assert_eq!(col.windows(), &[] as &[WindowId]);
     }
 
     #[test]
@@ -1453,29 +1462,6 @@ mod tests {
     }
 
     #[test]
-    fn test_column_empty_type() {
-        // Tests the Column::empty() constructor and its properties.
-        // Note: In practice, empty columns are automatically removed from workspaces
-        // when the last window is removed, so empty columns don't occur in normal use.
-        // Column::empty() exists for construction purposes (e.g., building columns
-        // before adding windows).
-        let empty_col = Column::empty(300);
-        assert!(empty_col.is_empty());
-        assert_eq!(empty_col.width(), 300);
-        assert_eq!(empty_col.len(), 0);
-        assert_eq!(empty_col.windows(), &[] as &[WindowId]);
-
-        // Verify workspace doesn't produce placements for non-existent windows
-        let mut ws = Workspace::new();
-        ws.insert_window(1, Some(400)).unwrap();
-        ws.insert_window(2, Some(400)).unwrap();
-
-        let viewport = Rect::new(0, 0, 2000, 600);
-        let placements = ws.compute_placements(viewport);
-        assert_eq!(placements.len(), 2); // Only 2 windows, no extras
-    }
-
-    #[test]
     fn test_negative_gaps_clamped() {
         // Negative gaps should be clamped to 0
         let ws = Workspace::with_gaps(-100, -50);
@@ -1625,12 +1611,13 @@ mod tests {
         // Focus column 2, resize it significantly
         ws.test_set_focus_unchecked(2, 0);
         ws.resize_focused_column(500); // Now 700px wide
+        assert_eq!(ws.columns()[2].width(), 700);
 
-        // Ensure focused visible should adjust scroll
         ws.ensure_focused_visible(500);
-
-        // Should have scrolled to bring the widened column into view
-        assert!(ws.scroll_offset() > 0.0);
+        assert_eq!(ws.scroll_offset(), 640.0);
+        let placements = ws.compute_placements(Rect::new(0, 0, 500, 600));
+        let focused = placements.iter().find(|p| p.window_id == 3).unwrap();
+        assert_eq!(focused.visibility, Visibility::Visible);
     }
 
     #[test]
@@ -1860,13 +1847,9 @@ mod tests {
         // At t=1, should be 1
         assert!((ease_out.apply(1.0) - 1.0).abs() < f64::EPSILON);
 
-        // EaseOut should be ahead of linear in the middle
-        assert!(ease_out.apply(0.5) > 0.5);
-
-        // Verify cubic formula: 1 - (1 - t)^3
-        let t: f64 = 0.5;
-        let expected = 1.0 - (1.0 - t).powi(3);
-        assert!((ease_out.apply(t) - expected).abs() < f64::EPSILON);
+        for (t, expected) in [(0.25, 0.578125), (0.5, 0.875), (0.75, 0.984375)] {
+            assert!((ease_out.apply(t) - expected).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
@@ -1879,13 +1862,9 @@ mod tests {
         // At t=1, should be 1
         assert!((ease_in.apply(1.0) - 1.0).abs() < f64::EPSILON);
 
-        // EaseIn should be behind linear in the middle
-        assert!(ease_in.apply(0.5) < 0.5);
-
-        // Verify cubic formula: t^3
-        let t: f64 = 0.5;
-        let expected = t.powi(3);
-        assert!((ease_in.apply(t) - expected).abs() < f64::EPSILON);
+        for (t, expected) in [(0.25, 0.015625), (0.5, 0.125), (0.75, 0.421875)] {
+            assert!((ease_in.apply(t) - expected).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
@@ -1928,16 +1907,6 @@ mod tests {
         assert_eq!(anim.duration_ms, 200);
         assert_eq!(anim.elapsed_ms, 0);
         assert_eq!(anim.easing, Easing::Linear);
-    }
-
-    #[test]
-    fn test_scroll_animation_with_defaults() {
-        let anim = ScrollAnimation::with_defaults(50.0, 150.0);
-
-        assert!((anim.start_offset - 50.0).abs() < f64::EPSILON);
-        assert!((anim.target_offset - 150.0).abs() < f64::EPSILON);
-        assert_eq!(anim.duration_ms, DEFAULT_ANIMATION_DURATION_MS);
-        assert_eq!(anim.easing, Easing::default());
     }
 
     #[test]
@@ -1984,9 +1953,8 @@ mod tests {
     fn test_scroll_animation_current_offset_eased() {
         let mut anim = ScrollAnimation::new(0.0, 100.0, 100, Easing::EaseOut);
 
-        // At midpoint with ease out, should be ahead of 50
         anim.elapsed_ms = 50;
-        assert!(anim.current_offset() > 50.0);
+        assert!((anim.current_offset() - 87.5).abs() < 1e-9);
     }
 
     #[test]
@@ -2052,12 +2020,6 @@ mod tests {
         anim.elapsed_ms = u64::MAX - 10;
         anim.tick(100);
         assert_eq!(anim.elapsed_ms, u64::MAX); // Saturates at MAX
-    }
-
-    #[test]
-    fn test_scroll_animation_target() {
-        let anim = ScrollAnimation::new(0.0, 456.78, 100, Easing::Linear);
-        assert!((anim.target() - 456.78).abs() < f64::EPSILON);
     }
 
     // ========================================================================
@@ -2170,13 +2132,12 @@ mod tests {
         ws.start_scroll_animation(200.0, 500, Some(100), Some(Easing::Linear));
         ws.tick_animation(50);
 
-        let current = ws.effective_scroll_offset();
-        // Should be around 100 (halfway)
+        assert!(ws.is_animating());
+        assert!((ws.effective_scroll_offset() - 100.0).abs() < 1e-9);
 
-        // Cancel should stay at current position
         ws.cancel_animation();
         assert!(!ws.is_animating());
-        assert!((ws.effective_scroll_offset() - current).abs() < 1.0);
+        assert!((ws.effective_scroll_offset() - 100.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2200,15 +2161,18 @@ mod tests {
         ws.start_scroll_animation(200.0, 500, Some(100), Some(Easing::Linear));
         ws.tick_animation(50);
 
-        // Interrupt with new animation to 300
+        assert!((ws.effective_scroll_offset() - 100.0).abs() < 1e-9);
+
         ws.start_scroll_animation(300.0, 500, Some(100), Some(Easing::Linear));
-
-        // New animation should start from current position (~100)
         assert!(ws.is_animating());
+        assert!((ws.effective_scroll_offset() - 100.0).abs() < 1e-9);
 
-        // Complete new animation
-        ws.tick_animation(150);
-        assert!((ws.effective_scroll_offset() - 300.0).abs() < 1.0);
+        ws.tick_animation(50);
+        assert!((ws.effective_scroll_offset() - 200.0).abs() < 1e-9);
+
+        ws.tick_animation(50);
+        assert!(!ws.is_animating());
+        assert!((ws.effective_scroll_offset() - 300.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2222,16 +2186,19 @@ mod tests {
         // Without animation
         let placements1 = ws.compute_placements_animated(viewport);
         assert_eq!(placements1.len(), 2);
+        assert_eq!(placements1[0].window_id, 1);
+        assert_eq!(placements1[0].rect.x, 10);
+        assert_eq!(placements1[0].visibility, Visibility::Visible);
 
-        // Start animation that shifts viewport
         ws.start_scroll_animation(200.0, 500, Some(100), Some(Easing::Linear));
-        ws.tick_animation(100); // Complete
+        ws.tick_animation(50);
+        assert!(ws.is_animating());
 
         let placements2 = ws.compute_placements_animated(viewport);
         assert_eq!(placements2.len(), 2);
-
-        // Window positions should be shifted left (viewport scrolled right)
-        assert!(placements2[0].rect.x < placements1[0].rect.x);
+        assert_eq!(placements2[0].window_id, 1);
+        assert_eq!(placements2[0].rect.x, -90);
+        assert_eq!(placements2[0].visibility, Visibility::Visible);
     }
 
     #[test]
@@ -2282,6 +2249,18 @@ mod tests {
 
         // Should start an animation to scroll back to column 0
         assert!(ws.is_animating());
+        ws.tick_animation(DEFAULT_ANIMATION_DURATION_MS);
+
+        ws.set_focus(2, 0).unwrap();
+        ws.ensure_focused_visible_animated(500);
+        assert!(ws.is_animating());
+        ws.tick_animation(DEFAULT_ANIMATION_DURATION_MS);
+        assert!(!ws.is_animating());
+        assert_eq!(ws.scroll_offset(), 780.0);
+        let placements = ws.compute_placements_animated(Rect::new(0, 0, 500, 600));
+        let focused = placements.iter().find(|p| p.window_id == 3).unwrap();
+        assert_eq!(focused.rect.x, 50);
+        assert_eq!(focused.visibility, Visibility::Visible);
     }
 
     // ========================================================================
@@ -2527,18 +2506,14 @@ mod tests {
         ws.insert_window_in_column(2, 0).unwrap();
         ws.insert_window_in_column(3, 0).unwrap();
 
-        // Pin the LAST window to a minimum that the equal-split rounding
-        // would otherwise undershoot.
-        ws.set_window_min_height(3, 200);
+        // Available height is 960; the two flexible shares round to 380 each,
+        // leaving 200, one pixel below the last window's minimum.
+        ws.set_window_min_height(3, 201);
 
         let viewport = Rect::new(0, 0, 800, 1000);
         let placements = ws.compute_placements(viewport);
         let last = placements.iter().find(|p| p.window_id == 3).unwrap();
-        assert!(
-            last.rect.height >= 200,
-            "last window should honor its 200px minimum, got {}",
-            last.rect.height
-        );
+        assert_eq!(last.rect.height, 201);
     }
 
     #[test]
@@ -4939,21 +4914,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_height_multi_window() {
-        let mut ws = Workspace::with_gaps(0, 0);
-        ws.insert_window(1, Some(800)).unwrap();
-        ws.insert_window_in_column(2, 0).unwrap();
-        ws.set_focus(0, 0).unwrap();
-
-        // Both windows start at 0.5 weight
-        let presets = vec![0.333, 0.5, 0.667];
-
-        ws.cycle_height_up(&presets);
-        let w = ws.columns()[0].height_weights()[0];
-        assert!((w - 0.667).abs() < 0.01);
-    }
-
-    #[test]
     fn test_equalize_heights() {
         let mut ws = Workspace::with_gaps(0, 0);
         ws.insert_window(1, Some(800)).unwrap();
@@ -4962,6 +4922,7 @@ mod tests {
 
         let presets = vec![0.333, 0.5, 0.667];
         ws.cycle_height_up(&presets);
+        assert!((ws.columns()[0].height_weights()[0] - 0.667).abs() < 1e-9);
 
         ws.equalize_focused_column_heights();
         assert!((ws.columns()[0].height_weights()[0] - 0.5).abs() < 1e-9);
@@ -4970,14 +4931,7 @@ mod tests {
 
     #[test]
     fn test_height_weights_backward_compat() {
-        // Simulate a Column deserialized without height_weights (empty vec via #[serde(default)])
-        let col = Column {
-            width: 800,
-            windows: vec![1, 2],
-            height_weights: Vec::new(), // backward compat: empty
-            mode: ColumnMode::default(),
-            width_fraction_cache: None,
-        };
+        let col: Column = serde_json::from_str(r#"{"width":800,"windows":[1,2]}"#).unwrap();
         assert!(col.height_weights.is_empty());
         // Compute placements should fall back to equal distribution
         let mut ws = Workspace::with_gaps(0, 0);
@@ -5050,35 +5004,6 @@ mod tests {
         let mut col = Column::empty(800);
         col.set_tabbed(0);
         assert!(matches!(col.mode(), ColumnMode::Vertical));
-    }
-
-    #[test]
-    fn test_cycle_active_tab_wraps() {
-        let mut col = Column::new(1, 800);
-        col.add_window(2);
-        col.add_window(3);
-        col.set_tabbed(0);
-        assert_eq!(col.cycle_active_tab(true), Some(1));
-        assert_eq!(col.cycle_active_tab(true), Some(2));
-        assert_eq!(col.cycle_active_tab(true), Some(0)); // wrap forward
-        assert_eq!(col.cycle_active_tab(false), Some(2)); // wrap backward
-    }
-
-    #[test]
-    fn test_cycle_active_tab_noop_on_vertical() {
-        let mut col = Column::new(1, 800);
-        col.add_window(2);
-        // Vertical: cycle returns None
-        assert_eq!(col.cycle_active_tab(true), None);
-    }
-
-    #[test]
-    fn test_cycle_active_tab_noop_on_single_window() {
-        let mut col = Column::new(1, 800);
-        col.set_tabbed(0);
-        // Single-window tabbed auto-reverts to Vertical via maintain_mode_invariant
-        // (1-tab tabbed is degenerate). cycle returns None either way.
-        assert_eq!(col.cycle_active_tab(true), None);
     }
 
     #[test]
@@ -5367,12 +5292,14 @@ mod tests {
 
     #[test]
     fn test_insert_at_or_before_active_shifts_active() {
-        let mut ws = ws_3_tabs();
-        ws.toggle_focused_column_tabbed_mode();
-        ws.set_active_tab(0, 1).unwrap();
-        ws.insert_window_in_column_at(99, 0, 0).unwrap();
-        // Insert at idx 0 → active was at 1, should shift to 2.
-        assert_eq!(ws.columns[0].active_tab_idx(), Some(2));
+        for insert_index in [0, 1] {
+            let mut ws = ws_3_tabs();
+            ws.toggle_focused_column_tabbed_mode();
+            ws.set_active_tab(0, 1).unwrap();
+            ws.insert_window_in_column_at(99, 0, insert_index).unwrap();
+            assert_eq!(ws.columns[0].active_tab_idx(), Some(2));
+            assert_eq!(ws.columns[0].windows()[2], 2);
+        }
     }
 
     #[test]
@@ -5408,25 +5335,31 @@ mod tests {
     }
 
     #[test]
-    fn test_move_window_left_into_tabbed_keeps_focus_on_moved() {
-        // Source: col 0 with 1 window. Receiver: col 1 Tabbed with 2 windows.
-        let mut ws = Workspace::with_gaps(0, 0);
-        ws.insert_window(1, Some(800)).unwrap();
-        ws.insert_window(2, Some(800)).unwrap();
-        ws.insert_window_in_column(3, 1).unwrap();
-        ws.set_focus(1, 0).unwrap();
-        ws.toggle_focused_column_tabbed_mode();
-        // Now col 0 has just [1], col 1 is Tabbed with [2, 3] active=0.
-        // Place focus on col 0's window and move it left... wait, col 0 is leftmost.
-        // Use move_window_right from col 0 instead.
-        ws.set_focus(0, 0).unwrap();
-        // After move_window_right, window 1 joins col 1 at end. Per plan,
-        // keyboard-initiated move makes the moved window the active tab.
-        ws.move_window_right();
-        // Col 1 now has [2, 3, 1], active should be 2 (the moved window).
-        assert_eq!(ws.columns.len(), 1); // col 0 was emptied
-        assert_eq!(ws.columns[0].active_tab_idx(), Some(2));
-        assert_eq!(ws.focused_window_in_column, 2);
+    fn test_move_window_right_and_left_into_tabbed_keeps_focus_on_moved() {
+        for move_right in [true, false] {
+            let mut ws = Workspace::with_gaps(0, 0);
+            ws.insert_window(1, Some(800)).unwrap();
+            ws.insert_window(2, Some(800)).unwrap();
+            let receiver = usize::from(move_right);
+            let source = 1 - receiver;
+            ws.insert_window_in_column(3, receiver).unwrap();
+            ws.set_focus(receiver, 0).unwrap();
+            ws.toggle_focused_column_tabbed_mode();
+            let moved = ws.columns[source].windows()[0];
+            ws.set_focus(source, 0).unwrap();
+
+            if move_right {
+                ws.move_window_right();
+            } else {
+                ws.move_window_left();
+            }
+
+            assert_eq!(ws.columns.len(), 1);
+            assert_eq!(ws.columns[0].active_tab_idx(), Some(2));
+            assert_eq!(ws.focused_window_in_column, 2);
+            assert_eq!(ws.focused_window(), Some(moved));
+            assert_eq!(ws.columns[0].windows()[2], moved);
+        }
     }
 
     #[test]
@@ -5533,13 +5466,20 @@ mod tests {
     }
 
     #[test]
-    fn test_focus_up_with_minimized_tabs_skips() {
+    fn test_focus_down_with_minimized_tabs_skips() {
         let mut ws = ws_3_tabs();
         ws.toggle_focused_column_tabbed_mode();
         ws.set_active_tab(0, 0).unwrap();
         ws.mark_minimized(2); // window at idx 1 minimized
         ws.focus_down(); // focus_down from 0 should skip 1 and land on 2.
         assert_eq!(ws.focused_window_in_column, 2);
+        assert_eq!(ws.columns[0].active_tab_idx(), Some(2));
+        assert_eq!(ws.focused_window(), Some(3));
+
+        ws.focus_up();
+        assert_eq!(ws.focused_window_in_column, 0);
+        assert_eq!(ws.columns[0].active_tab_idx(), Some(0));
+        assert_eq!(ws.focused_window(), Some(1));
     }
 
     #[test]

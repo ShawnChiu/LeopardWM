@@ -68,16 +68,6 @@ impl ScrollAnimation {
         }
     }
 
-    /// Create a new animation with default duration and easing.
-    pub fn with_defaults(start: f64, target: f64) -> Self {
-        Self::new(
-            start,
-            target,
-            DEFAULT_ANIMATION_DURATION_MS,
-            Easing::default(),
-        )
-    }
-
     /// Check if the animation is complete.
     pub fn is_complete(&self) -> bool {
         self.elapsed_ms >= self.duration_ms

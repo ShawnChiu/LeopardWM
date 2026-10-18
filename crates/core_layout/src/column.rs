@@ -237,24 +237,6 @@ impl Column {
         }
     }
 
-    /// Cycle the active tab forward (`forward=true`) or backward, wrapping.
-    /// Returns the new active index, or None if the column is not Tabbed
-    /// or has fewer than 2 windows.
-    pub fn cycle_active_tab(&mut self, forward: bool) -> Option<usize> {
-        let active_idx = self.active_tab_idx()?;
-        let n = self.windows.len();
-        if n < 2 {
-            return None;
-        }
-        let next = if forward {
-            (active_idx + 1) % n
-        } else {
-            (active_idx + n - 1) % n
-        };
-        self.mode = ColumnMode::Tabbed { active_idx: next };
-        Some(next)
-    }
-
     /// Check if this column contains a specific window.
     pub fn contains(&self, window_id: WindowId) -> bool {
         self.windows.contains(&window_id)
