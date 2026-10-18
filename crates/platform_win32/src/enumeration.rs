@@ -867,38 +867,33 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires display hardware - run with: cargo test -- --ignored"]
     fn test_enumerate_monitors() {
-        let result = enumerate_monitors();
-        if let Ok(monitors) = result {
-            assert!(!monitors.is_empty(), "At least one monitor should exist");
-            for monitor in &monitors {
-                assert!(monitor.rect.width > 0, "Monitor width should be positive");
-                assert!(monitor.rect.height > 0, "Monitor height should be positive");
-                assert!(
-                    monitor.work_area.width > 0,
-                    "Work area width should be positive"
-                );
-                assert!(
-                    monitor.work_area.height > 0,
-                    "Work area height should be positive"
-                );
-            }
+        let monitors = enumerate_monitors().expect("enumerate connected displays");
+        assert!(!monitors.is_empty(), "at least one display must exist");
+        assert_eq!(monitors.iter().filter(|m| m.is_primary).count(), 1);
+        for monitor in &monitors {
+            assert!(monitor.rect.width > 0 && monitor.rect.height > 0);
+            assert!(monitor.work_area.width > 0 && monitor.work_area.height > 0);
+            assert!(monitor.work_area.x >= monitor.rect.x);
+            assert!(monitor.work_area.y >= monitor.rect.y);
+            assert!(
+                i64::from(monitor.work_area.x) + i64::from(monitor.work_area.width)
+                    <= i64::from(monitor.rect.x) + i64::from(monitor.rect.width)
+            );
+            assert!(
+                i64::from(monitor.work_area.y) + i64::from(monitor.work_area.height)
+                    <= i64::from(monitor.rect.y) + i64::from(monitor.rect.height)
+            );
         }
     }
 
     #[test]
-    #[ignore = "Requires display hardware - run with: cargo test -- --ignored"]
     fn test_get_primary_monitor() {
-        let result = get_primary_monitor();
-        if let Ok(primary) = result {
-            assert!(
-                primary.is_primary,
-                "Primary monitor should be marked as primary"
-            );
-            assert!(primary.rect.width > 0);
-            assert!(primary.work_area.width > 0);
-        }
+        let primary = get_primary_monitor().expect("select the primary display");
+        assert!(primary.is_primary, "selected display must be primary");
+        assert_eq!((primary.rect.x, primary.rect.y), (0, 0));
+        assert!(primary.rect.width > 0 && primary.rect.height > 0);
+        assert!(primary.work_area.width > 0 && primary.work_area.height > 0);
     }
 
     #[test]

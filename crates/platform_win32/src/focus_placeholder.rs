@@ -366,9 +366,7 @@ unsafe extern "system" fn placeholder_window_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_focus_window_class, work_area_center, FocusPlaceholder, OWNER_CLASS, WINDOW_CLASS,
-    };
+    use super::{work_area_center, FocusPlaceholder, OWNER_CLASS, WINDOW_CLASS};
     use leopardwm_core_layout::Rect;
     use std::ffi::c_void;
     use windows::Win32::Foundation::HWND;
@@ -377,8 +375,11 @@ mod tests {
         GetWindow, GetWindowLongPtrW, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
     };
 
+    static FOCUS_WINDOW_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn focus_placeholder_is_uncloaked_with_a_hidden_tool_window_owner() {
+        let _serialize = FOCUS_WINDOW_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let placeholder = FocusPlaceholder::new().expect("create hidden focus placeholder");
         let hwnd = HWND(placeholder.hwnd as *mut c_void);
         let mut cloaked = u32::MAX;
@@ -418,8 +419,74 @@ mod tests {
 
     #[test]
     fn either_focus_window_class_stops_its_message_loop_on_destroy() {
-        assert!(is_focus_window_class(WINDOW_CLASS));
-        assert!(is_focus_window_class(OWNER_CLASS));
-        assert!(!is_focus_window_class("UnrelatedWindow"));
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, PostThreadMessageW,
+            RegisterClassW, UnregisterClassW, MSG, WINDOW_EX_STYLE, WM_APP, WM_QUIT, WNDCLASSW,
+            WS_POPUP,
+        };
+
+        let _serialize = FOCUS_WINDOW_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        for name in [WINDOW_CLASS, OWNER_CLASS] {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let owner = std::thread::spawn(move || unsafe {
+                let class_name: Vec<u16> = format!("{name}\0").encode_utf16().collect();
+                let class_name = windows::core::PCWSTR(class_name.as_ptr());
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(super::placeholder_window_proc),
+                    lpszClassName: class_name,
+                    ..Default::default()
+                };
+                assert_ne!(RegisterClassW(&class), 0);
+                let hwnd = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    class_name,
+                    None,
+                    WS_POPUP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("create hidden focus-class window");
+                ready_tx.send(GetCurrentThreadId()).unwrap();
+                let mut message = MSG::default();
+                while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                    if message.message == WM_APP {
+                        DestroyWindow(hwnd).expect("destroy focus-class window on its owner");
+                    } else {
+                        DispatchMessageW(&message);
+                    }
+                }
+                if windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() {
+                    DestroyWindow(hwnd).unwrap();
+                }
+                UnregisterClassW(class_name, None).unwrap();
+            });
+            let thread_id = ready_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("focus-class owner initialized");
+            unsafe { PostThreadMessageW(thread_id, WM_APP, WPARAM(0), LPARAM(0)) }.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !owner.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let stopped_on_destroy = owner.is_finished();
+            if !stopped_on_destroy {
+                unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }.unwrap();
+            }
+            owner.join().expect("focus-class owner did not panic");
+            assert!(
+                stopped_on_destroy,
+                "destroying {name} did not terminate its message loop"
+            );
+        }
     }
 }

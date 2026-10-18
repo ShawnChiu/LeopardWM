@@ -2630,6 +2630,12 @@ fn run_matrix_case(
                     let mut injection = RestoreInjection::from_fault(fault);
                     match recover_owned_region(&record, &record.expected_installed, &mut injection)
                     {
+                        Ok(true) if fault == Some(MatrixFault::RestoreTerminal) => {
+                            return Err(
+                                "MECHANICAL FAIL: terminal restore failure unexpectedly succeeded"
+                                    .to_owned(),
+                            );
+                        }
                         Ok(true) => {}
                         Ok(false) => {
                             return Err("MECHANICAL FAIL: recovery did not restore owned clipping"

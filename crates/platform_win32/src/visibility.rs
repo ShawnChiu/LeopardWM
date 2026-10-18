@@ -1415,25 +1415,4 @@ mod tests {
         let result = restore_windows_moved_offscreen(&[]);
         assert_eq!(result.unwrap(), 0);
     }
-
-    #[test]
-    #[ignore = "Calls real Win32 APIs against literal HWND values (999_999, 1_234_567) \
-                that may collide with a live window on a running daemon and move it if \
-                parked at MoveOffScreen sentinel coords. Run with: cargo test -- --ignored"]
-    fn test_uncloak_all_managed_with_invalid_ids() {
-        let _serialize = crate::placement::lock_cloak_set_tests();
-        // Should not panic even with invalid window IDs (best-effort)
-        uncloak_all_managed_windows(&[0, 999_999, 1_234_567]);
-    }
-
-    #[test]
-    #[ignore = "Enumerates all system windows and moves any parked at MoveOffScreen sentinel \
-                coords back to the primary monitor work area. Safe to run in isolation but \
-                disrupts a concurrently-running daemon (mass retile + Chromium swap-chain \
-                desync). Run with: cargo test -- --ignored"]
-    fn test_uncloak_all_visible_windows_no_panic() {
-        let _serialize = crate::placement::lock_cloak_set_tests();
-        // EnumWindows should succeed; uncloaking random windows is best-effort
-        uncloak_all_visible_windows();
-    }
 }

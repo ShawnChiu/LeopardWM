@@ -290,13 +290,41 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires display hardware - run with: cargo test -- --ignored"]
     fn inspect_windows_returns_entries_with_both_verdicts() {
-        let windows = inspect_windows().expect("EnumWindows should succeed");
-        for w in &windows {
-            // Both verdicts are always populated (Ok or Err).
-            let _ = (w.startup_verdict, w.live_create_verdict, w.hwnd);
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+
+        struct OwnedWindow(HWND);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                unsafe { DestroyWindow(self.0) }.unwrap();
+            }
         }
-        let _ = windows.len();
+        let owned = OwnedWindow(unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("LeopardWM hidden inspection test"),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create hidden inspection window")
+        });
+        let windows = inspect_windows().expect("EnumWindows should succeed");
+        let inspected = windows
+            .iter()
+            .find(|w| w.hwnd == owned.0 .0 as WindowId)
+            .expect("owned hidden window must be enumerated");
+        assert_eq!(inspected.startup_verdict, Err(SkipReason::NotVisible));
+        assert_eq!(inspected.live_create_verdict, Err(SkipReason::NotVisible));
     }
 }

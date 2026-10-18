@@ -3038,6 +3038,63 @@ mod tests {
     static OWNER_SWEEP: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
     #[test]
+    fn test_uncloak_all_managed_with_invalid_ids() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+        let _owner_sweep = OWNER_SWEEP.read().unwrap_or_else(|e| e.into_inner());
+        let _serialize = lock_cloak_set_tests();
+        struct OwnedWindow(HWND);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let create = || {
+            OwnedWindow(unsafe {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    w!("LeopardWM hidden managed recovery test"),
+                    WS_POPUP,
+                    crate::MOVE_OFFSCREEN_SENTINEL_COORD,
+                    crate::MOVE_OFFSCREEN_SENTINEL_COORD,
+                    100,
+                    100,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("create hidden recovery window")
+            })
+        };
+        let owned = create();
+        let destroyed = create();
+        let destroyed_id = destroyed.0 .0 as WindowId;
+        drop(destroyed);
+        let mut before = RECT::default();
+        unsafe { GetWindowRect(owned.0, &mut before) }.unwrap();
+        assert!(crate::visibility::is_move_offscreen_sentinel_rect(
+            &Rect::new(
+                before.left,
+                before.top,
+                before.right - before.left,
+                before.bottom - before.top,
+            )
+        ));
+        crate::visibility::uncloak_all_managed_windows(&[0, destroyed_id, owned.0 .0 as WindowId]);
+        let mut restored = RECT::default();
+        unsafe { GetWindowRect(owned.0, &mut restored) }.unwrap();
+        let work = crate::get_primary_monitor().unwrap().work_area;
+        assert!(restored.left >= work.x && restored.top >= work.y);
+        assert!(restored.right <= work.x + work.width);
+        assert!(restored.bottom <= work.y + work.height);
+        assert!(restored.right > restored.left && restored.bottom > restored.top);
+    }
+
+    #[test]
     fn sticky_compositor_nudge_includes_explorer_and_existing_classes_only() {
         for class in [
             "CabinetWClass",
