@@ -91,8 +91,10 @@ pub struct Workspace {
     /// Scroll easing supplied by the daemon's `[animation].easing`; defaults to cubic ease-out.
     #[serde(skip)]
     pub(crate) scroll_easing: Easing,
+    /// Lets centering scroll to negative offsets or past the maximum scroll.
     #[serde(skip)]
     pub(crate) center_past_edges: bool,
+    /// Outside fullscreen, pins scroll to center when exactly one active column fits.
     #[serde(skip)]
     pub(crate) center_single_column: bool,
     #[serde(skip)]

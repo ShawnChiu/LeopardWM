@@ -92,7 +92,8 @@ impl Workspace {
                 continue;
             }
 
-            // Hidden tabs get an off-screen rect as a fallback when cloaking fails or races.
+            // Fallback when cloaking fails: park hidden tabs a viewport width left, since SWP_NOSIZE
+            // keeps their size.
             if column.is_tabbed() {
                 let on_screen_idx = visible_windows.first().map(|(i, _)| *i);
                 let offscreen_x = viewport.x.saturating_sub(viewport.width.max(1));

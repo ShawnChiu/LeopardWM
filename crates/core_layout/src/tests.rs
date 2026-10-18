@@ -8,7 +8,7 @@ impl Workspace {
     }
 }
 
-// Allow the inner `tests` module to share its name with this file module.
+// Kept nested rather than reindenting the whole suite.
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
@@ -3544,7 +3544,7 @@ mod tests {
         let mut ws = Workspace::with_gaps(10, 10);
         ws.set_centering_mode(CenteringMode::JustInView);
 
-        // 3 columns of 800px each. total_width = 2440, viewport = 1920
+        // 3 columns of 800px: total_width = 2420, visible width = 1920 - 20 = 1900
         ws.insert_window(1, Some(800)).unwrap();
         ws.insert_window(2, Some(800)).unwrap();
         ws.insert_window(3, Some(800)).unwrap();
@@ -3553,7 +3553,7 @@ mod tests {
 
         let _ = ws.focus_window(3);
         ws.ensure_focused_visible(vp_width);
-        // max_scroll = 2440 - 1920 = 520
+        // max_scroll = 2420 - 1900 = 520
         assert_eq!(ws.scroll_offset as i32, 520);
 
         ws.mark_minimized(3);
