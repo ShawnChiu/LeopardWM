@@ -639,7 +639,7 @@ unsafe fn keyboard_ll_hook_inner(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> 
         }
     };
 
-    if is_new_press {
+    if is_new_press && kb.dwExtraInfo != crate::user_press::SELF_INJECTED_INPUT_TAG {
         crate::user_press::record_user_press();
     }
 
@@ -794,7 +794,7 @@ unsafe fn send_menu_mask(vk: u16) {
                 wScan: 0,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: crate::user_press::SELF_INJECTED_INPUT_TAG,
             },
         },
     };
@@ -805,6 +805,7 @@ unsafe fn send_menu_mask(vk: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::LLKHF_INJECTED;
 
     static HOOK_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -818,18 +819,29 @@ mod tests {
         crate::user_press::set_keyboard_observer_installed(keyboard_generation, true);
         crate::user_press::set_mouse_observer_installed(mouse_generation, true);
         let mut expected = crate::user_press_count().unwrap();
-        for (message, vk, counts) in [
-            (WM_KEYUP, 0x41, false),
-            (WM_KEYDOWN, 0x41, true),
-            (WM_KEYDOWN, 0x41, false),
-            (WM_KEYUP, 0x41, false),
-            (WM_SYSKEYDOWN, 0x41, true),
-            (WM_SYSKEYUP, 0x41, false),
-            (WM_KEYDOWN, VK_LSHIFT as u32, false),
-            (WM_KEYUP, VK_LSHIFT as u32, false),
+        for (message, vk, flags, extra_info, counts) in [
+            (WM_KEYUP, 0x41, Default::default(), 0, false),
+            (WM_KEYDOWN, 0x41, Default::default(), 0, true),
+            (WM_KEYDOWN, 0x41, Default::default(), 0, false),
+            (WM_KEYUP, 0x41, Default::default(), 0, false),
+            (WM_SYSKEYDOWN, 0x41, Default::default(), 0, true),
+            (WM_SYSKEYUP, 0x41, Default::default(), 0, false),
+            (WM_KEYDOWN, VK_LSHIFT as u32, Default::default(), 0, false),
+            (WM_KEYUP, VK_LSHIFT as u32, Default::default(), 0, false),
+            (
+                WM_KEYDOWN,
+                0xE8,
+                LLKHF_INJECTED,
+                crate::user_press::SELF_INJECTED_INPUT_TAG,
+                false,
+            ),
+            (WM_KEYDOWN, 0x42, LLKHF_INJECTED, 0, true),
+            (WM_KEYDOWN, 0x43, LLKHF_INJECTED, 123, true),
         ] {
             let kb = KBDLLHOOKSTRUCT {
                 vkCode: vk,
+                flags,
+                dwExtraInfo: extra_info,
                 ..Default::default()
             };
             unsafe {
@@ -843,7 +855,7 @@ mod tests {
             assert_eq!(
                 crate::user_press_count(),
                 Some(expected),
-                "message={message}, vk={vk}"
+                "message={message}, vk={vk}, flags={flags:?}, extra_info={extra_info}"
             );
         }
         reset_held_keys().unwrap();

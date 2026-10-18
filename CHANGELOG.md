@@ -2,6 +2,12 @@
 
 All notable changes to LeopardWM will be documented in this file.
 
+## 0.3.3
+
+### Fixes
+
+- **Alt shortcuts no longer count as an extra key press when LeopardWM decides whether to undo an app's startup maximize.** The unused key LeopardWM taps to keep the menu bar inactive is now ignored; key presses sent by other programs, such as AutoHotkey or on-screen keyboards, still count.
+
 ## 0.3.2
 
 ### Fixes

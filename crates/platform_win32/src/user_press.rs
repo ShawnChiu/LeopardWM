@@ -4,9 +4,11 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
-    SetWindowsHookExW, UnhookWindowsHookEx, MSG, PM_NOREMOVE, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    SetWindowsHookExW, UnhookWindowsHookEx, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL,
+    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
 };
+
+pub(crate) const SELF_INJECTED_INPUT_TAG: usize = 0x4C57_4D49;
 
 static USER_PRESS_COUNT: AtomicU64 = AtomicU64::new(0);
 static NEXT_OBSERVER_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -132,7 +134,10 @@ unsafe extern "system" fn mouse_press_hook_proc(
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
         )
     {
-        record_user_press();
+        let mouse = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        if mouse.dwExtraInfo != SELF_INJECTED_INPUT_TAG {
+            record_user_press();
+        }
     }
     CallNextHookEx(None, ncode, wparam, lparam)
 }
@@ -144,7 +149,7 @@ pub(crate) static PRESS_COUNT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex
 mod tests {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+        LLMHF_INJECTED, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     };
 
     #[test]
@@ -215,23 +220,43 @@ mod tests {
         set_keyboard_observer_installed(keyboard_generation, true);
         set_mouse_observer_installed(mouse_generation, true);
         let mut expected = user_press_count().unwrap();
-        for (ncode, message, counts) in [
-            (0, WM_MOUSEMOVE, false),
-            (0, WM_MOUSEWHEEL, false),
-            (0, WM_MOUSEHWHEEL, false),
-            (0, WM_LBUTTONUP, false),
-            (-1, WM_LBUTTONDOWN, false),
-            (0, WM_LBUTTONDOWN, true),
-            (0, WM_RBUTTONDOWN, true),
-            (0, WM_MBUTTONDOWN, true),
-            (0, WM_XBUTTONDOWN, true),
+        for (ncode, message, flags, extra_info, counts) in [
+            (0, WM_MOUSEMOVE, 0, 0, false),
+            (0, WM_MOUSEWHEEL, 0, 0, false),
+            (0, WM_MOUSEHWHEEL, 0, 0, false),
+            (0, WM_LBUTTONUP, 0, 0, false),
+            (-1, WM_LBUTTONDOWN, 0, 0, false),
+            (0, WM_LBUTTONDOWN, 0, 0, true),
+            (0, WM_RBUTTONDOWN, 0, 0, true),
+            (0, WM_MBUTTONDOWN, 0, 0, true),
+            (0, WM_XBUTTONDOWN, 0, 0, true),
+            (
+                0,
+                WM_LBUTTONDOWN,
+                LLMHF_INJECTED,
+                SELF_INJECTED_INPUT_TAG,
+                false,
+            ),
+            (0, WM_LBUTTONDOWN, LLMHF_INJECTED, 0, true),
+            (0, WM_LBUTTONDOWN, LLMHF_INJECTED, 123, true),
         ] {
-            unsafe { mouse_press_hook_proc(ncode, WPARAM(message as usize), LPARAM(0)) };
+            let mouse = MSLLHOOKSTRUCT {
+                flags,
+                dwExtraInfo: extra_info,
+                ..Default::default()
+            };
+            unsafe {
+                mouse_press_hook_proc(
+                    ncode,
+                    WPARAM(message as usize),
+                    LPARAM(&mouse as *const _ as isize),
+                )
+            };
             expected += u64::from(counts);
             assert_eq!(
                 user_press_count(),
                 Some(expected),
-                "message={message}, ncode={ncode}"
+                "message={message}, ncode={ncode}, flags={flags}, extra_info={extra_info}"
             );
         }
         set_keyboard_observer_installed(keyboard_generation, false);
