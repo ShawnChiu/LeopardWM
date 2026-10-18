@@ -588,7 +588,18 @@ mod workspace_stream_tests {
         task.await.unwrap().unwrap();
         let kinds: BTreeSet<EventKind> =
             serde_json::from_value(frames[0]["events"].clone()).unwrap();
-        assert_eq!(kinds, EventKind::legacy_default());
+        assert_eq!(
+            kinds,
+            [
+                EventKind::Workspace,
+                EventKind::FocusedWindow,
+                EventKind::Layout,
+                EventKind::Config,
+                EventKind::Heartbeat,
+            ]
+            .into_iter()
+            .collect()
+        );
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[1]["type"], "config_reloaded");
     }

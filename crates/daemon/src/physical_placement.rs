@@ -1483,22 +1483,24 @@ mod tests {
         );
         state.reduce_motion = false;
         state.workspaces.get_mut(&1).unwrap()[0]
-            .add_floating(200, Rect::new(1800, 0, 400, 600))
+            .add_floating(200, Rect::new(1920, 0, 400, 600))
             .unwrap();
         state.start_workspace_switch_transition(
-            std::collections::HashMap::from([(200, Rect::new(1800, 0, 400, 600))]),
-            std::collections::HashMap::from([(200, Rect::new(1800, -1080, 400, 600))]),
+            std::collections::HashMap::from([(200, Rect::new(1920, 0, 400, 600))]),
+            std::collections::HashMap::from([(200, Rect::new(1920, -1080, 400, 600))]),
             150,
         );
         state.workspaces.get_mut(&1).unwrap()[0].remove_floating(200);
+        assert!(!state.layout_transition.as_ref().unwrap().exit_provenance[&200].eligible);
 
         let dispatched = state.apply_physical_projection(vec![placement(
             200,
-            Rect::new(1800, 0, 400, 600),
+            Rect::new(1920, 0, 400, 600),
             Visibility::Visible,
         )]);
 
-        assert_eq!(dispatched[0].rect, Rect::new(1800, 0, 400, 600));
+        assert_eq!(dispatched[0].rect, Rect::new(1920, 0, 400, 600));
+        assert_eq!(dispatched[0].visibility, Visibility::Visible);
         assert_eq!(
             state.pending_physical_presentations[&200].kind,
             PhysicalKind::Unchanged,
@@ -1911,11 +1913,22 @@ mod tests {
         let owner = Rect::new(i32::MIN / 2, 0, 1000, 1000);
         let neighbor = Rect::new(i32::MIN / 2 + 1000, 0, 1000, 1000);
         let window = Rect::new(i32::MIN / 2 + 900, 0, 400, 400);
-        let decision = project_physical_rect(window, owner, &[owner, neighbor]);
-        assert!(matches!(
-            decision,
-            PhysicalDecision::Constrained { .. } | PhysicalDecision::Parked { .. }
-        ));
+        assert_eq!(
+            project_physical_rect(window, owner, &[owner, neighbor]),
+            PhysicalDecision::Constrained {
+                rect: Rect::new(-1_073_740_924, 0, 100, 400),
+            }
+        );
+
+        let owner = Rect::new(i32::MAX - 1000, 0, 1000, 1000);
+        let neighbor = Rect::new(i32::MAX, 0, 1000, 1000);
+        let window = Rect::new(i32::MAX - 100, 0, 400, 400);
+        assert_eq!(
+            project_physical_rect(window, owner, &[owner, neighbor]),
+            PhysicalDecision::Constrained {
+                rect: Rect::new(2_147_483_547, 0, 100, 400),
+            }
+        );
     }
 
     #[test]
@@ -2017,14 +2030,13 @@ mod tests {
             PhysicalDecision::Unchanged
         );
         let strip = tab_strip_rect(window, 28, 8);
-        match project_physical_rect(strip, owner, &[owner, above]) {
-            PhysicalDecision::Constrained { rect } => {
-                assert_eq!(rect.y, 0);
-                assert_eq!(rect.height, 0.max(strip.height - 36 + 8));
+        assert_eq!(strip, Rect::new(100, -36, 400, 28));
+        assert_eq!(
+            project_physical_rect(strip, owner, &[owner, above]),
+            PhysicalDecision::Parked {
+                rect: Rect::new(-32_768, -32_768, 400, 28),
             }
-            PhysicalDecision::Parked { .. } => {}
-            other => panic!("{other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -2118,6 +2130,7 @@ mod tests {
             placement(30, bleeding, Visibility::OffScreenRight),
         ];
         park_offscreen_avoiding_neighbors(&mut placements, 1, &monitors);
+        assert_eq!(placements[0].rect, visible, "visible placement untouched");
         assert_eq!(
             placements[1].rect, non_bleed,
             "non-bleeding off-screen untouched"

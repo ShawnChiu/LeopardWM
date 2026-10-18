@@ -1122,42 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tray_event_toggle_pause_variant() {
-        let event = TrayEvent::TogglePause;
-        assert!(matches!(event, TrayEvent::TogglePause));
-    }
-
-    #[test]
-    fn test_tray_event_release_all_windows_variant() {
-        let event = TrayEvent::ReleaseAllWindows;
-        assert!(matches!(event, TrayEvent::ReleaseAllWindows));
-    }
-
-    #[test]
-    fn test_tray_event_quick_toggle_variants() {
-        assert!(matches!(
-            TrayEvent::ToggleActiveBorder,
-            TrayEvent::ToggleActiveBorder
-        ));
-        assert!(matches!(
-            TrayEvent::ToggleFocusNewWindows,
-            TrayEvent::ToggleFocusNewWindows
-        ));
-        assert!(matches!(
-            TrayEvent::ToggleFocusFollowsMouse,
-            TrayEvent::ToggleFocusFollowsMouse
-        ));
-        assert!(matches!(
-            TrayEvent::SetCenteringCenter,
-            TrayEvent::SetCenteringCenter
-        ));
-        assert!(matches!(
-            TrayEvent::SetCenteringJustInView,
-            TrayEvent::SetCenteringJustInView
-        ));
-    }
-
-    #[test]
     fn test_map_menu_id_to_event() {
         assert!(matches!(
             map_menu_id_to_event(menu_ids::REFRESH),

@@ -288,6 +288,11 @@ fn ignored_window_stays_out_through_lifecycle_and_release() {
     let mut state = managed_state();
     let paused = state.paused;
     ignore_foreground(&mut state, 10);
+    assert_eq!(
+        state.injected_native_uncloak_count.load(Ordering::Relaxed),
+        1,
+        "temporary ignore must request native uncloaking in production"
+    );
     assert_eq!(state.paused, paused);
     assert_eq!(
         state
@@ -1330,18 +1335,6 @@ fn pending_recovery_respects_paused_and_cancelled_guards_before_barrier() {
         0
     );
     cancelled_unblock.send(()).unwrap();
-}
-
-#[test]
-fn temporary_ignore_test_seam_records_native_uncloak_intent() {
-    let mut state = managed_state();
-    ignore_foreground(&mut state, 10);
-
-    assert_eq!(
-        state.injected_native_uncloak_count.load(Ordering::Relaxed),
-        1,
-        "temporary ignore must request native uncloaking in production"
-    );
 }
 
 fn ignored_token(state: &AppState, hwnd: u64) -> u64 {

@@ -1061,50 +1061,6 @@ fn track_foreground(state: &mut AppState, hwnd: u64) {
 }
 
 #[test]
-fn created_recycle_does_not_transfer_foreground_to_other_window() {
-    let mut state = state();
-    admit(&mut state, 10);
-    admit(&mut state, 20);
-    track_foreground(&mut state, 10);
-    simulate_missing_managed_token(&mut state, 10);
-    let mut rx = state.event_broadcaster.subscribe();
-
-    assert_eq!(
-        state.try_admit_window(10, AdmissionKind::Automatic),
-        AdmitOutcome::Admitted
-    );
-
-    assert_eq!(membership_count(&state, 10), 1);
-    assert_eq!(membership_count(&state, 20), 1);
-    assert_ne!(state.previous_focused_hwnd, Some(20));
-    assert!(state.pending_last_window_departure.is_none());
-    assert_no_focus_event_for(&mut rx, 20);
-}
-
-#[test]
-fn enumerate_recycle_does_not_transfer_foreground_to_other_window() {
-    let mut state = state();
-    admit(&mut state, 10);
-    admit(&mut state, 20);
-    track_foreground(&mut state, 10);
-    simulate_missing_managed_token(&mut state, 10);
-    state.injected_enumerated_windows = Some(vec![
-        info(10, "Managed", "ManagedClass", 2010),
-        info(20, "Managed", "ManagedClass", 2010),
-    ]);
-    let mut rx = state.event_broadcaster.subscribe();
-
-    let added = state.enumerate_and_add_windows().unwrap();
-
-    assert_eq!(added, 1);
-    assert_eq!(membership_count(&state, 10), 1);
-    assert_eq!(membership_count(&state, 20), 1);
-    assert_ne!(state.previous_focused_hwnd, Some(20));
-    assert!(state.pending_last_window_departure.is_none());
-    assert_no_focus_event_for(&mut rx, 20);
-}
-
-#[test]
 fn hidden_then_recycled_missing_token_uses_default_column_width() {
     let mut state = state();
     let token = admit(&mut state, 10);
@@ -1270,6 +1226,7 @@ fn enumerate_recycle_adopts_foreground_hwnd_on_selected_workspace() {
 
     assert_eq!(added, 1);
     assert_eq!(membership_count(&state, 10), 1);
+    assert_eq!(membership_count(&state, 20), 1);
     assert_eq!(state.find_window_workspace(10), Some((1, 0)));
     assert_foreground_recycle_adopted(&state, 10, shows_before);
     assert_no_focus_event_for(&mut rx, 20);
@@ -1291,6 +1248,7 @@ fn created_recycle_adopts_foreground_hwnd_on_selected_workspace() {
     );
 
     assert_eq!(membership_count(&state, 10), 1);
+    assert_eq!(membership_count(&state, 20), 1);
     assert_eq!(state.find_window_workspace(10), Some((1, 0)));
     assert_foreground_recycle_adopted(&state, 10, shows_before);
     assert_no_focus_event_for(&mut rx, 20);

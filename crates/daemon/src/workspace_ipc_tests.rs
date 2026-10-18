@@ -366,30 +366,6 @@ async fn workspace_traffic_cannot_evict_legacy_events_with_mixed_subscribers() {
     }));
 }
 
-#[test]
-#[ignore = "manual workspace projection benchmark"]
-fn benchmark_workspace_projection_with_large_membership() {
-    let mut state = fixture();
-    for hwnd in 1..=2_000 {
-        let monitor = if hwnd % 2 == 0 { 1 } else { 2 };
-        let workspace = (hwnd % 9) as usize;
-        state.ensure_workspace_exists(monitor, workspace);
-        state.workspaces.get_mut(&monitor).unwrap()[workspace]
-            .insert_window(hwnd, None)
-            .unwrap();
-    }
-
-    let started = std::time::Instant::now();
-    for _ in 0..1_000 {
-        std::hint::black_box(state.project_workspace_state());
-    }
-    let elapsed = started.elapsed();
-    eprintln!(
-        "workspace projection: 2,000 windows x 1,000 iterations in {elapsed:?} ({:?}/projection)",
-        elapsed / 1_000
-    );
-}
-
 #[tokio::test]
 async fn subscribe_handoff_has_no_duplicate_or_missing_revision() {
     use leopardwm_ipc::IpcEvent;

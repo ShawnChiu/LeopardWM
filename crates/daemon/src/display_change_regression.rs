@@ -530,12 +530,10 @@ fn test_completed_mover_minimum_width_reports_direct_landing_feedback() {
     )
     .unwrap();
     assert_eq!(measured.width_violations.len(), 1);
-    assert_eq!(
-        measured.width_violations[0].min_width,
-        direct_result.width_violations[0].min_width
-    );
+    assert_eq!(measured.width_violations[0].min_width, 600);
     assert_eq!(measured.width_violations[0].window_id, marked.window_id);
     assert_eq!(direct_result.width_violations.len(), 1);
+    assert_eq!(direct_result.width_violations[0].min_width, 600);
 }
 
 fn inactive_workspace_move_state(owner: &PlacementOwner) -> AppState {
@@ -730,6 +728,7 @@ fn parked_owner_release_reaches_target(cascade: bool) {
     let owner =
         PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
     classify_non_draining_owner(&owner);
+    let before_park = leopardwm_platform_win32::get_window_chrome_rect(owner.window_id).unwrap();
     leopardwm_platform_win32::move_window_offscreen(owner.window_id).unwrap();
     assert!(wait_for_fixture(
         || !leopardwm_platform_win32::pending_async_position(owner.window_id),
@@ -751,11 +750,20 @@ fn parked_owner_release_reaches_target(cascade: bool) {
             height,
         )
     } else {
+        let work_area = leopardwm_platform_win32::get_primary_monitor()
+            .unwrap()
+            .work_area;
+        let target = Rect::new(
+            work_area.x,
+            work_area.y,
+            before_park.width,
+            before_park.height,
+        );
         assert_eq!(
             leopardwm_platform_win32::restore_windows_moved_offscreen(&[owner.window_id]).unwrap(),
             1
         );
-        leopardwm_platform_win32::get_window_chrome_rect(owner.window_id).unwrap()
+        target
     };
     assert!(wait_for_fixture(
         || !leopardwm_platform_win32::pending_async_position(owner.window_id),

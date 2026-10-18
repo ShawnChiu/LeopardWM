@@ -1683,18 +1683,10 @@ mod tests {
     }
 
     #[test]
-    fn test_app_state_skips_overview_overlay_under_cfg_test() {
-        let state = test_state();
-        assert!(
-            state.overview_overlay.is_none(),
-            "OverviewOverlay must stay None in AppState::new — it spawns a real top-level window"
-        );
-        assert!(!state.overview_open);
-    }
-
-    #[test]
     fn test_toggle_overview_flips_open_flag_without_overlay() {
         let mut state = test_state();
+        assert!(state.overview_overlay.is_none());
+        assert!(!state.overview_open);
         add_windows(&mut state, 0, &[101]);
         // No event sender installed under cfg(test) -> no overlay is
         // constructed, but the open flag still tracks visibility intent.
@@ -2006,9 +1998,10 @@ mod tests {
         add_windows(&mut state, 0, &[101, 102]);
 
         let (_, model) = state.build_overview_model().expect("model");
+        assert_eq!(model.rows[0].cards.len(), 2);
         assert!(
-            model.rows[0].cards.iter().all(|c| c.live),
-            "default config: every card requests a live preview"
+            model.rows[0].cards.iter().all(|c| c.live && !c.snapshot),
+            "default config: every card requests a live preview without a snapshot"
         );
     }
 
@@ -2035,18 +2028,6 @@ mod tests {
         assert!(
             model.rows[0].cards.iter().all(|c| c.snapshot && !c.live),
             "render = snapshot marks cards snapshot and disables live previews"
-        );
-    }
-
-    #[test]
-    fn test_cards_not_snapshot_by_default() {
-        let mut state = test_state();
-        add_windows(&mut state, 0, &[101]);
-
-        let (_, model) = state.build_overview_model().expect("model");
-        assert!(
-            model.rows[0].cards.iter().all(|c| !c.snapshot),
-            "live mode must not draw snapshot bodies"
         );
     }
 
