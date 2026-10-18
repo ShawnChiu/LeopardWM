@@ -1,23 +1,8 @@
-//! Integration tests for LeopardWM daemon IPC protocol.
-//!
-//! These tests verify the IPC protocol correctness without requiring
-//! actual Win32 window management. They test:
-//! - Command serialization/deserialization
-//! - Response formatting
-//! - Protocol flow
-//!
-//! Limits:
-//! - These tests validate IPC serde and line-delimited wire shape only.
-//! - They do not launch the daemon event loop or exercise real Win32 focus/desktop recovery.
-//! - Lockout/recovery behavior must be verified in host/manual scenarios.
+//! IPC serde and line-delimited wire-shape tests. These do not launch the daemon
+//! event loop or exercise Win32 focus and desktop recovery; those require host tests.
 
 use leopardwm_ipc::{IpcCommand, IpcRect, IpcResponse, WindowInfo};
 
-// ============================================================================
-// IPC Command Roundtrip Tests
-// ============================================================================
-
-/// Test that all IPC commands can be serialized and deserialized correctly.
 #[test]
 fn test_all_commands_roundtrip() {
     let commands = vec![
@@ -62,13 +47,11 @@ fn test_all_commands_roundtrip() {
         let json = serde_json::to_string(&cmd).expect("serialize");
         let parsed: IpcCommand = serde_json::from_str(&json).expect("deserialize");
 
-        // Verify roundtrip by serializing again
         let json2 = serde_json::to_string(&parsed).expect("re-serialize");
         assert_eq!(json, json2, "Command roundtrip failed: {:?}", cmd);
     }
 }
 
-/// Test that all IPC responses can be serialized and deserialized correctly.
 #[test]
 fn test_all_responses_roundtrip() {
     let responses = vec![
@@ -155,48 +138,36 @@ fn test_all_responses_roundtrip() {
         let json = serde_json::to_string(&resp).expect("serialize");
         let parsed: IpcResponse = serde_json::from_str(&json).expect("deserialize");
 
-        // Verify roundtrip by serializing again
         let json2 = serde_json::to_string(&parsed).expect("re-serialize");
         assert_eq!(json, json2, "Response roundtrip failed");
     }
 }
 
-// ============================================================================
-// Protocol Format Tests
-// ============================================================================
-
-/// Test that commands are newline-delimited in the protocol.
 #[test]
 fn test_protocol_newline_delimited() {
     let cmd = IpcCommand::FocusLeft;
     let json = serde_json::to_string(&cmd).expect("serialize");
 
-    // Protocol expects newline-terminated messages
     let protocol_msg = format!("{}\n", json);
     assert!(protocol_msg.ends_with('\n'));
     assert!(!json.contains('\n'));
 
-    // Should be parseable without the newline
     let trimmed = protocol_msg.trim();
     let _parsed: IpcCommand = serde_json::from_str(trimmed).expect("parse trimmed");
 }
 
-/// Test that responses are newline-delimited in the protocol.
 #[test]
 fn test_response_newline_delimited() {
     let resp = IpcResponse::Ok;
     let json = serde_json::to_string(&resp).expect("serialize");
 
-    // Protocol expects newline-terminated messages
     let protocol_msg = format!("{}\n", json);
     assert!(protocol_msg.ends_with('\n'));
 
-    // Should be parseable without the newline
     let trimmed = protocol_msg.trim();
     let _parsed: IpcResponse = serde_json::from_str(trimmed).expect("parse trimmed");
 }
 
-/// Test panic_revert command roundtrip using exact protocol JSON shape.
 #[test]
 fn test_panic_revert_command_json_shape_roundtrip() {
     let cmd = IpcCommand::PanicRevert;
@@ -210,23 +181,19 @@ fn test_panic_revert_command_json_shape_roundtrip() {
     assert_eq!(parsed, IpcCommand::PanicRevert);
 }
 
-/// Test stop command/response payload expectations in this serde-only integration suite.
 #[test]
 fn test_stop_command_response_payload_shapes() {
-    // Canonical stop request: command tag only, no payload.
     let stop_cmd = IpcCommand::Stop;
     let cmd_json = serde_json::to_string(&stop_cmd).expect("serialize stop");
     let cmd_value: serde_json::Value = serde_json::from_str(&cmd_json).expect("parse stop value");
     assert_eq!(cmd_value, serde_json::json!({ "type": "stop" }));
 
-    // Canonical success response for stop: status tag only.
     let stop_response = IpcResponse::Ok;
     let response_json = serde_json::to_string(&stop_response).expect("serialize response");
     let response_value: serde_json::Value =
         serde_json::from_str(&response_json).expect("parse response value");
     assert_eq!(response_value, serde_json::json!({ "status": "ok" }));
 
-    // Validate parse path from exact line-delimited wire messages.
     let parsed_cmd: IpcCommand =
         serde_json::from_str(r#"{"type":"stop"}"#).expect("parse canonical stop");
     let parsed_response: IpcResponse =
@@ -235,7 +202,6 @@ fn test_stop_command_response_payload_shapes() {
     assert_eq!(parsed_response, IpcResponse::Ok);
 }
 
-/// Test toggle_pause command payload expectations in this serde-only integration suite.
 #[test]
 fn test_toggle_pause_command_payload_shape() {
     let cmd = IpcCommand::TogglePause;
@@ -249,11 +215,6 @@ fn test_toggle_pause_command_payload_shape() {
     assert_eq!(parsed_cmd, IpcCommand::TogglePause);
 }
 
-// ============================================================================
-// Error Response Tests
-// ============================================================================
-
-/// Test error response contains meaningful message.
 #[test]
 fn test_error_response_message() {
     let error_msg = "Window not found: 12345";
@@ -271,7 +232,6 @@ fn test_error_response_message() {
     }
 }
 
-/// Test error response with special characters.
 #[test]
 fn test_error_response_special_chars() {
     let error_msg = "Failed to process: \"window\" with <special> & chars";
@@ -288,14 +248,8 @@ fn test_error_response_special_chars() {
     }
 }
 
-// ============================================================================
-// WorkspaceState Response Tests
-// ============================================================================
-
-/// Test workspace state with edge case values.
 #[test]
 fn test_workspace_state_edge_values() {
-    // Test with zero values
     let resp = IpcResponse::WorkspaceState {
         columns: 0,
         windows: 0,
@@ -321,7 +275,6 @@ fn test_workspace_state_edge_values() {
     }
 }
 
-/// Test workspace state with large values.
 #[test]
 fn test_workspace_state_large_values() {
     let resp = IpcResponse::WorkspaceState {
@@ -351,7 +304,6 @@ fn test_workspace_state_large_values() {
     }
 }
 
-/// Test workspace state with negative scroll offset.
 #[test]
 fn test_workspace_state_negative_scroll() {
     let resp = IpcResponse::WorkspaceState {
@@ -376,11 +328,6 @@ fn test_workspace_state_negative_scroll() {
     }
 }
 
-// ============================================================================
-// WindowList Response Tests
-// ============================================================================
-
-/// Test window list with empty list.
 #[test]
 fn test_window_list_empty() {
     let resp = IpcResponse::WindowList { windows: vec![] };
@@ -394,7 +341,6 @@ fn test_window_list_empty() {
     }
 }
 
-/// Test window list with multiple windows.
 #[test]
 fn test_window_list_multiple_windows() {
     let windows = vec![
@@ -455,7 +401,6 @@ fn test_window_list_multiple_windows() {
     }
 }
 
-/// Test window info with Unicode title.
 #[test]
 fn test_window_info_unicode_title() {
     let win = WindowInfo {
@@ -478,11 +423,6 @@ fn test_window_info_unicode_title() {
     assert_eq!(parsed.title, "日本語タイトル 中文标题 🎉");
 }
 
-// ============================================================================
-// Command-Specific Tests
-// ============================================================================
-
-/// Test resize command with various deltas.
 #[test]
 fn test_resize_command_values() {
     let deltas = vec![0, 1, -1, 50, -50, 100, -100, i32::MAX, i32::MIN];
@@ -499,7 +439,6 @@ fn test_resize_command_values() {
     }
 }
 
-/// Test scroll command with various deltas.
 #[test]
 fn test_scroll_command_values() {
     let deltas = vec![0.0, 1.0, -1.0, 100.5, -100.5, f64::MAX, f64::MIN];
@@ -520,11 +459,6 @@ fn test_scroll_command_values() {
     }
 }
 
-// ============================================================================
-// Invalid Input Tests
-// ============================================================================
-
-/// Test parsing invalid JSON.
 #[test]
 fn test_invalid_json_parsing() {
     let invalid_inputs = vec!["", "not json", "{", "{invalid}", "null", "123", "true"];
@@ -543,17 +477,12 @@ fn test_unknown_command_type() {
     assert!(result.is_err());
 }
 
-/// Test parsing unknown response type.
 #[test]
 fn test_unknown_response_type() {
     let json = r#"{"status":"future_response","payload":{"v":1}}"#;
     let result: Result<IpcResponse, _> = serde_json::from_str(json);
     assert!(matches!(result, Ok(IpcResponse::Unknown)));
 }
-
-// ============================================================================
-// IPC Robustness Tests
-// ============================================================================
 
 #[test]
 fn test_empty_message_is_not_valid_command() {
@@ -577,7 +506,6 @@ fn test_partial_json_is_not_valid_command() {
 
 #[test]
 fn test_oversized_payload_would_fail_parse() {
-    // A string larger than MAX_IPC_MESSAGE_SIZE won't be a valid command
     let huge = "x".repeat(leopardwm_ipc::MAX_IPC_MESSAGE_SIZE + 1);
     let result: Result<IpcCommand, _> = serde_json::from_str(&huge);
     assert!(result.is_err());
@@ -585,20 +513,12 @@ fn test_oversized_payload_would_fail_parse() {
 
 #[test]
 fn test_max_ipc_message_size_accessible() {
-    // Verify the constant is accessible and reasonable
     const { assert!(leopardwm_ipc::MAX_IPC_MESSAGE_SIZE >= 1024) };
     const { assert!(leopardwm_ipc::MAX_IPC_MESSAGE_SIZE <= 1024 * 1024) };
 }
 
-// ============================================================================
-// Pub/Sub protocol — Subscribe handshake + event frames
-// ============================================================================
-
-/// The Subscribe → Subscribed handshake round-trips cleanly at the wire
-/// level. After the ack the client is expected to switch parsers from
-/// IpcResponse to IpcEvent — this test pins the byte-for-byte encoding
-/// of both halves so a stray rename of the discriminator field would
-/// break loudly.
+/// Clients switch from response parsing to event parsing after the subscription
+/// acknowledgment; the discriminator fields must remain distinct.
 #[test]
 fn test_subscribe_handshake_wire_format() {
     use leopardwm_ipc::EventKind;
@@ -608,21 +528,17 @@ fn test_subscribe_handshake_wire_format() {
     events.insert(EventKind::Workspace);
     events.insert(EventKind::FocusedWindow);
 
-    // Subscribe command: tagged with `type`
     let cmd = IpcCommand::Subscribe {
         events: events.clone(),
     };
     let cmd_json = serde_json::to_string(&cmd).unwrap();
     assert!(cmd_json.starts_with(r#"{"type":"subscribe""#));
 
-    // Subscribed response: tagged with `status` (different field!)
     let resp = IpcResponse::Subscribed { events };
     let resp_json = serde_json::to_string(&resp).unwrap();
     assert!(resp_json.starts_with(r#"{"status":"subscribed""#));
 
-    // The two MUST use different tags — a client that tries to
-    // deserialize a Subscribe command as an IpcResponse should fail,
-    // and vice versa. This is the "mode-switch" the protocol relies on.
+    // A Subscribe request must not be mistaken for a response during the parser switch.
     assert!(
         serde_json::from_str::<IpcResponse>(&cmd_json).is_err()
             || matches!(
@@ -632,11 +548,8 @@ fn test_subscribe_handshake_wire_format() {
     );
 }
 
-/// Event frames use `type` discriminator; mixing them with IpcResponse
-/// parsing fails with a clear error so client bugs don't fail silently.
-/// (IpcResponse requires a `status` tag — events have `type` instead, so
-/// serde returns "missing field `status`" rather than silently mapping
-/// to `Unknown`. This is the desired behavior: noisy mismatch.)
+/// Forgetting the response-to-event parser switch must fail loudly on the missing
+/// `status` tag, rather than silently yielding `Unknown`.
 #[test]
 fn test_event_frame_distinct_from_response_frame() {
     use leopardwm_ipc::IpcEvent;
@@ -650,15 +563,12 @@ fn test_event_frame_distinct_from_response_frame() {
     let event_json = serde_json::to_string(&event).unwrap();
     assert!(event_json.contains(r#""type":"workspace_changed""#));
 
-    // Parsing as IpcResponse fails (missing `status` field). Clients
-    // that forget the parser-mode-switch hit this error immediately.
     let as_response: Result<IpcResponse, _> = serde_json::from_str(&event_json);
     assert!(as_response.is_err());
     assert!(as_response.unwrap_err().to_string().contains("status"));
 }
 
-/// Filter sets roundtrip losslessly. The daemon expands an empty set to the
-/// legacy kinds; `workspace_state` requires explicit opt-in.
+/// Empty filters are expanded by the daemon, not by wire deserialization.
 #[test]
 fn test_subscribe_filter_set_roundtrip() {
     use leopardwm_ipc::EventKind;
@@ -686,8 +596,6 @@ fn test_subscribe_filter_set_roundtrip() {
     }
 }
 
-/// `IpcEvent::kind()` correctly classifies every variant — used by the
-/// IPC server to filter events against per-subscriber filter sets.
 #[test]
 fn test_event_kind_classification() {
     use leopardwm_ipc::{ColumnSummary, EventKind, IpcEvent};
@@ -738,9 +646,7 @@ fn test_event_kind_classification() {
     }
 }
 
-/// Lagged events use the same wire format as ordinary events but
-/// shouldn't be filtered out (broadcast layer surfaces them
-/// regardless). Verify the wire shape is what bar developers expect.
+/// Lagged events bypass subscriber filters, so clients must recognize their wire shape.
 #[test]
 fn test_lagged_event_wire_format() {
     use leopardwm_ipc::IpcEvent;
@@ -751,9 +657,6 @@ fn test_lagged_event_wire_format() {
     assert_eq!(parsed, lagged);
 }
 
-/// Tabbed columns extend `LayoutChanged` with `ColumnSummary.mode`.
-/// Verify a mixed-vertical-and-tabbed payload round-trips and that
-/// subscribers see the active_idx clearly enough to render a tab strip.
 #[test]
 fn test_layout_changed_mixed_vertical_and_tabbed_columns() {
     use leopardwm_ipc::{ColumnSummary, ColumnSummaryMode, IpcEvent};
@@ -783,10 +686,7 @@ fn test_layout_changed_mixed_vertical_and_tabbed_columns() {
     assert_eq!(parsed, ev);
 }
 
-/// Documented backward-compat: a v1 daemon's payload (no `mode` key on
-/// columns) must be parseable by a v2-aware client. This test mirrors
-/// the IPC-crate test but at the integration layer to lock the contract
-/// for any future protocol bumps.
+/// Payloads without a column mode must remain readable by clients that support tabbed columns.
 #[test]
 fn test_layout_changed_v1_payload_parses_in_v2_client() {
     use leopardwm_ipc::{ColumnSummaryMode, IpcEvent};
@@ -807,8 +707,6 @@ fn test_layout_changed_v1_payload_parses_in_v2_client() {
     }
 }
 
-/// Subscribers must distinguish ToggleTabbed (no payload) from
-/// SetActiveTab (column+tab). Verify the wire shapes don't collide.
 #[test]
 fn test_tab_commands_have_distinct_wire_shapes() {
     use leopardwm_ipc::IpcCommand;
