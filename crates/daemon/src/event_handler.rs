@@ -1,5 +1,3 @@
-//! Window event handling for AppState.
-
 use crate::config;
 use crate::state::{
     AppState, ApplicationFullscreenState, DragHintAction, DragState, ElevationBlockedRecord,
@@ -99,12 +97,7 @@ impl MoveSizeCancelResult {
     }
 }
 
-/// Whether to keep the fullscreen window focused instead of following a focus
-/// event to `focused_hwnd`. Returns the fullscreen window to re-assert, or
-/// `None` to let the focus change proceed. A non-user-initiated focus to a
-/// window *other than* the fullscreen one (e.g. a window self-activating behind
-/// it) is ignored to preserve monocle; a user-initiated focus is always
-/// honored.
+/// Non-user focus must not break monocle; explicit user focus may leave it.
 pub(crate) fn fullscreen_focus_guard(
     user_initiated: bool,
     fullscreen: Option<u64>,
@@ -121,8 +114,6 @@ pub(crate) fn event_time_is_no_later_than(event_time_ms: u32, armed_time_ms: u32
     armed_time_ms.wrapping_sub(event_time_ms) < 0x8000_0000
 }
 
-/// A workspace is empty only when it has no tiled windows (including
-/// minimized) and no floating windows.
 pub(crate) fn workspace_is_genuinely_empty(workspace: &Workspace) -> bool {
     workspace.window_count() == 0 && workspace.floating_windows().is_empty()
 }
@@ -338,12 +329,8 @@ pub(crate) fn should_ignore_hidden_still_visible(
     is_hidden_event && is_managed && is_visible
 }
 
-/// True when `title` names `filename` as a whole token, i.e. the filename
-/// appears bounded by the start/end of the title or by a separator (space, tab,
-/// dash, or a path separator). Editors title windows like `config.toml - App`
-/// or `C:\path\config.toml - App`; this matches those without false-firing on
-/// `myconfig.toml` or `config.toml.bak`, where the filename is part of a longer
-/// word. Both inputs are compared case-insensitively.
+/// Editors put the config filename in a title or path; require separator boundaries
+/// so a similarly named file cannot trigger a cross-workspace pull.
 pub(crate) fn title_names_config_file(title: &str, filename: &str) -> bool {
     if filename.is_empty() {
         return false;
@@ -360,7 +347,6 @@ pub(crate) fn title_names_config_file(title: &str, filename: &str) -> bool {
     })
 }
 
-/// Outcome of recording a window against the session elevation-block set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ElevationCheck {
     /// Window is manageable; any prior block record was cleared.
@@ -371,14 +357,12 @@ pub(crate) enum ElevationCheck {
     BlockedKnown,
 }
 
-/// How a window is being considered for management.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmissionKind {
     Automatic,
     ExplicitReadmit,
 }
 
-/// Result of a shared admission attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmitOutcome {
     Admitted,
@@ -398,7 +382,6 @@ pub(crate) enum AdmitOutcome {
 }
 
 impl AppState {
-    /// Handle a window lifecycle event.
     pub(crate) fn handle_window_event(&mut self, event: WindowEvent) {
         if let Some(hwnd) = match &event {
             WindowEvent::Created(hwnd, _)
@@ -421,7 +404,6 @@ impl AppState {
             }
         }
 
-        // Get window_id from event for validation (DisplayChange and MouseEnterWindow have no validation needed)
         let window_id = match &event {
             WindowEvent::Created(id, _)
             | WindowEvent::Destroyed(id)
@@ -440,11 +422,7 @@ impl AppState {
             | WindowEvent::MouseLeftManaged => None,
         };
 
-        // Validate window existence for events that require it.
-        // Skip validation for:
-        //   - Destroyed/Hidden events (window is already gone or invisible)
-        //   - Windows we already know about (managed or injected in tests)
-        //   - DisplayChange / MouseEnterWindow (no window to validate)
+        // Destroyed/Hidden may name vanished windows; known windows also include test fixtures.
         if let Some(wid) = window_id {
             if !matches!(event, WindowEvent::Destroyed(_) | WindowEvent::Hidden(_, _))
                 && !self.is_known_window(wid)
@@ -486,9 +464,8 @@ impl AppState {
             WindowEvent::MoveSizeEnd(hwnd) => self.on_move_size_end(hwnd),
             WindowEvent::MovedOrResized(hwnd) => self.on_window_moved_or_resized(hwnd, false),
             WindowEvent::DisplayChange => self.on_display_change(),
-            // Work-area changes reach the reconcile via the debounced
-            // DisplayChangeSettled path (see process_window_event), so a raw
-            // event here is a no-op; reconcile defensively if one arrives.
+            // Work-area changes normally reconcile through the debounced
+            // DisplayChangeSettled path; handle direct dispatch defensively.
             WindowEvent::WorkAreaChanged => self.on_display_change(),
             WindowEvent::MouseEnterWindow(_) | WindowEvent::MouseLeftManaged => {
                 // Both are handled by the main event loop's focus-follows-mouse
@@ -498,13 +475,8 @@ impl AppState {
                 if self.size_ignored_windows.remove(&hwnd) {
                     self.try_admit_window_at(hwnd, AdmissionKind::Automatic, None);
                 }
-                // Only refresh the tab strip when the title change is
-                // for a window that's a tab in the focused workspace's
-                // visible Tabbed column — every other title change
-                // (e.g. a background app's notification badge) would
-                // waste a render. `update_tab_strip` already rebuilds
-                // labels from `lookup_window_info`, so we don't have
-                // to thread the new title through ourselves.
+                // Background title churn should not redraw strips. Labels are read from
+                // lookup_window_info, so the event need not carry the new title.
                 let in_visible_tabbed_column = self
                     .focused_workspace()
                     .map(|ws| {
@@ -712,10 +684,8 @@ impl AppState {
         }
     }
 
-    /// Handle a window-created event: rules, monitor/workspace placement, insertion.
-    /// Take the column width remembered for a hidden window that is now
-    /// reappearing, if it hasn't expired and still names this lifetime.
-    /// A recycled handle drops the entry. Removing it keeps the map bounded.
+    /// Remembered widths belong to a managed lifetime, not a reusable HWND.
+    /// Consume the entry and expire old entries to keep the map bounded.
     pub(crate) fn take_remembered_column_width(&mut self, hwnd: u64) -> Option<i32> {
         self.hidden_column_widths
             .retain(|_, entry| entry.hidden_at.elapsed() < RECENTLY_HIDDEN_TTL);
@@ -727,12 +697,8 @@ impl AppState {
         }
     }
 
-    /// Update the session elevation-block record for `hwnd` given the live
-    /// admission verdict, returning what the caller should do. Pure map logic
-    /// (no Win32, no toast) so the dedup / clear / recycle behavior is
-    /// unit-testable; the Win32 verdict and the one-shot toast live in
-    /// `skip_if_elevation_blocked`. First sighting or a changed title/reason
-    /// refreshes the snapshot; an identical known record is deduped.
+    /// Changed titles or block reasons get a fresh notification; identical records
+    /// stay deduped until management becomes possible or the window departs.
     pub(crate) fn note_elevation_block(
         &mut self,
         hwnd: u64,
@@ -740,8 +706,7 @@ impl AppState {
         block: leopardwm_platform_win32::ManageBlock,
     ) -> ElevationCheck {
         if !block.is_blocked() {
-            // Manageable now: clear any stale record (e.g. a recycled HWND now
-            // owned by a normal window) so it tiles again.
+            // A recycled HWND may belong to a manageable window.
             self.elevation_blocked.remove(&hwnd);
             return ElevationCheck::Manageable;
         }
@@ -865,12 +830,8 @@ impl AppState {
         let _ = self.try_admit_window(hwnd, AdmissionKind::Automatic);
     }
 
-    /// Popup-shaped recreation of the same hidden lifetime, still inside the TTL.
-    ///
-    /// A different managed token drops the entry and is not suppressed: the HWND
-    /// was recycled. A stored `None` means no lifetime was recorded and keeps
-    /// the old suppression. A window that is not popup-shaped also drops
-    /// the entry, as before.
+    /// Suppression belongs to the hidden lifetime. A recycled handle or a window
+    /// without popup shape must not inherit it; an unrecorded lifetime keeps suppression.
     fn suppressed_transient_popup(&mut self, hwnd: u64) -> bool {
         let Some(entry) = self.recently_hidden_hwnds.get(&hwnd).copied() else {
             return false;
@@ -986,7 +947,6 @@ impl AppState {
         if kind == AdmissionKind::Automatic && self.suppressed_transient_popup(hwnd) {
             return AdmitOutcome::TransientSuppressed;
         }
-        // Lazily evict expired entries on the Created path too
         self.recently_hidden_hwnds
             .retain(|_, entry| entry.hidden_at.elapsed() < RECENTLY_HIDDEN_TTL);
 
@@ -996,7 +956,6 @@ impl AppState {
             return AdmitOutcome::GatedIgnored;
         }
 
-        // Try to get window info for filtering and monitor assignment
         let Some(win_info) = self.lookup_window_info(hwnd) else {
             return AdmitOutcome::NoWindowInfo;
         };
@@ -1032,18 +991,10 @@ impl AppState {
 
             let executable = get_process_executable(win_info.process_id).unwrap_or_default();
 
-            // Skip transient script-runner windows whose title is just
-            // the executable path. PowerShell, cmd, and similar console
-            // hosts briefly show this title before they finish setting
-            // a real one — but a scheduled-task spawn (like the Windows
-            // PowerShell that fires every 5 minutes) is destroyed
-            // within ~200 ms before it ever gets a real title. Tiling
-            // those caused a layout reflow on Created and another on
-            // Hidden, which the user perceived as "windows randomly
-            // resizing while idle". A persistent interactive console
-            // sets a real title (e.g. "Administrator: Windows
-            // PowerShell") almost immediately, so this filter does not
-            // affect normal terminal usage.
+            // Console hosts briefly use an executable-path title before setting a real
+            // one. Scheduled-task windows can disappear during that interval; admitting
+            // them would cause two pointless layout reflows. Focus recovery retries
+            // interactive consoles once they have a real title.
             let title_lower = win_info.title.to_ascii_lowercase();
             let title_looks_like_exe_path = title_lower.ends_with(".exe")
                 || (!executable.is_empty() && title_lower == executable.to_ascii_lowercase());
@@ -1107,7 +1058,6 @@ impl AppState {
                 .map(|slot| slot.monitor)
                 .unwrap_or_else(|| preferred_monitor.unwrap_or(opening_monitor));
 
-            // Get floating rect before borrowing workspace mutably
             let floating_rect = (action == config::WindowAction::Float).then(|| {
                 self.floating_rect_for_admission(
                     &win_info,
@@ -1119,9 +1069,6 @@ impl AppState {
 
             let viewport_width = self.viewport_width_for(monitor_id);
 
-            // A rule can target a different workspace; the window then
-            // opens in the background (no focus steal, hidden until
-            // that workspace is activated).
             let active_idx = self.active_workspace_idx(monitor_id);
             // A sticky window shows on every workspace, so it always opens on the
             // active one; an open_on_workspace would only hide it until a switch.
@@ -1148,9 +1095,8 @@ impl AppState {
                 None
             };
 
-            // Per-app initial column width (viewport fraction -> px). A width
-            // remembered from before this window was hidden takes precedence,
-            // so a reshown window keeps its size instead of resetting.
+            // Automatic re-admission preserves the hidden window's width; explicit
+            // readmission instead reapplies the rule's viewport fraction.
             let rule_width_px = if kind == AdmissionKind::ExplicitReadmit {
                 rule_column_width.map(|f| ((f * f64::from(viewport_width)).round() as i32).max(100))
             } else {
@@ -1176,7 +1122,6 @@ impl AppState {
             {
                 let added = match action {
                     config::WindowAction::Float => {
-                        // Use rule dimensions or default to centered 800x600 window
                         let rect = floating_rect.unwrap_or_else(|| {
                             let viewport = self
                                 .monitors
@@ -1212,9 +1157,6 @@ impl AppState {
                             take_workspace_focus,
                             recreated_slot.as_ref(),
                         );
-                        // Per-app open_maximized: only when the new
-                        // window's column is the focused one (always
-                        // true for the focused new-column path).
                         if ok
                             && recreated_slot.is_none()
                             && (rule_maximized || native_maximized_at_admission)
@@ -1275,9 +1217,6 @@ impl AppState {
                         info!("Window {} rejoined its pre-sleep column or tab on monitor {} workspace {}", hwnd, monitor_id, target_idx + 1);
                     }
                     if opens_in_background {
-                        // Target workspace is not active: hide the window and
-                        // remove its taskbar button until that workspace is
-                        // switched to.
                         #[cfg(not(test))]
                         let _ = leopardwm_platform_win32::move_window_offscreen(hwnd);
                         self.sync_inactive_workspace_taskbar_button(hwnd);
@@ -1285,7 +1224,6 @@ impl AppState {
                     if let Some(snapshot) = snapshot {
                         self.start_layout_transition(snapshot);
                     }
-                    // Disable snap layouts for tiled windows (after workspace borrow)
                     if matches!(action, config::WindowAction::Tile) {
                         self.disable_snap_for_window(hwnd);
                     }
@@ -1355,9 +1293,7 @@ impl AppState {
         }
     }
 
-    /// Shared handler for destroyed and hidden window events.
-    ///
-    /// `hidden_at_ms` is the WinEvent time for Hidden and `None` for Destroyed.
+    /// Hidden carries a WinEvent timestamp; Destroyed does not.
     fn on_window_destroyed_or_hidden(&mut self, hwnd: u64, hidden_at_ms: Option<u32>) {
         let is_hidden_event = hidden_at_ms.is_some();
         if !is_hidden_event && self.destroyed_names_current_lifetime(hwnd) {
@@ -1384,14 +1320,9 @@ impl AppState {
         self.depart_destroyed_or_hidden_window(hwnd, is_hidden_event, DepartureCause::Event);
     }
 
-    /// Membership removal, cache scrub, layout, and focus departure.
-    ///
-    /// Created calls this when a managed lifetime was replaced, so the missing
-    /// Destroyed runs before admission. The stale-lifetime guard stays on the
-    /// event entry and does not apply here. A replaced lifetime must not treat
-    /// the HWND now in the foreground as the window that just left, and it
-    /// clears tracked focus like any other departure. Admission reconciles
-    /// that HWND afterward.
+    /// Replaced lifetimes depart before admission, bypassing stale-event guards.
+    /// The foreground HWND may already be the replacement: clear tracked focus
+    /// without treating that handle as the departed window, then let admission reconcile it.
     pub(crate) fn depart_destroyed_or_hidden_window(
         &mut self,
         hwnd: u64,
@@ -1494,8 +1425,6 @@ impl AppState {
         let cancel = self.cancel_matching_unfinished_move_size_ui(hwnd);
         self.release_departing_hwnd_ghost(hwnd);
 
-        // Drop the recorded layout rect so the map doesn't retain
-        // entries for windows that no longer exist.
         self.last_placed_layout_rects.remove(&hwnd);
         self.deferred_moved_or_resized.remove(&hwnd);
         self.deferred_physical_landings.remove(&hwnd);
@@ -1505,7 +1434,6 @@ impl AppState {
         self.clear_physical_window_state(hwnd);
         self.application_fullscreen.remove(&hwnd);
 
-        // Drop any cached overview snapshot for the same reason.
         leopardwm_platform_win32::snapshot::snapshot_remove(hwnd);
 
         // Drop any tab title override too — both Destroyed and
@@ -1564,7 +1492,6 @@ impl AppState {
         } else {
             self.recently_hidden_hwnds.remove(&hwnd);
         }
-        // Lazily evict stale entries
         self.recently_hidden_hwnds
             .retain(|_, entry| entry.hidden_at.elapsed() < RECENTLY_HIDDEN_TTL);
 
@@ -1597,7 +1524,6 @@ impl AppState {
                         .find_window_location(hwnd)
                         .and_then(|(col, _)| workspace.columns().get(col).map(|c| c.width()));
                 }
-                // Try to remove as floating window first
                 let was_floating = workspace.remove_floating(hwnd);
 
                 if was_floating {
@@ -1766,13 +1692,9 @@ impl AppState {
         }
     }
 
-    /// Handle a foreground-focus change event.
-    /// If an "Edit Config" pull is armed and the just-focused window `hwnd` (on
-    /// `(monitor_id, ws_idx)`) is a single-instance editor window raised on
-    /// another workspace, pull it to the active workspace and return `true` (the
-    /// caller should stop handling the focus event). Clears the arming on a
-    /// pull, on TTL expiry, or when the editor is already on the active
-    /// workspace.
+    /// An Edit Config launch can raise a single-instance editor on another workspace.
+    /// Pull that editor here instead of following focus; unrelated focus leaves
+    /// the intent armed until its TTL expires.
     pub(crate) fn try_edit_config_pull(
         &mut self,
         hwnd: u64,
@@ -1806,11 +1728,6 @@ impl AppState {
         self.pull_window_to_workspace(hwnd, monitor_id, ws_idx, target_mid, target_widx)
     }
 
-    /// Move the tiled window `hwnd` from `(from_mid, from_widx)` to the active
-    /// workspace `(to_mid, to_widx)` and focus it there. Used by the Edit Config
-    /// pull when a single-instance editor raised an existing window on another
-    /// workspace. Returns `false` (no move) for a floating or already-gone
-    /// window so the caller can fall back to normal focus handling.
     pub(crate) fn pull_window_to_workspace(
         &mut self,
         hwnd: u64,
@@ -1827,7 +1744,6 @@ impl AppState {
         if !is_tiled {
             return false;
         }
-        // Preserve the window's chosen column width across the pull.
         let tiled_width = self.tiled_column_width(from_mid, from_widx, hwnd);
         let snapshot = self.snapshot_layout();
         self.ensure_workspace_exists(to_mid, to_widx);
@@ -1904,9 +1820,8 @@ impl AppState {
             monitor_id
         );
 
-        // Clean up any in-progress drag: reinsert window if it was
-        // removed from source during live preview, then remove placeholders.
-        // Only reinsert if the window still exists (it may have been closed).
+        // A live preview may have removed the dragged window from its source.
+        // Restore membership only if the window survived, then remove placeholders.
         if let Some(drag) = self.drag_state.take() {
             if drag.removed_from_source
                 && drag.is_tiled
@@ -1927,7 +1842,6 @@ impl AppState {
             }
         }
         self.pending_drag_hint = Some(crate::state::DragHintAction::Hide);
-        // Move exit windows offscreen before clearing the transition
         if let Some(ref transition) = self.layout_transition {
             for wid in transition.exit_rects.keys() {
                 if !self.is_application_fullscreen(*wid) {
@@ -1951,7 +1865,6 @@ impl AppState {
             -slide_height
         };
 
-        // Snapshot old workspace positions for exit animation.
         let mut old_placements = self.workspace_placements(monitor_id, active_idx);
         old_placements.retain(|p| !self.is_application_fullscreen(p.window_id));
 
@@ -1966,7 +1879,6 @@ impl AppState {
             workspace.reconcile_scroll_bounds(viewport_width);
         }
 
-        // Compute new workspace's final placements for enter animation.
         let mut new_placements = self.workspace_placements(monitor_id, ws_idx);
         new_placements.retain(|p| !self.is_application_fullscreen(p.window_id));
 
@@ -2147,10 +2059,7 @@ impl AppState {
         }
     }
 
-    /// Clear logical focus after the selected workspace becomes empty.
-    ///
-    /// Releases parked managed foreground, then clears logical focus. Reconciles
-    /// tab strips directly because a layout transition defers `apply_layout`.
+    /// Reconcile tab strips directly: an active transition defers apply_layout.
     pub(crate) fn clear_logical_focus_for_empty_selection(&mut self) {
         self.release_parked_foreground_for_empty_selection();
         self.previous_focused_hwnd = None;
@@ -2427,7 +2336,6 @@ impl AppState {
         if let Some(prev_hwnd) = self.previous_focused_hwnd {
             if let Some(last_change) = self.last_focus_change_at {
                 if now.duration_since(last_change).as_millis() < 200 {
-                    // Check if both windows are in the same column
                     if let Some((mon_a, ws_a)) = self.find_window_workspace(prev_hwnd) {
                         if let Some((mon_b, ws_b)) = self.find_window_workspace(hwnd) {
                             if mon_a == mon_b && ws_a == ws_b {
@@ -2439,10 +2347,6 @@ impl AppState {
                                         matches!((loc_a, loc_b), (Some((ca, _)), Some((cb, _))) if ca == cb)
                                     });
                                 if same_col {
-                                    // Check for a fresh tab-focus intent that
-                                    // matches this event. If it does, consume the
-                                    // flag and fall through (the focus change is
-                                    // expected, not noisy churn).
                                     let consumed =
                                         self.consume_pending_tab_focus_for(mon_a, ws_a, hwnd);
                                     if !consumed {
@@ -2545,7 +2449,6 @@ impl AppState {
             }
         }
 
-        // Update focus to match what Windows says is focused
         if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
             // A single-instance editor launched from the tray ("Edit Config")
             // may have raised an existing window on another workspace; pull it
@@ -2663,7 +2566,6 @@ impl AppState {
         }
     }
 
-    /// Recovery and cleanup when focus lands on an unmanaged window.
     fn on_unmanaged_window_focused(&mut self, hwnd: u64) {
         if matches!(
             self.temporary_ignore_gate(hwnd),
@@ -2959,7 +2861,6 @@ impl AppState {
         armed
     }
 
-    /// Handle a window-restored event.
     fn on_window_restored(&mut self, hwnd: u64) {
         if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
             let viewport_width = self.viewport_width_for(monitor_id);
@@ -3119,7 +3020,6 @@ impl AppState {
         (true, removed_placeholder, removed_from_source, drag_source)
     }
 
-    /// Handle the start of a user drag or resize.
     fn on_move_size_start(&mut self, hwnd: u64) {
         debug!("User started dragging/resizing window {}", hwnd);
 
@@ -3190,7 +3090,6 @@ impl AppState {
         leopardwm_platform_win32::set_dwm_transitions_disabled(hwnd, true);
     }
 
-    /// Handle the end of a user drag or resize.
     fn on_move_size_end(&mut self, hwnd: u64) {
         debug!("User finished dragging/resizing window {}", hwnd);
 
@@ -3204,14 +3103,11 @@ impl AppState {
         // triggers a real layout change.
         self.last_placed_layout_rects.remove(&hwnd);
 
-        // Handle resize completion (border drag) — snap to nearest preset.
         if self.resize_hwnd == Some(hwnd) {
             self.resize_hwnd = None;
             self.handle_resize_complete(hwnd);
-            // Re-enable DWM transitions before returning (paired
-            // with MoveSizeStart's disable). Each early-return path
-            // needs this — otherwise the window's transitions stay
-            // suppressed for the rest of its lifetime.
+            // Restore DWM transitions on this early-return path so they cannot
+            // stay suppressed for the rest of the window's lifetime.
             leopardwm_platform_win32::set_dwm_transitions_disabled(hwnd, false);
             return;
         }
@@ -3231,7 +3127,6 @@ impl AppState {
         }
 
         let drag = self.drag_state.take();
-        // Always hide the drag hint overlay on drop.
         self.pending_drag_hint = Some(DragHintAction::Hide);
 
         let Some(drag) = drag else {
@@ -3240,10 +3135,9 @@ impl AppState {
         };
 
         if !drag.is_tiled {
-            // Floating window: store the VISIBLE rect (DWM extended frame), the
-            // same convention used when a window is floated and on live moves.
-            // Using the outer GetWindowRect here made apply_placements re-add the
-            // border insets on each drop, growing the window ~14px per cycle.
+            // Floating geometry uses the visible DWM rect, not GetWindowRect.
+            // Placement adds invisible-border insets; storing the outer rect would
+            // grow the window by about 14 px on each drop.
             if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
                 if let Some(visible_rect) = leopardwm_platform_win32::get_window_visible_rect(hwnd)
                 {
@@ -3261,7 +3155,6 @@ impl AppState {
             return;
         }
 
-        // Tiled window: determine final drop target.
         let Some(win_info) = self.lookup_window_info(hwnd) else {
             // Window vanished during drag — clean up placeholder.
             // Do NOT reinsert the window — it no longer exists.
@@ -3285,28 +3178,21 @@ impl AppState {
         let shift_held = is_shift_key_pressed();
 
         if shift_held {
-            // Clean up placeholder (shouldn't exist in shift mode, but be safe).
             for ws_vec in self.workspaces.values_mut() {
                 for ws in ws_vec.iter_mut() {
                     let _ = ws.remove_window(crate::state::DRAG_PLACEHOLDER_HWND);
                 }
             }
-            // Shift+drop: column reorder (already live-reordered, or cross-monitor).
             if target_monitor == drag.source_monitor {
                 self.snap_back_tiled(drag.source_monitor, drag.source_workspace_idx);
             } else {
                 self.execute_cross_monitor_drag(hwnd, &drag, target_monitor, &win_info.rect);
             }
         } else {
-            // Default drop: swap placeholder with real window in-place.
             self.finalize_drag_merge(hwnd, &drag, target_monitor, &win_info.rect);
         }
-        // Re-enable DWM transitions on the dropped window now
-        // that the final SetWindowPos has already landed. We
-        // disable them at MoveSizeStart specifically to suppress
-        // the drop-position-to-layout-slot slide; once the
-        // window is settled there's no reason to keep its
-        // minimize/maximize/etc. transitions suppressed.
+        // Restore minimize/maximize transitions after placement; the temporary
+        // DWM disable suppresses only the drop-to-layout slide.
         leopardwm_platform_win32::set_dwm_transitions_disabled(hwnd, false);
     }
 
@@ -3481,7 +3367,6 @@ impl AppState {
         }
     }
 
-    /// Re-check deferred landings, replay suppressed moves and re-check off-screen drift.
     pub(crate) fn recheck_deferred_window_moves(&mut self) -> bool {
         let mut checked = false;
         let mut deferred = std::mem::take(&mut self.deferred_moved_or_resized);
@@ -3568,7 +3453,6 @@ impl AppState {
         checked
     }
 
-    /// Handle a window move/resize notification.
     fn on_window_moved_or_resized(&mut self, hwnd: u64, periodic_recheck: bool) {
         if self.size_ignored_windows.remove(&hwnd) {
             self.try_admit_window_at(hwnd, AdmissionKind::Automatic, None);
@@ -3720,8 +3604,6 @@ impl AppState {
             }
             return;
         }
-        // During active border resize: show ghost preview of the snap target
-        // for tiled windows, or update border for floating windows.
         if self.resize_hwnd == Some(hwnd) {
             let is_floating = self
                 .find_window_workspace(hwnd)
@@ -3757,8 +3639,6 @@ impl AppState {
             }
             return;
         }
-        // During drag: compute drop target and show snap hint for tiled windows.
-        // For floating drags, update the border to follow the window.
         if let Some(ref mut drag) = self.drag_state {
             if drag.hwnd == hwnd {
                 if drag.is_tiled {
@@ -3787,7 +3667,6 @@ impl AppState {
                 return;
             }
         }
-        // Non-drag moves restore inactive parking or reconcile active window geometry.
         if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
             if self.on_inactive_workspace_window_moved(hwnd, monitor_id, ws_idx, &mut is_maximized)
             {
@@ -3819,9 +3698,6 @@ impl AppState {
                 self.window_last_maximized_at.get(&hwnd).copied(),
                 std::time::Instant::now(),
             ) {
-                // Window opened maximized and is still settling (e.g. an app
-                // opening several windows/tabs at once): skip the snap-back so it
-                // can re-assert maximize instead of being tiled narrow.
                 debug!("Deferring snap-back for settling maximized window {}", hwnd);
             } else {
                 self.window_last_maximized_at.remove(&hwnd);
@@ -3844,24 +3720,13 @@ impl AppState {
                     .expected_physical_rect(hwnd)
                     .or_else(|| self.last_placed_layout_rects.get(&hwnd).copied());
                 let dwm_actual = leopardwm_platform_win32::get_window_visible_rect(hwnd);
-                // Cross-check with GetWindowRect — for Chromium /
-                // Firefox / Cascadia under the swap-chain-stale bug,
-                // EXTENDED_FRAME_BOUNDS reports the visual content
-                // position (where DWM is compositing) rather than the
-                // actual chrome HWND position, which can read tens to
-                // thousands of pixels off after a rapid burst even
-                // though the window has not moved. GetWindowRect is
-                // the OS's authoritative position and stays correct.
+                // Under the Chromium / Firefox / Cascadia swap-chain-stale bug,
+                // EXTENDED_FRAME_BOUNDS can report a stale compositor position while
+                // GetWindowRect still reports the actual HWND position.
                 //
-                // The chrome rect is offset from the layout rect by
-                // the invisible-border insets (apply_placements does
-                // SetWindowPos at `rect.x - inset_l`), so we subtract
-                // the insets before comparing. That makes the chrome
-                // comparison apples-to-apples against the layout rect
-                // and lets us use the same tight POSITION_EPSILON_PX.
-                // Without this, real displacements in the
-                // 21..(20+inset_l*2) px band were misclassified as
-                // swap-chain artifacts and the snap-back was skipped.
+                // Placement subtracts invisible-border insets from the layout origin;
+                // add them to the chrome origin before comparing, or displacements in
+                // the 21..(20+inset_l*2) px band can be mistaken for compositor artifacts.
                 let chrome_actual = leopardwm_platform_win32::get_window_chrome_rect(hwnd);
                 let offscreen = self
                     .current_physical_visibility(hwnd)
@@ -3884,8 +3749,6 @@ impl AppState {
                 } else {
                     match expected {
                         Some(expected) => {
-                            // Honest comparison — DWM bounds match
-                            // expected layout in both position and size.
                             let dwm_ok = dwm_actual
                                 .is_some_and(|a| within_all(a, expected, POSITION_EPSILON_PX));
                             // Swap-chain bug guard — chrome HWND
@@ -4131,12 +3994,9 @@ impl AppState {
         }
     }
 
-    /// Handle a display configuration change.
     fn on_display_change(&mut self) {
-        // Display configuration changed (monitors added/removed/rearranged).
-        // Note: inset cache clearing and high contrast refresh happen
-        // immediately on WM_DISPLAYCHANGE receipt (before debounce) in the
-        // event loop. This handler runs after the debounce settles.
+        // Inset-cache clearing and high-contrast refresh run on WM_DISPLAYCHANGE
+        // receipt, before this debounced reconciliation.
         info!("Display configuration changed - reconciling monitors");
         let enumerated: Result<Vec<MonitorInfo>, leopardwm_platform_win32::Win32Error> = {
             #[cfg(test)]
@@ -4173,7 +4033,6 @@ impl AppState {
                     );
                 }
 
-                // Reconcile workspaces with new monitor configuration
                 self.reconcile_monitors(new_monitors);
                 self.reconcile_application_fullscreen_sessions();
 
@@ -4227,7 +4086,6 @@ impl AppState {
                 // Adopt foreground first so its workspace is not parked as inactive.
                 self.park_inactive_workspace_windows();
 
-                // Re-apply layout with updated monitor configuration
                 self.display_change_apply_in_progress = true;
                 let result = self.apply_layout();
                 self.display_change_apply_in_progress = false;
@@ -4249,9 +4107,8 @@ impl AppState {
         }
     }
 
-    /// Compute and show the resize preview ghost overlay during active border resize.
-    /// When the snap target changes, requests a vsync-aligned animation thread
-    /// for smooth interpolation between snap positions.
+    /// Snap-target changes request a vsync-aligned animation thread so the
+    /// preview interpolates smoothly between presets.
     fn update_resize_preview(&mut self, hwnd: u64) {
         let Some(visible_rect) = leopardwm_platform_win32::get_window_visible_rect(hwnd) else {
             return;
@@ -4308,7 +4165,6 @@ impl AppState {
             return;
         }
 
-        // Snap target changed — request a vsync-aligned animation.
         let start_rect = self.resize_preview_display_rect.unwrap_or(target_rect);
         self.resize_preview_target = Some(target_rect);
         self.resize_preview_display_rect = Some(start_rect);
@@ -4317,13 +4173,10 @@ impl AppState {
             target_rect,
         });
 
-        // Show overlay at current position immediately (animation will take over).
         self.pending_drag_hint = Some(crate::state::DragHintAction::ShowGhost { rect: start_rect });
         self.show_border(hwnd);
     }
 
-    /// Handle resize completion: snap the resized window's column width and height
-    /// to the nearest presets, then re-apply layout.
     fn handle_resize_complete(&mut self, hwnd: u64) {
         #[cfg(test)]
         self.resize_complete_count
@@ -4341,7 +4194,6 @@ impl AppState {
             .is_none_or(|ws| ws.is_floating(hwnd));
 
         if is_floating {
-            // Floating: just update stored rect from the visible area.
             if let Some(visible_rect) = leopardwm_platform_win32::get_window_visible_rect(hwnd) {
                 if let Some(ws) = self
                     .workspaces
@@ -4354,7 +4206,6 @@ impl AppState {
             return;
         }
 
-        // Tiled: snap to width/height presets.
         let Some(visible_rect) = leopardwm_platform_win32::get_window_visible_rect(hwnd) else {
             let _ = self.apply_layout();
             return;
@@ -4370,7 +4221,6 @@ impl AppState {
             .and_then(|v| v.get_mut(ws_idx))
         {
             if let Some((col_idx, win_idx)) = ws.find_window_location(hwnd) {
-                // Snap width to nearest preset
                 ws.snap_column_width_to_preset(
                     col_idx,
                     visible_rect.width,
@@ -4378,7 +4228,6 @@ impl AppState {
                     viewport_width,
                 );
 
-                // Snap height to nearest preset (multi-window columns only)
                 let col_len = ws.columns().get(col_idx).map(|c| c.len()).unwrap_or(0);
                 if col_len > 1 {
                     let viewport_height = self
@@ -4418,14 +4267,11 @@ impl AppState {
         }
     }
 
-    /// Apply focus to a window for focus-follows-mouse.
-    /// Returns true if focus was applied, false if the window isn't managed.
     pub(crate) fn apply_focus_follows_mouse(&mut self, hwnd: u64) -> bool {
         if leopardwm_platform_win32::focus_placeholder::is_focus_placeholder(hwnd) {
             return false;
         }
         if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
-            // Update focused monitor to match the window's monitor
             self.focused_monitor = monitor_id;
 
             let viewport_width = self.viewport_width_for(monitor_id);
@@ -4436,7 +4282,6 @@ impl AppState {
                 .and_then(|v| v.get_mut(ws_idx))
             {
                 if workspace.is_floating(hwnd) {
-                    // Floating windows are managed but not represented in tiled columns.
                     self.previous_focused_hwnd = Some(hwnd);
                     // Draw the focus border here. Pre-setting previous_focused_hwnd
                     // above makes the OS-side EVENT_SYSTEM_FOREGROUND dedup at the
@@ -4518,21 +4363,17 @@ mod snapback_settle_tests {
         let stale_create = now - (SNAPBACK_SETTLE_AFTER_CREATE + Duration::from_millis(100));
         let stale_max = now - (SNAPBACK_MAXIMIZE_GRACE + Duration::from_millis(100));
 
-        // Freshly created and just maximized: defer (the bug case).
         assert!(defer_snapback_while_settling(Some(fresh), Some(fresh), now));
-        // Established window (created long ago) manually restored: snap normally.
         assert!(!defer_snapback_while_settling(
             Some(stale_create),
             Some(fresh),
             now
         ));
-        // Fresh window that hasn't been maximized recently: snap normally.
         assert!(!defer_snapback_while_settling(
             Some(fresh),
             Some(stale_max),
             now
         ));
-        // Never maximized, or unmanaged: snap normally.
         assert!(!defer_snapback_while_settling(Some(fresh), None, now));
         assert!(!defer_snapback_while_settling(None, Some(fresh), now));
     }
@@ -4544,7 +4385,6 @@ mod edit_config_match_tests {
 
     #[test]
     fn matches_editor_titles_as_a_whole_token() {
-        // Typical editor title formats.
         assert!(title_names_config_file(
             "config.toml - Visual Studio Code",
             "config.toml"
@@ -4557,7 +4397,6 @@ mod edit_config_match_tests {
             r"C:\Users\Jose\AppData\config.toml - Notepad++",
             "config.toml"
         ));
-        // Bare filename and case-insensitive.
         assert!(title_names_config_file("config.toml", "config.toml"));
         assert!(title_names_config_file(
             "CONFIG.TOML - Editor",
@@ -4567,7 +4406,6 @@ mod edit_config_match_tests {
 
     #[test]
     fn rejects_substring_of_a_longer_word() {
-        // Filename embedded in a longer word must not match.
         assert!(!title_names_config_file(
             "myconfig.toml - Editor",
             "config.toml"
@@ -4576,9 +4414,7 @@ mod edit_config_match_tests {
             "config.toml.bak - Editor",
             "config.toml"
         ));
-        // Unrelated window.
         assert!(!title_names_config_file("Inbox - Mail", "config.toml"));
-        // Empty filename never matches.
         assert!(!title_names_config_file("config.toml", ""));
     }
 }

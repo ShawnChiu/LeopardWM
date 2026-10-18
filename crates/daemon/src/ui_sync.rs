@@ -1,5 +1,3 @@
-//! Border and tab-strip overlay synchronization with focus and layout state.
-
 use crate::state::*;
 use leopardwm_platform_win32::get_process_executable;
 use tracing::{debug, info};
@@ -60,10 +58,8 @@ fn tab_icon(
 }
 
 impl AppState {
-    /// Convert the config border color (hex RGB string) to BGR u32 for Win32.
-    /// When high contrast mode is active, returns the system highlight color instead.
-    /// Checks the live system setting so toggling high contrast takes effect
-    /// immediately without a config reload.
+    /// Read high contrast live so toggling it overrides the configured border
+    /// color immediately, without waiting for a config reload.
     pub(crate) fn border_color_bgr(&self) -> Option<u32> {
         if leopardwm_platform_win32::is_high_contrast_enabled() {
             return Some(leopardwm_platform_win32::get_system_highlight_color_bgr());
@@ -71,8 +67,6 @@ impl AppState {
         hex_rgb_to_bgr(&self.config.appearance.active_border_color)
     }
 
-    /// Refresh the cached `high_contrast` flag from the live system setting.
-    /// Returns `true` if the value changed.
     pub(crate) fn refresh_high_contrast(&mut self) -> bool {
         let now = leopardwm_platform_win32::is_high_contrast_enabled();
         if now != self.high_contrast {
@@ -90,7 +84,6 @@ impl AppState {
         }
     }
 
-    /// Convert the config border position string to the platform enum.
     pub(crate) fn border_position(&self) -> leopardwm_platform_win32::border::BorderPosition {
         if self.config.appearance.active_border_position == "inside" {
             leopardwm_platform_win32::border::BorderPosition::Inside
@@ -99,7 +92,6 @@ impl AppState {
         }
     }
 
-    /// Compute the DPI-scaled border width for a window's monitor.
     pub(crate) fn scaled_border_width(&self, hwnd: u64) -> u32 {
         let scale = self
             .find_window_workspace(hwnd)
@@ -109,13 +101,11 @@ impl AppState {
         (self.config.appearance.active_border_width as f64 * scale).round() as u32
     }
 
-    /// Show the border frame on the given window, or hide it if borders are disabled.
-    /// During an active tiled drag, the border is hidden so it doesn't follow
-    /// the OS-dragged window — the ghost overlay provides visual feedback instead.
+    /// During a tiled drag, anchor the border to the layout slot rather than
+    /// following the OS-dragged window.
     pub(crate) fn show_border(&self, hwnd: u64) {
-        // An explicit workspace switch paints this border on the interpolated
-        // rect, which is still sliding onto the monitor. The completion tick
-        // shows it after clearing the transition.
+        // Explicit workspace switches defer the border until the completion tick
+        // clears the transition, so it does not paint while sliding onto the monitor.
         if self
             .layout_transition
             .as_ref()
@@ -131,7 +121,6 @@ impl AppState {
                 .store(hwnd, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(ref frame) = self.border_frame {
-            // No border while paused or in fullscreen.
             if self.paused
                 || self.is_application_fullscreen(hwnd)
                 || self
@@ -141,14 +130,12 @@ impl AppState {
                 frame.hide();
                 return;
             }
-            // No border on unmanaged/ignored windows.
             if self.find_window_workspace(hwnd).is_none() {
                 frame.hide();
                 return;
             }
             let border_width = self.scaled_border_width(hwnd);
             let corner_radius = self.corner_radius_for_window(hwnd);
-            // During resize preview: show border at the preview snap target.
             if let Some(rect) = self.resize_preview_display_rect {
                 if self.config.appearance.active_border {
                     if let Some(bgr) = self.border_color_bgr() {
@@ -164,7 +151,6 @@ impl AppState {
                     }
                 }
             }
-            // During tiled drag: show border at the window's layout position.
             if let Some(ref drag) = self.drag_state {
                 if drag.is_tiled && self.config.appearance.active_border {
                     if let Some(bgr) = self.border_color_bgr() {
@@ -184,20 +170,9 @@ impl AppState {
                     return;
                 }
             }
-            // For managed tiled windows the layout rect is authoritative —
-            // the window is either at that rect or animating toward it.
-            // Querying DWM bounds via `frame.show(hwnd)` lags SetWindowPos by
-            // 1-2 frames, which produces a visible border drift after drag
-            // snap-back / resize / scroll landing (the SetWindowPos commits
-            // but DWM still reports the old rect when the immediately-
-            // following show_border fires). Use the layout rect directly so
-            // the border is always at the slot the workspace says it should
-            // be — same rect the layout engine is steering the window
-            // toward, no DWM lag.
-            //
-            // Floating windows fall through to the chrome-tracking
-            // `frame.show(hwnd)` path because their position is whatever
-            // the user last set, not a layout slot.
+            // DWM bounds lag SetWindowPos by 1-2 frames after drag, resize, or scroll
+            // landing. Use the interpolated layout slot for tiled borders to avoid
+            // visible drift. Floating windows instead track their actual chrome bounds.
             if self.config.appearance.active_border {
                 if let Some((monitor_id, ws_idx)) = self.find_window_workspace(hwnd) {
                     let is_floating = self
@@ -233,14 +208,8 @@ impl AppState {
                                 }
                             }
                             None => {
-                                // Managed tiled window with no current
-                                // placement — minimized, or in a transient
-                                // mid-removal state. Hide the border
-                                // rather than falling through to
-                                // `frame.show(hwnd)`, which would track the
-                                // stale DWM bounds and leave a colored
-                                // frame floating where the window used to
-                                // be.
+                                // With no tiled placement, DWM bounds may be stale; do not leave
+                                // a border floating at the window's former position.
                                 frame.hide();
                                 return;
                             }
@@ -303,7 +272,6 @@ impl AppState {
     fn corner_radius_for_window(&self, hwnd: u64) -> f32 {
         let info = leopardwm_platform_win32::get_window_info(hwnd);
 
-        // 1. User-rule override always wins.
         if let Some(ref info) = info {
             let any_corner_overrides = self.compiled_rules.iter().any(|r| r.corner_style.is_some());
             if any_corner_overrides {
@@ -318,19 +286,13 @@ impl AppState {
             }
         }
 
-        // 2. Trust only explicit non-DEFAULT DWM signals; otherwise default.
+        // DWM DEFAULT is not an explicit corner preference.
         leopardwm_platform_win32::get_window_corner_radius(hwnd)
             .unwrap_or(leopardwm_platform_win32::border::DEFAULT_CORNER_RADIUS)
     }
 
-    /// Compute the layout rect for a window from the workspace placements.
-    /// Applies the active layout transition's interpolation so the border
-    /// follows the windows' interpolated mid-flight rect — without this the
-    /// border jumps to the FINAL post-transition rect on frame 1 of a
-    /// workspace switch / move-to-column / expel / drag merge while the
-    /// windows are still sliding to it (border leads windows by the entire
-    /// transition duration). An explicit workspace-switch command defers the
-    /// border until that slide completes.
+    /// Interpolate the border with the windows, or it leads them by the full
+    /// transition duration. Explicit workspace switches defer it until landing.
     pub(crate) fn compute_window_layout_rect(
         &self,
         hwnd: u64,
@@ -349,7 +311,6 @@ impl AppState {
             .map(|p| p.rect)
     }
 
-    /// Hide the border frame.
     pub(crate) fn hide_border(&self) {
         #[cfg(test)]
         self.border_hide_count
@@ -381,8 +342,6 @@ impl AppState {
         self.hide_border();
     }
 
-    /// Hide every tab strip overlay when tiling is paused.
-    /// Doesn't drop the overlays — `update_tab_strip` will reuse them.
     pub(crate) fn hide_tab_strip(&self) {
         #[cfg(test)]
         self.tab_strip_hide_count
@@ -392,17 +351,7 @@ impl AppState {
         }
     }
 
-    /// Reconcile the set of tab strip overlays against the current
-    /// "every tabbed column gets its own strip" model.
-    ///
-    /// For each visible workspace across all monitors:
-    ///   - every column whose mode is Tabbed gets a strip
-    ///   - strips for non-tabbed (or removed) columns are dropped
-    ///   - fullscreen workspaces show no strips
-    ///
-    /// Strips persist across focus changes — refocusing a different
-    /// column just changes which strip's highlight is "active", not
-    /// which strips are visible.
+    /// Strips persist across focus changes; changing focus only changes highlights.
     pub(crate) fn update_tab_strip(&mut self) {
         self.update_tab_strip_icons(true);
     }
@@ -420,21 +369,17 @@ impl AppState {
         let managed: std::collections::HashSet<_> =
             self.all_managed_window_ids().into_iter().collect();
         self.tab_icon_cache.retain(|hwnd, _| managed.contains(hwnd));
-        // No-op when the action sender wasn't installed (tests / headless).
         if self.tab_strip_action_tx.is_none() {
             return;
         }
         if self.paused {
-            // Tear everything down. The next non-paused update repopulates.
             self.tab_strip_overlays.clear();
             return;
         }
 
         let mut icon_cache = std::mem::take(&mut self.tab_icon_cache);
 
-        // Pull configurable colors from the [appearance] config section.
-        // Hex strings are RGB; convert to the 0xBBGGRR layout the strip
-        // expects (GDI's COLORREF is BGR-byte-order in a u32).
+        // GDI COLORREF uses 0xBBGGRR, while config hex strings are RGB.
         let app = &self.config.appearance;
         let colors = TabStripColors {
             bg: hex_rgb_to_bgr(&app.tab_strip_bg).unwrap_or(0x1F1F1F),
@@ -450,7 +395,6 @@ impl AppState {
             crate::config::TabCloseAction::Untab => leopardwm_platform_win32::TabCloseAction::Untab,
         };
 
-        // First pass: figure out the desired key set + per-key show args.
         struct StripShow {
             rect: leopardwm_core_layout::Rect,
             tabs: Vec<TabLabel>,
@@ -460,9 +404,6 @@ impl AppState {
         let mut desired: std::collections::HashMap<(isize, usize, usize), StripShow> =
             std::collections::HashMap::new();
 
-        // Snapshot monitor + workspace identity into a vec so the
-        // subsequent column walk can borrow `self` (immutable) again
-        // without aliasing the iteration over `self.workspaces`.
         let monitor_ids: Vec<isize> = self.workspaces.keys().copied().collect();
         for monitor in monitor_ids {
             let ws_idx = self.active_workspace_idx(monitor);
@@ -555,18 +496,12 @@ impl AppState {
 
         self.tab_icon_cache = icon_cache;
 
-        // Drop overlays whose key is no longer desired (column became
-        // Vertical, workspace switched out, monitor disconnected, etc.).
-        // Drop happens via `retain` so each removed overlay's `Drop` impl
-        // tears down its thread + hwnds + tooltip cleanly.
+        // Dropping an undesired overlay tears down its thread, HWNDs, and tooltip.
         self.tab_strip_overlays
             .retain(|key, _| desired.contains_key(key));
 
-        // For each desired key, ensure an overlay exists and call show.
         for (key, show) in desired {
             let (monitor, ws_idx, col_idx) = key;
-            // Spawn the overlay if missing. New overlays always render
-            // at the next show() so the user sees the strip immediately.
             if !self.tab_strip_overlays.contains_key(&key) {
                 let Some(tx) = self.tab_strip_action_tx.clone() else {
                     continue;
@@ -598,14 +533,9 @@ impl AppState {
         }
     }
 
-    /// Set the OS foreground window to match the workspace's focused window.
-    /// Also updates active window border if configured.
-    ///
-    /// Prefers `previous_focused_hwnd` if it points to a floating window on the
-    /// active workspace, so that floating window focus isn't stolen by tiled focus.
+    /// Preserve floating focus on the active workspace instead of replacing it
+    /// with the workspace's tiled focus.
     pub(crate) fn sync_foreground_window(&mut self) {
-        // If the OS-focused window is a floating window on the active workspace,
-        // keep it focused rather than overriding with the tiled focus.
         let floating_focus = self.previous_focused_hwnd.and_then(|hwnd| {
             self.focused_workspace()
                 .filter(|ws| ws.is_floating(hwnd))
@@ -686,9 +616,7 @@ impl AppState {
     }
 }
 
-/// Parse a hex RGB string (e.g. `"4285F4"` or `"#4285F4"`) into a
-/// BGR-byte-order `u32` suitable for GDI `COLORREF`. Accepts 6-digit
-/// hex with optional leading `#`. Returns `None` on malformed input.
+/// GDI COLORREF stores RGB bytes in BGR order.
 pub(crate) fn hex_rgb_to_bgr(hex: &str) -> Option<u32> {
     let stripped = hex.strip_prefix('#').unwrap_or(hex);
     if stripped.len() != 6 {
