@@ -58,7 +58,6 @@ pub fn is_high_contrast_enabled() -> bool {
         SystemParametersInfoW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     };
 
-    // SPI_GETHIGHCONTRAST = 0x0042
     const SPI_GETHIGHCONTRAST: u32 = 0x0042;
 
     let mut hc = HIGHCONTRASTW {

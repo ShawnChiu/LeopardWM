@@ -52,7 +52,6 @@ pub use keyboard_hook::*;
 pub use mouse_hook::*;
 pub use user_press::{install_mouse_press_hook, user_press_count, MousePressHookHandle};
 
-// Re-export public API from submodules
 pub use elevation::{
     current_process_integrity, manage_block, window_manage_block, ManageBlock, INTEGRITY_HIGH,
     INTEGRITY_MEDIUM,
@@ -126,11 +125,6 @@ pub const MOVE_OFFSCREEN_SENTINEL_COORD: i32 = i16::MIN as i32;
 /// Custom message to signal the gesture/mouse-hook thread to stop.
 pub(crate) const WM_QUIT_LLHOOK_THREAD: u32 = WM_USER + 2;
 
-/// Recover from a poisoned mutex, logging a warning.
-///
-/// When a thread panics while holding a mutex, the mutex becomes "poisoned".
-/// This helper logs the event and recovers the inner data so the application
-/// can continue operating.
 pub(crate) fn recover_poisoned_mutex<T>(
     err: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>,
 ) -> std::sync::MutexGuard<'_, T> {
@@ -138,10 +132,7 @@ pub(crate) fn recover_poisoned_mutex<T>(
     err.into_inner()
 }
 
-/// Convert a WindowId to an HWND safely, returning an error for null (zero) IDs.
-///
-/// A WindowId of 0 would produce a null HWND pointer, which is invalid for
-/// most Win32 window operations.
+// Zero would become a null HWND, which most window operations reject.
 pub(crate) fn window_id_to_hwnd(id: WindowId) -> Result<HWND, Win32Error> {
     if id == 0 {
         return Err(Win32Error::WindowNotFound(id));
@@ -159,11 +150,7 @@ pub(crate) fn combine_operation_failures(context: &str, failures: Vec<String>) -
     ))
 }
 
-/// Whether an operation failure is benign and should not fail the entire
-/// placement batch.
-///
-/// Benign failures include:
-/// - Window-not-found races (window vanished between enumeration and operation)
+// A vanished window is a benign race; a null ID is a caller error.
 pub(crate) fn is_benign_side_effect_error(error: &Win32Error) -> bool {
     matches!(
         error,
@@ -171,6 +158,5 @@ pub(crate) fn is_benign_side_effect_error(error: &Win32Error) -> bool {
     )
 }
 
-// Re-export pub(crate) items needed by sibling modules (mouse_hook, etc.)
 pub(crate) use enumeration::normalize_to_root_window;
 pub(crate) use enumeration::should_emit_window_event;

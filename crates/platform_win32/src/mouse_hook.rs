@@ -13,11 +13,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WH_MOUSE_LL, WM_MOUSEMOVE,
 };
 
-/// Global sender for mouse enter events.
 static MOUSE_EVENT_SENDER: std::sync::Mutex<Option<mpsc::Sender<WindowEvent>>> =
     std::sync::Mutex::new(None);
 
-/// Track the window the mouse is currently over.
 static CURRENT_MOUSE_WINDOW: std::sync::Mutex<Option<WindowId>> = std::sync::Mutex::new(None);
 
 /// Whether the currently-tracked window is one we'd manage (i.e. we emitted a
@@ -55,7 +53,6 @@ impl Drop for MouseHookHandle {
         }
         tracing::debug!("Mouse hook uninstalled");
 
-        // Clear the global sender (recover from mutex poisoning)
         let mut sender = MOUSE_EVENT_SENDER
             .lock()
             .unwrap_or_else(recover_poisoned_mutex);
@@ -69,7 +66,7 @@ impl Drop for MouseHookHandle {
 /// callbacks are dispatched promptly.
 ///
 /// # Arguments
-/// * `event_sender` - Sender for WindowEvent (specifically MouseEnterWindow)
+/// * `event_sender` - Receives `MouseEnterWindow` and `MouseLeftManaged` events.
 pub fn install_mouse_hook(
     event_sender: mpsc::Sender<WindowEvent>,
 ) -> Result<MouseHookHandle, Win32Error> {
@@ -142,10 +139,6 @@ pub fn install_mouse_hook(
     })
 }
 
-/// Low-level mouse hook callback.
-///
-/// Tracks mouse movement and sends MouseEnterWindow events when the cursor
-/// enters a different window.
 unsafe extern "system" fn mouse_ll_hook_proc(
     ncode: i32,
     wparam: windows::Win32::Foundation::WPARAM,
@@ -178,8 +171,7 @@ unsafe extern "system" fn mouse_ll_hook_proc(
             .unwrap_or_else(recover_poisoned_mutex);
         if *current != candidate_window_id {
             *current = candidate_window_id;
-            // Updating CURRENT_MOUSE_WINDOW above means later moves within the
-            // same window hit the early return, so each branch fires once.
+            // Gate on window transitions so moves within one window do not repeat events.
             let candidate_managed = candidate_hwnd.is_some_and(should_emit_window_event);
             let mut over_managed = CURRENT_OVER_MANAGED
                 .lock()

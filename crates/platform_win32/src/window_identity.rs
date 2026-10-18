@@ -169,7 +169,7 @@ pub fn read_managed_lifetime_token(window_id: WindowId) -> Result<Option<u64>, W
     read_lifetime_token(window_id, MANAGED_TOKEN_PROPERTY)
 }
 
-/// Remove the lifetime token from `window_id`. Missing properties succeed.
+/// Remove the ignore-lifetime token from `window_id`. Missing properties succeed.
 ///
 /// [`RemovePropW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-removepropw)
 /// returns the stored handle, or NULL if the property is not found. A UIPI

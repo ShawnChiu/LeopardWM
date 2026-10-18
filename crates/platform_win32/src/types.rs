@@ -100,15 +100,10 @@ mod tests {
             scale_factor: 1.0,
         };
 
-        // Point inside monitor
         assert!(monitor.contains_point(960, 540));
-        // Point at origin
         assert!(monitor.contains_point(0, 0));
-        // Point just inside right edge
         assert!(monitor.contains_point(1919, 540));
-        // Point outside (right edge)
         assert!(!monitor.contains_point(1920, 540));
-        // Point outside (negative)
         assert!(!monitor.contains_point(-1, 0));
     }
 
@@ -123,22 +118,19 @@ mod tests {
             scale_factor: 1.0,
         };
 
-        // Window centered in monitor
         let window = Rect::new(100, 100, 800, 600);
         assert!(monitor.contains_rect_center(&window));
 
-        // Window mostly outside but center inside
+        // Crosses the left edge but keeps its center inside.
         let window2 = Rect::new(-300, 100, 800, 600);
         assert!(monitor.contains_rect_center(&window2)); // Center at 100, 400
 
-        // Window with center outside
         let window3 = Rect::new(1800, 100, 800, 600);
         assert!(!monitor.contains_rect_center(&window3)); // Center at 2200, 400
     }
 
     #[test]
     fn test_win32_error_display() {
-        // Verify error types have proper Display implementations
         let set_pos_err = Win32Error::SetPositionFailed("test error".to_string());
         let display = format!("{}", set_pos_err);
         assert!(display.contains("test error"));

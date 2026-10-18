@@ -1,11 +1,11 @@
 //! Capture-on-hide window snapshots for the overview's `snapshot` render
 //! mode: a `PrintWindow(PW_RENDERFULLCONTENT)` grab taken right before a
 //! window leaves the screen (workspace switch, move-to-workspace), kept
-//! in a small process-global LRU cache and stretched into overview card
-//! bodies instead of registering live DWM thumbnails.
+//! in a process-global cache and stretched into overview card bodies
+//! instead of registering live DWM thumbnails.
 //!
-//! Snapshots are downscaled (longest side capped at [`MAX_SIDE`] px,
-//! HALFTONE) so 40 cached entries stay around ~25MB worst case.
+//! HALFTONE downscaling caps the longest side at [`MAX_SIDE`] px. At 480 x 480
+//! pixels and four bytes per pixel, 40 entries hold about 35.2 MiB of pixel data.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -32,7 +32,6 @@ const PW_RENDERFULLCONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(2);
 /// downscale crisp without caching megapixels per window.
 const MAX_SIDE: i32 = 480;
 
-/// Cache capacity; the oldest entry (by last capture) is evicted beyond it.
 const MAX_ENTRIES: usize = 40;
 
 /// One cached window snapshot: bottom-up 32bpp BGRX rows (bottom-up so
@@ -43,8 +42,7 @@ pub struct Snapshot {
     pub bits: Vec<u8>,
 }
 
-/// LRU-ish snapshot store: entries are stamped at insert; eviction drops
-/// the smallest stamp. Plain data, unit-testable without GDI.
+// Eviction uses the last capture, not the last cache read.
 struct SnapshotCache {
     entries: HashMap<u64, (u64, Arc<Snapshot>)>,
     next_stamp: u64,
@@ -114,7 +112,6 @@ pub fn snapshot_remove(wid: WindowId) {
     cache().remove(wid);
 }
 
-/// A 32bpp bottom-up DIB section selected into a memory DC.
 struct Dib {
     dc: HDC,
     bmp: HBITMAP,
@@ -148,7 +145,6 @@ unsafe fn release_dib(dib: Dib) {
     let _ = DeleteObject(dib.bmp.into());
 }
 
-/// Downscaled dimensions capping the longest side at [`MAX_SIDE`].
 fn scaled_dims(w: i32, h: i32) -> (i32, i32) {
     let longest = w.max(h);
     if longest <= MAX_SIDE {
@@ -161,8 +157,6 @@ fn scaled_dims(w: i32, h: i32) -> (i32, i32) {
     )
 }
 
-/// PrintWindow the full composed window content into a full-size DIB,
-/// then HALFTONE-StretchBlt it down to the cache size.
 unsafe fn capture_window(hwnd: windows::Win32::Foundation::HWND) -> Option<Snapshot> {
     let mut rect = RECT::default();
     GetWindowRect(hwnd, &mut rect).ok()?;

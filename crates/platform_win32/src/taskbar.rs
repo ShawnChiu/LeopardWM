@@ -6,10 +6,9 @@
 //! `AddTab` is the only mechanism that works. The interface is apartment-model
 //! COM, so a dedicated STA thread owns it and processes requests over a channel.
 //!
-//! Callable from anywhere via [`taskbar_hide`] / [`taskbar_show`] (a global
-//! sender, like the cloak helpers). Safety: every window we `DeleteTab` is
-//! tracked and restored with `AddTab` when [`TaskbarHandle`] is dropped
-//! (graceful shutdown), so a window is never left missing from the taskbar.
+//! Callable from anywhere via [`taskbar_hide`] / [`taskbar_show`]. Hidden buttons
+//! are tracked for best-effort restoration when [`TaskbarHandle`] is dropped.
+//! Shutdown detaches the worker if shell calls outlast the bounded wait.
 
 use crate::recover_poisoned_mutex;
 use leopardwm_core_layout::WindowId;
@@ -82,8 +81,8 @@ pub fn taskbar_forget(wid: WindowId) {
     }
 }
 
-/// Owns the taskbar-control thread. Dropping it restores every hidden window's
-/// taskbar button (via the thread's shutdown path) before returning.
+/// Owns the taskbar-control thread. Dropping it requests restoration of hidden
+/// taskbar buttons and waits up to roughly 500 ms before detaching the worker.
 pub struct TaskbarHandle {
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -113,9 +112,8 @@ pub fn init_taskbar() -> Option<TaskbarHandle> {
 
 impl Drop for TaskbarHandle {
     fn drop(&mut self) {
-        // Clear the global sender so the thread's recv() ends; it then restores
-        // every hidden button and exits. Join so restore completes before we
-        // return (bounded so a hung shell call can't block shutdown forever).
+        // Closing the channel lets the worker restore hidden buttons. Bound the
+        // wait so a hung shell call cannot block shutdown forever.
         if let Some(sender) = TASKBAR_TX
             .lock()
             .unwrap_or_else(recover_poisoned_mutex)
@@ -187,8 +185,7 @@ fn run(rx: mpsc::Receiver<TaskbarCmd>) {
             }
         }
 
-        // Channel closed (handle dropped): restore every hidden button so
-        // nothing is left missing from the taskbar after shutdown.
+        // Channel closure requests best-effort restoration, including on emergency disconnect.
         for wid in hidden.drain() {
             let _ = taskbar.AddTab(hwnd_of(wid));
         }

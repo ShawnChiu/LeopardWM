@@ -64,8 +64,7 @@ pub fn init(aumid: &str, app_name: &str) -> Result<()> {
                 }
             }));
         }
-        // Only balance a successful init (skip on RPC_E_CHANGED_MODE). Reached
-        // only if all senders drop (process teardown).
+        // Only balance a successful init (skip on RPC_E_CHANGED_MODE).
         if hr.is_ok() {
             unsafe { CoUninitialize() };
         }

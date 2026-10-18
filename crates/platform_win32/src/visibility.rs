@@ -20,10 +20,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE,
 };
 
-// ============================================================================
-// Offscreen sentinel helpers
-// ============================================================================
-
 /// Check whether coordinates indicate MoveOffScreen sentinel placement.
 pub fn is_move_offscreen_sentinel_position(x: i32, y: i32) -> bool {
     x <= MOVE_OFFSCREEN_SENTINEL_COORD && y <= MOVE_OFFSCREEN_SENTINEL_COORD
@@ -226,10 +222,6 @@ fn restore_window_if_offscreen_to_work_area(
 
     Ok(true)
 }
-
-// ============================================================================
-// Restore / uncloak
-// ============================================================================
 
 // Recovery also runs in DPI-unaware CLI/watchdog threads. Keep monitor and window
 // coordinates physical for the entire operation, then restore the caller's context.
@@ -532,10 +524,11 @@ pub(crate) fn recover_after_placement_mover(
     }
 }
 
-/// Restore one window from MoveOffScreen sentinel coordinates to the primary monitor.
+/// Restore a window parked at sentinel coordinates or queued off-screen to the
+/// primary monitor.
 ///
-/// Returns `Ok(true)` if the window was restored, `Ok(false)` if it was not at
-/// sentinel coordinates, and `Err` if restore operations failed.
+/// Returns `Ok(true)` for a completed or queued restore, `Ok(false)` if recovery
+/// is unnecessary or the placement owner cannot be recovered, and `Err` on failure.
 pub fn restore_window_moved_offscreen(window_id: WindowId) -> Result<bool, Win32Error> {
     let _dpi = RecoveryDpiContext::enter()?;
     let primary = get_primary_monitor()?;
@@ -649,10 +642,10 @@ fn uncloak_managed_window_state(window_ids: &[WindowId]) {
     }
 }
 
-/// Restore managed windows to their visible positions, best-effort.
+/// Uncloak managed windows, reset border colors, and recover sentinel or queued
+/// off-screen placements to the primary monitor, best-effort.
 ///
-/// Resets border colors and restores windows parked at MoveOffScreen
-/// sentinel coordinates. Logs warnings for failures but never panics.
+/// Restore errors are logged rather than returned.
 pub fn uncloak_all_managed_windows(window_ids: &[WindowId]) {
     uncloak_managed_window_state(window_ids);
     if let Err(e) = restore_windows_moved_offscreen(window_ids) {
@@ -720,10 +713,11 @@ fn restore_all_windows_moved_offscreen(include_marked: bool) -> OffscreenRecover
     }
 }
 
-/// Restore any top-level window parked at MoveOffScreen sentinel coordinates.
+/// Recover top-level windows parked at sentinel coordinates or queued off-screen,
+/// best-effort. Returns the number of completed or queued restores.
 ///
-/// This helper is panic-safe and best-effort, making it suitable for panic
-/// hooks where daemon state may be unavailable or poisoned.
+/// Does not require daemon state, so it can run from panic hooks when that state
+/// is unavailable or poisoned.
 pub fn restore_all_windows_moved_offscreen_best_effort() -> usize {
     crate::placement::stop_placement_mover();
     let recovery = restore_all_windows_moved_offscreen(true);
@@ -751,11 +745,11 @@ pub(crate) fn uncloak_unmarked_windows_for_recovery() {
     }
 }
 
-/// Restore all visible windows on the system, best-effort.
+/// Uncloak tracked windows and recover top-level sentinel or queued off-screen
+/// placements, best-effort.
 ///
-/// Restores any windows parked at MoveOffScreen sentinel coordinates.
-/// This does not require AppState and works even if state is poisoned,
-/// making it suitable for use in panic hooks.
+/// Does not require daemon state, so it can run from panic hooks when that state
+/// is unavailable or poisoned.
 pub fn uncloak_all_visible_windows() {
     crate::dwm_uncloak_all();
     let _ = restore_all_windows_moved_offscreen_best_effort();
@@ -845,7 +839,7 @@ where
     let recovery_error = recover().err();
     // Use height as the base so windows look reasonable on ultrawide monitors.
     let cascade_h = (work_area.height as f64 * 0.5) as i32;
-    let cascade_w = (cascade_h as f64 * 1.33) as i32; // 4:3 aspect ratio
+    let cascade_w = (cascade_h as f64 * 1.33) as i32; // Approximately 4:3.
     let placements: Vec<WindowPlacement> = window_ids
         .iter()
         .enumerate()

@@ -79,7 +79,6 @@ impl Drop for PipeSecurityAttributes {
     }
 }
 
-/// The current process user's SID as an SDDL string (e.g. `S-1-5-21-...`).
 fn current_user_sid_string() -> Option<String> {
     unsafe {
         let mut token = HANDLE::default();
