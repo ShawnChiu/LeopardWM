@@ -1,5 +1,3 @@
-//! Deterministic configuration resolution shared by registration and queries.
-
 use crate::config::{self, HotkeyConfig};
 use leopardwm_ipc::{HotkeyIssue, IpcCommand};
 use leopardwm_platform_win32::{fn_mod_bit, parse_hotkey_string, Hotkey, HotkeyBind, HotkeyId};

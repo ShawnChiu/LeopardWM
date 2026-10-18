@@ -65,7 +65,6 @@ const KNOWN_STAGES: &[&str] = &[
     GESTURE_DIAG_STAGE_REGISTRATION,
 ];
 
-/// Header values written at the start of a capture file.
 #[derive(Debug, Clone)]
 pub struct CaptureHeader {
     pub version: String,
@@ -74,7 +73,6 @@ pub struct CaptureHeader {
     pub daemon_integrity: String,
 }
 
-/// Tunable bounds for a capture run. Production uses the defaults.
 #[derive(Debug, Clone)]
 pub struct CaptureLimits {
     pub duration: Duration,
@@ -137,7 +135,6 @@ impl CaptureState {
     }
 }
 
-/// Tracing layer that handoffs allowlisted diagnostic records without blocking.
 #[derive(Clone)]
 pub struct GestureCaptureLayer {
     tx: SyncSender<CaptureRecord>,
@@ -207,7 +204,6 @@ where
     }
 }
 
-/// Format the observed process integrity the same way doctor does.
 pub fn format_integrity(rid: Option<u32>) -> String {
     match rid {
         Some(INTEGRITY_MEDIUM) => "Medium".to_string(),
@@ -217,13 +213,12 @@ pub fn format_integrity(rid: Option<u32>) -> String {
     }
 }
 
-/// Path of the dedicated capture file in `log_dir`.
 pub fn capture_log_path(log_dir: &Path) -> PathBuf {
     log_dir.join(leopardwm_ipc::GESTURE_CAPTURE_LOG_FILE)
 }
 
-/// Start a bounded capture worker. Returns `None` when duration is zero, spawn
-/// fails, or the channel cannot be created — the window manager continues.
+/// Returns None for zero duration, spawn failure, or failed/timed-out worker
+/// initialization. Capture failure does not stop the window manager.
 pub fn start_capture(
     log_dir: &Path,
     header: CaptureHeader,
@@ -308,7 +303,6 @@ pub fn start_capture(
     }
 }
 
-/// Emit a dispatch-stage record using the shared diagnostic target.
 pub fn emit_dispatch(event: GestureEvent, binding: &'static str, command: Option<&str>) {
     let Some(_admission) = leopardwm_platform_win32::admit_gesture_diagnostic_capture() else {
         return;

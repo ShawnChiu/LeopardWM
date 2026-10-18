@@ -14,7 +14,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_DELAY: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 
-/// Public release URL for the GUI / tray click action.
 pub const RELEASES_PAGE_URL: &str = "https://github.com/jcardama/LeopardWM/releases";
 
 /// Spawn the background update-checker thread.
@@ -53,9 +52,6 @@ fn run_check_once(on_update_found: &impl Fn(String)) {
     }
 }
 
-/// Fetch the `tag_name` of the latest GitHub release. Returns `None` on any
-/// network or parse failure — the caller treats this as "unknown, try again
-/// tomorrow."
 fn fetch_latest_release_tag() -> Option<String> {
     let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
     let body = agent

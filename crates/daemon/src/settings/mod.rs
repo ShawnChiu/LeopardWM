@@ -1,9 +1,5 @@
-//! Settings window for LeopardWM daemon.
-//!
-//! Native Win32 settings window using the `windows` crate.
-//! Tabbed form with one tab per config section. Runs on a dedicated thread
-//! with its own message loop. An `AtomicBool` singleton guard prevents
-//! multiple windows.
+//! Settings runs on a dedicated thread with its own Win32 message loop.
+//! An AtomicBool singleton guard prevents multiple settings windows.
 
 mod html;
 mod win32;
@@ -17,7 +13,6 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 
-/// Events emitted by the settings window back to the daemon.
 #[derive(Debug, Clone)]
 pub enum SettingsEvent {
     /// The user saved the config (already written to disk).
@@ -31,10 +26,8 @@ pub enum SettingsEvent {
     Closed,
 }
 
-/// Singleton guard — only one settings window at a time.
 static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
-/// Handle to the settings window thread.
 pub struct SettingsWindowHandle {
     _thread: std::thread::JoinHandle<()>,
 }

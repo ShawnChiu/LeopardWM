@@ -1,10 +1,3 @@
-//! Embedded HTML/CSS/JS for the WebView2-based settings panel.
-//!
-//! WinUI 3 / Fluent Design System v2 single-page app with NavigationView
-//! sidebar, seven settings sections, and IPC back to the Rust host.
-//! Color tokens, typography, spacing, and component styling match the
-//! official WinUI 3 theme resources.
-
 pub const SETTINGS_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>

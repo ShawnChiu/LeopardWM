@@ -1,8 +1,5 @@
-//! Startup utilities: banner, crash report, and duplicate-instance detection.
-
 use leopardwm_ipc::pipe_name_candidates;
 
-/// Startup banner info for display after initialization.
 pub struct StartupInfo {
     pub version: String,
     pub monitor_names: Vec<String>,
@@ -21,7 +18,6 @@ pub struct StartupInfo {
     pub high_contrast: bool,
 }
 
-/// Format the startup banner into a string (testable without capturing stderr).
 pub fn format_startup_banner(info: &StartupInfo) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -97,12 +93,10 @@ pub fn format_startup_banner(info: &StartupInfo) -> String {
     out
 }
 
-/// Print the startup banner to stderr.
 pub fn print_startup_banner(info: &StartupInfo) {
     eprint!("{}", format_startup_banner(info));
 }
 
-/// Format a crash report from a panic.
 pub(crate) fn format_crash_report(info: &std::panic::PanicHookInfo<'_>) -> String {
     use std::fmt::Write;
     let mut report = String::new();
@@ -116,7 +110,6 @@ pub(crate) fn format_crash_report(info: &std::panic::PanicHookInfo<'_>) -> Strin
     writeln!(report, "Version: {}", env!("CARGO_PKG_VERSION")).unwrap();
     writeln!(report).unwrap();
 
-    // Panic message
     writeln!(report, "## Panic Info").unwrap();
     if let Some(msg) = info.payload().downcast_ref::<&str>() {
         writeln!(report, "Message: {}", msg).unwrap();
@@ -137,7 +130,6 @@ pub(crate) fn format_crash_report(info: &std::panic::PanicHookInfo<'_>) -> Strin
     }
     writeln!(report).unwrap();
 
-    // Backtrace
     writeln!(report, "## Backtrace").unwrap();
     writeln!(report, "{}", std::backtrace::Backtrace::force_capture()).unwrap();
 

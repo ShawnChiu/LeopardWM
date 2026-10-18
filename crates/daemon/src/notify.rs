@@ -1,8 +1,4 @@
-//! Daemon-side toast notifications.
-//!
-//! Thin wrapper over the shared `platform_win32::toast` worker, fixing the
-//! daemon's AppUserModelID. Used to tell the user when a window can't be managed
-//! (e.g. an elevated window the non-elevated daemon is blocked from tiling).
+//! Toasts use the daemon AppUserModelID on the shared platform worker.
 
 const AUMID: &str = "jcardama.LeopardWM";
 const APP_NAME: &str = "LeopardWM";

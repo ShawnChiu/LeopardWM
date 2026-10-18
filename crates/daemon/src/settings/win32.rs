@@ -1,10 +1,5 @@
-//! Win32 window shell + WebView2 settings panel.
-//!
-//! Creates a Win32 window with DWM theming (Mica, dark title bar, rounded
-//! corners), then fills the client area with a WebView2 instance via `wry`.
-//! All settings UI lives in the embedded HTML/CSS/JS (see `html.rs`).
-//! Communication is via IPC: Rust → JS with `evaluate_script`, JS → Rust
-//! with `window.ipc.postMessage`.
+//! The WebView2 settings UI lives in html.rs. Rust sends scripts through
+//! evaluate_script; JS sends messages through window.ipc.postMessage.
 
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -34,7 +29,7 @@ use crate::config::Config;
 use super::html::SETTINGS_HTML;
 use super::SettingsEvent;
 
-// DWM attributes for Windows 11 theming (not yet in windows crate enum)
+// DWM attribute values for Windows 11 theming.
 const DWMWA_USE_IMMERSIVE_DARK_MODE_VAL: i32 = 20;
 const DWMWA_WINDOW_CORNER_PREFERENCE_VAL: i32 = 33;
 const DWMWA_SYSTEMBACKDROP_TYPE_VAL: i32 = 38;
@@ -104,7 +99,6 @@ static PENDING_LOCALE: Mutex<Option<String>> = Mutex::new(None);
 /// We target the thread queue (not the HWND) so a destroyed or recycled window
 /// can never receive a stray push.
 static SETTINGS_THREAD: Mutex<Option<u32>> = Mutex::new(None);
-/// Latest rejected-bind list as a JSON array, staged for the next push.
 static PENDING_FAILED_BINDS: Mutex<Option<String>> = Mutex::new(None);
 /// Recorded chords awaiting evaluation on the Settings window thread.
 static PENDING_RECORDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -143,7 +137,6 @@ pub fn push_locale(language: &str) {
     }
 }
 
-/// Deliver a captured hotkey chord to the open Settings window, if one is open.
 pub fn push_recorded_chord(chord: &str) {
     let settings_thread = match SETTINGS_THREAD.lock() {
         Ok(g) => g,
@@ -161,7 +154,6 @@ pub fn push_recorded_chord(chord: &str) {
     }
 }
 
-/// Wrapper that implements `HasWindowHandle` + `HasDisplayHandle` for a raw HWND.
 struct Win32Handle(isize);
 
 impl HasWindowHandle for Win32Handle {
@@ -205,7 +197,6 @@ pub fn run_settings_window(
             HBRUSH((COLOR_BTNFACE.0 + 1) as _)
         };
 
-        // Load the embedded application icon (set by winresource build script)
         let icon = LoadIconW(Some(hinstance.into()), PCWSTR(1 as _)).ok();
         let icon_sm = LoadImageW(
             Some(hinstance.into()),
@@ -218,7 +209,6 @@ pub fn run_settings_window(
         .ok()
         .map(|h| HICON(h.0));
 
-        // Register window class
         let class_name = w!("LeopardWMSettings");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -234,7 +224,6 @@ pub fn run_settings_window(
         };
         RegisterClassExW(&wc);
 
-        // Create the window
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class_name,
@@ -269,8 +258,6 @@ pub fn run_settings_window(
         };
         let _ = SetWindowPos(hwnd, None, x, y, width, height, flags);
 
-        // Expose this thread's id so the daemon can push live updates to the
-        // window's message queue (see push_failed_binds).
         if let Ok(mut g) = SETTINGS_THREAD.lock() {
             *g = Some(GetCurrentThreadId());
             if let Ok(mut pending) = PENDING_RECORDED.lock() {
@@ -278,7 +265,6 @@ pub fn run_settings_window(
             }
         }
 
-        // Apply Windows 11 DWM theming (Mica backdrop, dark title bar, rounded corners)
         apply_win11_theming(hwnd, dark);
 
         // Extend the DWM frame into the entire client area so Mica renders behind content
@@ -297,7 +283,6 @@ pub fn run_settings_window(
             .unwrap_or_else(|| std::env::temp_dir().join("leopardwm-webview2"));
         let mut web_context = WebContext::new(Some(data_dir));
 
-        // Create the WebView2 instance via wry
         let win_handle = Win32Handle(hwnd.0 as isize);
         let auto_start = leopardwm_platform_win32::autostart::get_autostart().unwrap_or(false);
         let config_json = {
@@ -322,8 +307,6 @@ pub fn run_settings_window(
         let failed_binds_json =
             serde_json::to_string(&failed_binds).unwrap_or_else(|_| "[]".to_string());
 
-        // Kept for the post-loop "window closed" notification; the original is
-        // moved into the IPC handler closure below.
         let close_tx = event_tx.clone();
 
         let settings_html = SETTINGS_HTML;
@@ -343,11 +326,9 @@ pub fn run_settings_window(
             .with_additional_browser_args("--disable-features=msSmartScreenProtection")
             .build(&win_handle)?;
 
-        // Populate the form with the current config
         let init_js = "init(window._initConfig)".to_string();
         let _ = webview.evaluate_script(&init_js);
 
-        // Navigate to initial section if requested
         if let Some(section) = initial_section {
             let nav_js = format!(
                 "document.querySelector('.nav-item[data-section=\"{}\"]').click()",
@@ -356,7 +337,6 @@ pub fn run_settings_window(
             let _ = webview.evaluate_script(&nav_js);
         }
 
-        // Show the window
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
 
@@ -457,7 +437,6 @@ fn is_allowed_url(url: &str) -> bool {
         && !authority.chars().any(char::is_whitespace)
 }
 
-/// Handle IPC messages from the WebView (JS → Rust).
 fn handle_ipc(body: &str, event_tx: &mpsc::Sender<SettingsEvent>, _hwnd: HWND) {
     let msg: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -519,7 +498,6 @@ fn handle_ipc(body: &str, event_tx: &mpsc::Sender<SettingsEvent>, _hwnd: HWND) {
     }
 }
 
-/// Deserialize config JSON, validate, save to disk, and notify daemon.
 fn do_save(cfg_val: &serde_json::Value, event_tx: &mpsc::Sender<SettingsEvent>) -> bool {
     let mut cfg: Config = match serde_json::from_value(cfg_val.clone()) {
         Ok(c) => c,
@@ -546,8 +524,6 @@ fn do_save(cfg_val: &serde_json::Value, event_tx: &mpsc::Sender<SettingsEvent>) 
         }
     }
 }
-
-// ── Window Procedure ─────────────────────────────────────────────────
 
 unsafe extern "system" fn wndproc(
     hwnd: HWND,
@@ -591,9 +567,6 @@ unsafe extern "system" fn wndproc(
     }
 }
 
-// ── Windows 11 Theming ──────────────────────────────────────────────
-
-/// Detect whether the system is using dark mode via the registry.
 fn is_dark_mode() -> bool {
     unsafe {
         use windows::Win32::System::Registry::*;
@@ -622,7 +595,6 @@ fn is_dark_mode() -> bool {
     }
 }
 
-/// Apply Windows 11 DWM attributes: dark title bar, rounded corners, Mica backdrop.
 unsafe fn apply_win11_theming(hwnd: HWND, dark: bool) {
     let val: i32 = if dark { 1 } else { 0 };
     let _ = DwmSetWindowAttribute(

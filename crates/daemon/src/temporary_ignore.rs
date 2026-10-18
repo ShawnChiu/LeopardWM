@@ -1,5 +1,3 @@
-//! Session-only temporary ignore for the actual OS foreground window.
-
 use crate::event_handler::{AdmissionKind, AdmitOutcome};
 use crate::layout_apply::LayoutApplyOutcome;
 use crate::state::AppState;

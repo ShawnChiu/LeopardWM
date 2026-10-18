@@ -137,7 +137,6 @@ pub(crate) fn monitor_rects(monitors: &HashMap<MonitorId, MonitorInfo>) -> Vec<R
     monitors.values().map(|monitor| monitor.rect).collect()
 }
 
-/// Union of two rectangles using widened edge arithmetic.
 pub(crate) fn union_rects(a: Rect, b: Rect) -> Rect {
     let x0 = (a.x as i64).min(b.x as i64);
     let y0 = (a.y as i64).min(b.y as i64);
