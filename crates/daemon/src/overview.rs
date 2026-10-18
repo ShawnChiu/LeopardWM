@@ -1,12 +1,5 @@
-//! Workspace overview: a fullscreen map of the focused monitor's
-//! non-empty workspaces, one miniaturized row per workspace.
-//!
-//! `build_overview_model` reads workspace state and computes geometry
-//! (its only platform calls are cached per-window icon probes), so the
-//! model is unit tested without ever constructing the overlay window.
-//! `show_overview`
-//! lazily creates the [`OverviewOverlay`] on first use (never in
-//! `AppState::new`, never under `cfg(test)`).
+//! Build overview geometry without constructing the overlay window. Overlay
+//! creation is lazy and requires an event sender; headless tests omit it.
 
 use crate::state::AppState;
 use leopardwm_core_layout::{Rect, Visibility, Workspace};
@@ -16,11 +9,8 @@ use leopardwm_platform_win32::overview::{
 };
 use tracing::{info, warn};
 
-/// Height of the label row across the top of each workspace panel.
 const LABEL_STRIP_H: i32 = 24;
-/// Outer margin as a fraction of the work-area dimensions.
 const OUTER_MARGIN_FRAC: f64 = 0.04;
-/// Vertical gap between rows as a fraction of work-area height.
 const ROW_GAP_FRAC: f64 = 0.02;
 /// Padding between a row panel's edge and the viewport ring (the
 /// renderer folds the same value into the panel's corner radius).
@@ -40,9 +30,6 @@ struct OverviewRowGeometry {
     strip: Rect,
 }
 
-/// Lay out `n` row slots top-to-bottom inside a `w` x `h` client area:
-/// 4% outer margin, 2% row gap, equal-height rows capped at `h / 3` and
-/// centered vertically when fewer rows than would fill the area.
 fn layout_overview_rows(w: i32, h: i32, n: usize) -> Vec<OverviewRowGeometry> {
     let n_i = n as i32;
     if n_i <= 0 || w <= 0 || h <= 0 {
@@ -80,9 +67,8 @@ fn layout_overview_rows(w: i32, h: i32, n: usize) -> Vec<OverviewRowGeometry> {
 /// Gap carved symmetrically off each scaled card so neighbors don't touch.
 const CARD_INSET: i32 = 2;
 
-/// Uniform full-strip → row-strip transform: one scale factor for both
-/// axes and one offset for every rect, so relative window geometry is
-/// preserved exactly (no per-card clamping or fitting).
+/// Share one scale and offset across all cards to preserve relative geometry
+/// apart from pixel rounding; do not fit cards independently.
 struct StripTransform {
     scale: f64,
     min_x: i32,
@@ -92,9 +78,6 @@ struct StripTransform {
 }
 
 impl StripTransform {
-    /// Fit `content` (full-strip virtual coordinates) into `strip`,
-    /// preserving aspect ratio: left-aligned (the row panel wraps the
-    /// scaled content), centered vertically.
     fn fit(content: &Rect, strip: &Rect) -> Self {
         let content_w = f64::from(content.width.max(1));
         let content_h = f64::from(content.height.max(1));
@@ -109,8 +92,6 @@ impl StripTransform {
         }
     }
 
-    /// Width of the scaled content, i.e. how much of the strip's width
-    /// the content actually occupies after fitting.
     fn scaled_width(&self, content: &Rect) -> i32 {
         (f64::from(content.width.max(1)) * self.scale)
             .round()
@@ -127,7 +108,7 @@ impl StripTransform {
     }
 }
 
-/// Bounding box of `rects` (assumed non-empty checked by the caller).
+/// Caller must supply at least one rect.
 fn bounding_box(rects: impl Iterator<Item = Rect>) -> Rect {
     let mut min_x = i32::MAX;
     let mut min_y = i32::MAX;
@@ -142,7 +123,6 @@ fn bounding_box(rects: impl Iterator<Item = Rect>) -> Rect {
     Rect::new(min_x, min_y, (max_x - min_x).max(1), (max_y - min_y).max(1))
 }
 
-/// Shrink `r` symmetrically by up to `CARD_INSET` per side, never below 1px.
 fn inset_card(r: &Rect) -> Rect {
     let ix = CARD_INSET.min((r.width - 1) / 2).max(0);
     let iy = CARD_INSET.min((r.height - 1) / 2).max(0);
@@ -220,10 +200,7 @@ impl AppState {
         self.move_window_to_workspace(monitor, source, wid, (destination + 1) as u8, false)
     }
 
-    /// Build the overview display model for the focused monitor.
-    ///
-    /// Returns the overlay window rect (the monitor's work area) plus the
-    /// model, or `None` when every workspace on the monitor is empty.
+    // Rows exclude empty and fully minimized workspaces.
     pub(crate) fn build_overview_model(&mut self) -> Option<(Rect, OverviewModel)> {
         let selection = self
             .overview_overlay
@@ -261,7 +238,7 @@ impl AppState {
             return None;
         }
         // Fill the icon cache before the row loop re-borrows the
-        // workspaces: a `get_window_icon` miss costs up to two 50ms
+        // workspaces: a `get_window_icon` miss costs up to three 50ms
         // `SendMessageTimeoutW` probes against a hung app, so rebuilds
         // (one per window event while the overview is open) must not
         // re-probe every card.
@@ -299,8 +276,6 @@ impl AppState {
             );
             let (mut cards, viewport, content_w) =
                 self.overview_cards_for(ws, work_area, strip, selected_wid, is_active);
-            // Initial selection falls back to the active row's first card
-            // when the focused window isn't represented.
             if selection.is_none() && is_active && !cards.iter().any(|c| c.selected) {
                 if let Some(first) = cards.first_mut() {
                     first.selected = true;
@@ -310,9 +285,6 @@ impl AppState {
                 Some(name) => format!("{} {}", ws_idx + 1, name),
                 None => format!("{}", ws_idx + 1),
             };
-            // The panel wraps its content: scaled strip width + inner
-            // padding, left-aligned at the outer margin; the label strip
-            // shares the panel width. Height per row is unchanged.
             let panel_w = match content_w {
                 Some(cw) => (cw + 2 * BODY_INSET).min(geom.panel.width),
                 None => geom.panel.width, // no visible content: keep full width
@@ -355,7 +327,6 @@ impl AppState {
         let Some(ws) = self.workspaces.get(&monitor).and_then(|v| v.get(idx)) else {
             return;
         };
-        // all_window_ids covers tiled AND floating windows.
         for wid in ws.all_window_ids() {
             if !ws.is_minimized(wid) {
                 let _ = leopardwm_platform_win32::snapshot::snapshot_capture(wid);
@@ -363,8 +334,6 @@ impl AppState {
         }
     }
 
-    /// Open/close zoom duration for the overlay: the overview duration
-    /// from config, snapping instantly (0) under reduce-motion.
     fn overview_anim_ms(&self) -> u32 {
         if self.reduce_motion {
             return 0;
@@ -372,21 +341,10 @@ impl AppState {
         u32::try_from(self.config.animation.overview_duration_ms).unwrap_or(0)
     }
 
-    /// Miniaturize one workspace's ENTIRE strip into `strip` (scrolled-out
-    /// columns included), plus a marker rect for the region currently in
-    /// the real viewport (zero-sized when every window already fits the
-    /// viewport) and the scaled content width (None when the workspace
-    /// has no visible windows) so the caller can wrap the panel.
-    ///
-    /// Tiled placements come from `placements_for_full_strip` (pure — no
-    /// state mutation) against a virtual viewport at origin, wide enough
-    /// for every column. Floating windows are viewport-anchored, so they
-    /// are translated by `scroll_offset` to sit over the viewport region.
-    /// Every rect goes through ONE uniform [`StripTransform`] — same
-    /// scale, same offset — so relative geometry is exact.
-    ///
-    /// A fullscreen workspace collapses to ONE viewport-sized card unless
-    /// selection follows another window moved into its underlying strip.
+    // Include scrolled-out columns in one uniform strip transform. Floating
+    // windows are viewport-anchored, so translate them by the scroll offset.
+    // Fullscreen collapses to one viewport-sized card unless selection follows
+    // another window in its underlying strip. Return content width for panel wrap.
     fn overview_cards_for(
         &self,
         ws: &Workspace,
@@ -398,7 +356,6 @@ impl AppState {
         let full_w = ws.total_width().saturating_add(work_area.width).max(1);
         let virtual_viewport = Rect::new(0, 0, full_w, work_area.height);
         let scroll = ws.scroll_offset().round() as i32;
-        // The strip region the real viewport currently shows.
         let viewport_region = Rect::new(scroll, 0, work_area.width, work_area.height);
 
         let fullscreen = ws
@@ -406,7 +363,6 @@ impl AppState {
             .filter(|&wid| ws.contains_window(wid) && !ws.is_minimized(wid))
             .filter(|&wid| selected_wid.is_none_or(|selected| selected == wid));
         let sources: Vec<(u64, Rect, Option<usize>)> = if let Some(fs_wid) = fullscreen {
-            // The fullscreen window covers the whole viewport.
             vec![(fs_wid, viewport_region, None)]
         } else {
             let mut sources: Vec<(u64, Rect, Option<usize>)> = ws
@@ -535,8 +491,6 @@ impl AppState {
                         .lookup_window_info(wid)
                         .map(|i| i.title)
                         .unwrap_or_default(),
-                    // Prefetched into the cache by build_overview_model;
-                    // the fallback probe covers any uncached id.
                     icon: self
                         .overview_icon_cache
                         .get(&wid)
@@ -571,9 +525,6 @@ impl AppState {
         (cards, marker, Some(xform.scaled_width(&content) + reserve))
     }
 
-    /// Toggle the overview overlay on the focused monitor. Closing via
-    /// the toggle hotkey uses the same animated zoom-out as every other
-    /// close path.
     pub(crate) fn toggle_overview(&mut self) {
         if self.overview_open {
             self.hide_overview_animated(None);
@@ -582,9 +533,7 @@ impl AppState {
         }
     }
 
-    /// Show the overview. No-op when every workspace is empty. Creates
-    /// the overlay lazily on first use (skipped when no event sender is
-    /// installed — tests and headless runs).
+    // Without an event sender, record visibility intent without creating a window.
     pub(crate) fn show_overview(&mut self) {
         // No ghost animation should keep playing beneath the overlay.
         // Aborting BEFORE the model build also clears `ghost_handles`, so
@@ -637,15 +586,9 @@ impl AppState {
         }
     }
 
-    /// Hide the overview with the animated zoom-out close toward
-    /// `target_workspace` (`None` = the active workspace).
-    ///
-    /// Design choice: `OverviewOverlay::hide_animated` is non-blocking —
-    /// the overlay glides its live thumbnails back on its own timer
-    /// thread and hides itself when done, while the daemon proceeds with
-    /// its focus/switch flow immediately. The workspace switch composing
-    /// in underneath the closing overlay is the Task View look; deferring
-    /// the activate flow until the zoom ends would just feel laggy.
+    // Do not wait for the overlay's timer-thread zoom-out: the workspace switch
+    // composes underneath it while the daemon proceeds with activation.
+    // None closes toward the active workspace.
     pub(crate) fn hide_overview_animated(&mut self, target_workspace: Option<usize>) {
         let was_open = self.overview_open;
         if let Some(overlay) = &self.overview_overlay {
@@ -657,9 +600,6 @@ impl AppState {
         }
     }
 
-    /// Rebuild and push a fresh model while the overview is open (a
-    /// window closed or appeared underneath it). Hides the overview when
-    /// the last window on the monitor is gone.
     pub(crate) fn refresh_overview_model(&mut self) {
         if !self.overview_open {
             return;
@@ -706,7 +646,6 @@ mod tests {
         )
     }
 
-    /// Insert tiled windows into workspace `ws_idx` on monitor 1.
     fn add_windows(state: &mut AppState, ws_idx: usize, wids: &[u64]) {
         let ws = state.ensure_workspace_exists(1, ws_idx).unwrap();
         for &wid in wids {
@@ -1042,7 +981,6 @@ mod tests {
         let mut state = test_state();
         add_windows(&mut state, 0, &[101]);
         add_windows(&mut state, 2, &[201, 202]);
-        // Workspace 1 stays empty and must not produce a row.
         state.ensure_workspace_exists(1, 1);
 
         let (overlay_rect, model) = state.build_overview_model().expect("model");
@@ -1071,7 +1009,6 @@ mod tests {
         let (_, model) = state.build_overview_model().expect("model");
         let active: Vec<bool> = model.rows.iter().map(|r| r.is_active).collect();
         assert_eq!(active, vec![false, true]);
-        // Selection lives on the active row only (its focused window).
         assert!(model.rows[1].cards.iter().any(|c| c.selected));
         assert!(model.rows[0].cards.iter().all(|c| !c.selected));
     }
@@ -1081,7 +1018,7 @@ mod tests {
         let mut state = test_state();
         add_windows(&mut state, 0, &[101, 102, 103]);
         add_windows(&mut state, 1, &[201]);
-        // A floating window partially outside the work area must clamp.
+        // Fit a partially off-work-area float into the panel with the whole strip.
         state
             .workspaces
             .get_mut(&1)
@@ -1129,8 +1066,6 @@ mod tests {
             );
             assert_eq!(row.label_strip.height, LABEL_STRIP_H);
         }
-        // The accent comes from the configured focus-border color (or the
-        // platform default when unparseable / high contrast handled there).
         let expected = state.border_color_bgr().unwrap_or(DEFAULT_ACCENT_BGR);
         assert_eq!(model.accent_bgr, expected);
         assert_ne!(model.accent_bgr, 0, "accent must be a real color");
@@ -1298,9 +1233,6 @@ mod tests {
                 ring
             );
         }
-        // The body insets reserve room: the ring clears the panel edges,
-        // the label strip, and the 1px panel frame (the active accent
-        // ring sits OUTSIDE the panel now) by the panel padding.
         assert!(ring.x >= row.panel.x + ROW_INNER_PAD);
         assert!(ring.x + ring.width <= row.panel.x + row.panel.width - ROW_INNER_PAD + 2);
         assert!(ring.y >= row.label_strip.y + row.label_strip.height + ROW_INNER_PAD);
@@ -1321,8 +1253,6 @@ mod tests {
             (0, 0),
             "ring conveys nothing when everything is visible"
         );
-        // No boundary reserve and no phantom viewport width: the panel
-        // hugs the cards (widest card + inset + body inset).
         let content_right = row
             .cards
             .iter()
@@ -1414,7 +1344,7 @@ mod tests {
     fn test_ring_centers_vertically_in_panel_body() {
         let mut state = test_state();
         state.config.appearance.active_border_width = 4;
-        // Strips wider than the viewport so both rows show their ring.
+        // Both strips overflow; only the active row should show its ring.
         add_windows(&mut state, 0, &[101, 102, 103, 104]);
         add_windows(&mut state, 1, &[201, 202, 203, 204]);
         for ws_idx in [0, 1] {
@@ -1431,7 +1361,6 @@ mod tests {
         for row in &model.rows {
             let ring = row.viewport;
             if !row.is_active {
-                // The viewport ring belongs to the active workspace only.
                 assert_eq!(ring.height, 0, "inactive rows must not show a ring");
                 continue;
             }
@@ -1566,9 +1495,7 @@ mod tests {
     #[test]
     fn test_panels_wrap_content_left_aligned() {
         let mut state = test_state();
-        // Row 0: a single window — content is just the viewport region.
         add_windows(&mut state, 0, &[101]);
-        // Row 1: a strip much wider than the viewport.
         add_windows(&mut state, 1, &[201, 202, 203, 204]);
         state
             .workspaces
@@ -1643,7 +1570,6 @@ mod tests {
         );
         let card = &row.cards[0];
         assert_eq!(card.window_id, fs_wid);
-        // The single card shows the full viewport: work-area aspect.
         let aspect = f64::from(card.rect.width) / f64::from(card.rect.height);
         let wa_aspect = 1920.0 / 1040.0;
         assert!(
@@ -1750,7 +1676,6 @@ mod tests {
             assert!(ws.mark_minimized(201));
             assert!(ws.mark_minimized(202));
         }
-        // Workspace 2: a lone minimized floating window.
         {
             let ws = state.ensure_workspace_exists(1, 2).unwrap();
             ws.add_floating(301, Rect::new(100, 100, 400, 300)).unwrap();
@@ -1774,19 +1699,12 @@ mod tests {
         assert!(state.build_overview_model().is_none());
     }
 
-    // Overlay-creation failure (show_overview leaving overview_open false)
-    // is not unit-testable: OverviewOverlay::new is only reached when an
-    // overview_event_tx is installed, and constructing one spawns a real
-    // top-level window — never done under cfg(test). Verified by
-    // inspection: the Err arm warns and returns before the flag is set.
-
     #[test]
     fn test_hide_overview_restores_foreground_focus() {
         let mut state = test_state();
         add_windows(&mut state, 0, &[101]);
         state.toggle_overview();
         assert!(state.overview_open);
-        // Simulate the overlay having taken the OS foreground.
         state.previous_focused_hwnd = None;
         state.toggle_overview();
         assert!(!state.overview_open);
@@ -1919,8 +1837,6 @@ mod tests {
         let work_area = Rect::new(0, 0, 1920, 1040);
         let placements = state.workspaces[&1][0].compute_placements(work_area);
         let (_, model) = state.build_overview_model().expect("model");
-        // Windows visible in the real viewport must have from_rects that
-        // match their actual scrolled placements.
         for p in placements
             .iter()
             .filter(|p| p.visibility == Visibility::Visible)
@@ -1946,8 +1862,6 @@ mod tests {
         add_windows(&mut state, 1, &[201]);
 
         let (_, model) = state.build_overview_model().expect("model");
-        // The close animation may target any row: every card carries a
-        // from_rect (the would-be placement when that workspace shows).
         for row in &model.rows {
             for card in &row.cards {
                 assert!(
@@ -1964,7 +1878,6 @@ mod tests {
         let mut state = test_state();
         add_windows(&mut state, 0, &[101]);
         state.config.animation.overview_duration_ms = 175;
-        // The overview no longer borrows the layout duration.
         state.config.animation.layout_duration_ms = 999;
         state.reduce_motion = false;
 

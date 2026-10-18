@@ -1,14 +1,5 @@
-//! Persistent animation worker thread using DwmFlush for vsync-aligned frame pacing.
-//!
-//! Instead of spawning a new OS thread per animation frame (the old `AnimationTick` approach),
-//! this module maintains a single worker thread that:
-//! 1. Blocks on a channel when idle (zero CPU)
-//! 2. Applies window placements via DeferWindowPos
-//! 3. Calls DwmFlush() to block until the next compositor vsync
-//! 4. Briefly waits for the submitted visible moves to drain
-//! 5. Sends the result back to the main event loop
-//!
-//! This eliminates per-frame thread spawn overhead and naturally adapts to any refresh rate.
+//! DwmFlush aligns worker frames with compositor vsync; the worker blocks on
+//! its command channel while idle.
 
 use leopardwm_core_layout::{Rect, WindowPlacement};
 use leopardwm_platform_win32::{PlacementCache, PlatformConfig};
@@ -18,7 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
-/// Data sent to the worker for each animation frame.
 pub struct FrameRequest {
     /// Placements driven via per-frame `SetWindowPos` on the live HWND.
     /// Excludes any windows being driven via DWM thumbnail (those are in
@@ -46,9 +36,7 @@ pub struct GhostFrame {
     pub visible: bool,
 }
 
-/// Result sent back from the worker after applying a frame.
 pub struct FrameResult {
-    /// Whether the placements were applied successfully.
     pub apply_result: Result<(), String>,
     /// How long the frame took (apply + vsync + bounded move-drain wait).
     #[allow(dead_code)]
@@ -82,15 +70,11 @@ impl FrameResult {
     }
 }
 
-/// Commands the main thread can send to the worker.
 enum WorkerCommand {
     /// Apply a frame of animation.
     Frame(FrameRequest),
-    /// Run an 8-frame crossfade on owned thumbnail handles, then drop them.
-    /// Worker takes ownership of `entries`; each `CrossfadeEntry::Drop`
-    /// calls `thumbnail::unregister_raw`, so panic-unwind and normal exit
-    /// both unregister cleanly. After the fade (or abort), worker sends
-    /// `DaemonEvent::CrossfadeComplete { epoch }`.
+    /// Worker owns the thumbnails until the fade completes or is preempted.
+    /// Drop unregisters them before `CrossfadeComplete` releases the daemon barrier.
     Crossfade {
         epoch: u64,
         entries: Vec<CrossfadeEntry>,
@@ -142,7 +126,6 @@ impl Drop for CrossfadeEntry {
     }
 }
 
-/// Handle to the persistent animation worker thread.
 pub struct AnimationWorkerHandle {
     command_tx: std_mpsc::Sender<WorkerCommand>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -309,7 +292,6 @@ impl AnimationWorkerHandle {
 
 impl Drop for AnimationWorkerHandle {
     fn drop(&mut self) {
-        // Send shutdown command (ignore error if worker already exited)
         let _ = self.command_tx.send(WorkerCommand::Shutdown);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -317,10 +299,6 @@ impl Drop for AnimationWorkerHandle {
     }
 }
 
-/// The worker thread's main loop.
-///
-/// Blocks on `command_rx.recv()` when no animation is active (zero CPU).
-/// For each frame: apply placements, DwmFlush, bounded move-drain wait, then report.
 fn worker_loop(
     command_rx: std_mpsc::Receiver<WorkerCommand>,
     event_tx: tokio::sync::mpsc::Sender<super::DaemonEvent>,
@@ -333,9 +311,6 @@ fn worker_loop(
     let mut pending: Option<WorkerCommand> = None;
 
     loop {
-        // Block until we receive a command (zero CPU when idle), unless a
-        // pending command was buffered by a preempted crossfade — then we
-        // process it before touching the channel.
         let command = match pending.take() {
             Some(cmd) => cmd,
             None => match command_rx.recv() {
@@ -435,10 +410,8 @@ fn worker_loop(
                     continue;
                 }
 
-                // Apply window placements, skipping unchanged windows via cache.
-                // Animation frames are SWP_ASYNCWINDOWPOS so the sticky-compositor
-                // nudge inside `apply_placements` is a no-op; pass `false` to keep
-                // the call signature explicit.
+                // Animation frames use SWP_ASYNCWINDOWPOS, so the sticky-compositor
+                // nudge in `apply_placements` is a no-op; keep it disabled here.
                 let apply_result = leopardwm_platform_win32::apply_placements(
                     &request.placements,
                     &request.platform_config,
@@ -460,7 +433,6 @@ fn worker_loop(
                     }
                 }
 
-                // Wait for next vsync via DwmFlush
                 dwm_flush_or_fallback();
 
                 // Hold the acknowledgement, not the next frame's application:
@@ -488,7 +460,6 @@ fn worker_loop(
                 result.physical_request_id = request.physical_request_id;
                 result.physical_invalidation_id = request.physical_invalidation_id;
 
-                // Send result back to main event loop
                 if event_tx
                     .blocking_send(super::DaemonEvent::AnimationFrameApplied(result))
                     .is_err()
@@ -509,19 +480,12 @@ fn drop_crossfade_target(entries: &mut Vec<CrossfadeEntry>, window_id: u64) -> b
     entries.len() != count_before
 }
 
-/// Run a cooperative crossfade on owned thumbnail entries. Between each
-/// of the 8 (typical) ease-in-cubic fade iterations, try_recv the
-/// command channel:
-/// - Matching `AbortCrossfade { epoch }` → break early.
-/// - Mismatching abort → discard.
-/// - Any other command → buffer in `pending` for the outer loop to
-///   process next, break early.
+/// Check preemption between fade iterations, not during DwmFlush. Matching
+/// target drops leave the other entries running; stale epoch commands are ignored.
+/// Other commands preempt the fade and run next in the outer loop.
 ///
-/// In all exit paths, `entries` drops here — each `CrossfadeEntry::Drop`
-/// calls `thumbnail::unregister_raw`, so panic-unwind and normal exit
-/// both unregister cleanly. After cleanup, emits `CrossfadeComplete { epoch }`
-/// so the daemon can clear `active_crossfade` and release the
-/// same-source-re-registration barrier.
+/// Unregister entries before `CrossfadeComplete` releases the daemon
+/// same-source re-registration barrier. Unwinding also unregisters via Drop.
 fn run_crossfade(
     command_rx: &std_mpsc::Receiver<WorkerCommand>,
     event_tx: &tokio::sync::mpsc::Sender<super::DaemonEvent>,
@@ -543,7 +507,6 @@ fn run_crossfade(
             aborted = true;
             break;
         }
-        // Cooperative preempt/abort check.
         match command_rx.try_recv() {
             Ok(WorkerCommand::DropCrossfadeTarget {
                 epoch: e,
@@ -581,10 +544,8 @@ fn run_crossfade(
                 // Mismatched epoch — discard (stale).
             }
             Ok(other) => {
-                // Preempt by another Frame / Crossfade / ClearCache /
-                // Shutdown. Buffer it and exit so outer loop processes
-                // it next, after entries drop and CrossfadeComplete
-                // is sent.
+                // Preserve channel order: run this after entries drop and
+                // CrossfadeComplete releases the re-registration barrier.
                 *pending = Some(other);
                 break;
             }
@@ -595,8 +556,6 @@ fn run_crossfade(
             }
         }
 
-        // Ease-in-cubic: opacity starts at 255 and decays.
-        // t in (0, 1]; opacity = (1 - t³) * 255.
         let t = (i + 1) as f64 / frames as f64;
         let opacity = ((1.0 - t.powi(3)) * 255.0).round().clamp(0.0, 255.0) as u8;
         for entry in &entries {
