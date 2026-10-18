@@ -1,9 +1,5 @@
-//! Configuration management for LeopardWM daemon.
-//!
-//! Configuration is loaded from TOML files in the following locations (in order):
-//! 1. `%APPDATA%/leopardwm/config.toml` (Windows standard)
-//! 2. `~/.config/leopardwm/config.toml` (Unix-style, for WSL compatibility)
-//! 3. `./config.toml` (current directory, for development)
+//! Config lookup uses the first existing path from [`config_paths`], or defaults
+//! when none exists. Loading also migrates legacy fields and merges hotkeys.
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -23,7 +19,6 @@ const BUILTIN_IGNORE_EXECUTABLES: &[&str] = &[
     "SnippingTool.exe",       // Screen capture overlay — breaks when repositioned
 ];
 
-/// Main configuration structure for LeopardWM.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -55,7 +50,6 @@ pub struct Config {
     pub overview: OverviewConfig,
 }
 
-/// Overview-mode configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewConfig {
@@ -106,7 +100,6 @@ impl WorkspacesConfig {
     }
 }
 
-/// Layout-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutConfig {
@@ -208,8 +201,7 @@ impl Default for LayoutConfig {
 }
 
 impl LayoutConfig {
-    /// The width fraction new columns open at: the `default_width_preset`-th
-    /// preset (1-based), falling back to the first preset if out of range.
+    /// Select the 1-based default preset; fall back to the first, or 0.5 if empty.
     pub fn default_width_fraction(&self) -> f64 {
         let idx = self.default_width_preset.saturating_sub(1);
         self.width_presets
@@ -219,10 +211,9 @@ impl LayoutConfig {
             .unwrap_or(0.5)
     }
 
-    /// Compute the default column width in pixels for a given viewport width,
-    /// using the configured default width preset as a fraction.
-    /// Formula: `width = fraction * (viewport - OL - OR + gap) - gap`
-    /// This is independent of column count — same result whether 1 or 10 columns.
+    /// Convert the selected fraction using usable viewport width plus one gap,
+    /// then subtract the gap, round down, and enforce a 100 px minimum.
+    /// The result is independent of column count.
     pub fn default_column_width_px(&self, viewport_width: i32) -> i32 {
         let base = viewport_width
             .saturating_sub(self.outer_gap_left.max(0))
@@ -238,8 +229,7 @@ impl LayoutConfig {
     pub fn migrate_outer_gap(&mut self) {
         if let Some(og) = self.outer_gap.take() {
             let og = og.max(0);
-            // Only migrate if the new fields are still at defaults, meaning
-            // the user's config only had the old `outer_gap` key.
+            // Preserve per-side customization; migrate only when all sides equal defaults.
             let d = default_outer_gap();
             if self.outer_gap_left == d
                 && self.outer_gap_right == d
@@ -255,7 +245,6 @@ impl LayoutConfig {
     }
 }
 
-/// Centering mode configuration (wrapper for serialization).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CenteringModeConfig {
@@ -279,12 +268,11 @@ impl From<CenteringModeConfig> for CenteringMode {
     }
 }
 
-/// Appearance-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceConfig {
     pub language: String,
-    /// Whether to highlight the active window border (Windows 11+).
+    /// Whether to highlight the active window with a border overlay.
     #[serde(default = "default_true")]
     pub active_border: bool,
 
@@ -382,7 +370,6 @@ pub enum TaskbarButtons {
     ShowAll,
 }
 
-/// Behavior-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, remote = "Self")]
 pub struct BehaviorConfig {
@@ -456,8 +443,7 @@ pub struct BehaviorConfig {
 
     /// Warp the mouse cursor onto the focused window after a focus-navigation
     /// command (focus left/right/up/down/next/prev/start/end and the monitor
-    /// focus/move commands). The inverse of `focus_follows_mouse`. Off by
-    /// default.
+    /// focus/move commands). Off by default.
     #[serde(default = "default_false")]
     pub mouse_follows_focus: bool,
 
@@ -480,7 +466,6 @@ pub enum NewWindowMonitor {
     Focused,
 }
 
-/// Placement for newly opened tiled windows.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NewWindowPlacement {
@@ -549,7 +534,6 @@ impl<'de> Deserialize<'de> for BehaviorConfig {
     }
 }
 
-// Default value functions for serde
 fn default_gap() -> i32 {
     10
 }
@@ -581,10 +565,6 @@ fn default_active_border_width() -> u32 {
 fn default_active_border_position() -> String {
     "outside".to_string()
 }
-
-// ============================================================================
-// Window Rules
-// ============================================================================
 
 /// A rule for per-window behavior.
 ///
@@ -696,7 +676,6 @@ pub enum CornerStyle {
 }
 
 impl CornerStyle {
-    /// Convert to a pixel radius.
     pub fn radius_px(self) -> f32 {
         match self {
             CornerStyle::Square => 0.0,
@@ -736,15 +715,11 @@ impl Default for HotkeyConfig {
         Self {
             scroll_modifier: default_scroll_modifier(),
             disabled: Vec::new(),
-            // Defaults come from the single hotkey catalog in `ipc::hotkeys`.
             bindings: leopardwm_ipc::hotkeys::default_bindings_map(),
         }
     }
 }
 
-/// Gesture bindings for touchpad support.
-///
-/// Maps touchpad gestures to commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GestureConfig {
@@ -968,7 +943,6 @@ impl Default for AnimationConfig {
     }
 }
 
-/// A warning generated during config validation.
 #[derive(Debug, Clone)]
 pub struct ConfigWarning {
     pub field: String,
@@ -1026,7 +1000,6 @@ impl CompiledWindowRule {
         self.match_max_width.is_some() || self.match_max_height.is_some()
     }
 
-    /// Check if this compiled rule matches a window.
     pub fn matches(
         &self,
         class_name: &str,
@@ -1085,19 +1058,15 @@ pub(crate) fn canonical_action_id(action: &str) -> String {
         .unwrap_or(normalized)
 }
 
-/// Deprecated hotkey command names that should be removed during migration.
 const DEPRECATED_HOTKEY_COMMANDS: &[&str] = &["width_third", "width_half", "width_two_thirds"];
 
-/// Hotkey command renames: (old_name, new_name).
 const HOTKEY_COMMAND_RENAMES: &[(&str, &str)] = &[
     ("resize_grow", "cycle_width_up"),
     ("resize_shrink", "cycle_width_down"),
 ];
 
 impl Config {
-    /// Migrate deprecated hotkey bindings: rename old commands and remove obsolete ones.
     fn migrate_hotkey_bindings(bindings: &mut HashMap<String, String>) {
-        // Rename old command names to new ones
         for (old, new) in HOTKEY_COMMAND_RENAMES {
             for value in bindings.values_mut() {
                 if value == old {
@@ -1105,18 +1074,10 @@ impl Config {
                 }
             }
         }
-        // Remove bindings for deprecated commands
         bindings.retain(|_, cmd| !DEPRECATED_HOTKEY_COMMANDS.contains(&cmd.as_str()));
     }
 
-    /// Load configuration from standard locations.
-    ///
-    /// Tries the following locations in order:
-    /// 1. `%APPDATA%/leopardwm/config.toml`
-    /// 2. `~/.config/leopardwm/config.toml`
-    /// 3. `./config.toml`
-    ///
-    /// Returns default config if no file is found.
+    /// Load the first existing path from [`config_paths`], or defaults if none exists.
     pub fn load() -> Result<Self> {
         let paths = config_paths();
 
@@ -1185,7 +1146,6 @@ impl Config {
             }
         }
 
-        // gap must be >= 0
         if self.layout.gap < 0 {
             warnings.push(ConfigWarning {
                 field: "layout.gap".to_string(),
@@ -1194,7 +1154,6 @@ impl Config {
             self.layout.gap = 0;
         }
 
-        // outer gaps must be >= 0
         for (field, val) in [
             ("layout.outer_gap_left", &mut self.layout.outer_gap_left),
             ("layout.outer_gap_right", &mut self.layout.outer_gap_right),
@@ -1210,7 +1169,6 @@ impl Config {
             }
         }
 
-        // width_presets must not be empty
         if self.layout.width_presets.is_empty() {
             warnings.push(ConfigWarning {
                 field: "layout.width_presets".to_string(),
@@ -1219,7 +1177,6 @@ impl Config {
             self.layout.width_presets = default_width_presets();
         }
 
-        // default_width_preset must be a valid 1-based index into width_presets
         let preset_count = self.layout.width_presets.len();
         if self.layout.default_width_preset == 0 || self.layout.default_width_preset > preset_count
         {
@@ -1233,7 +1190,6 @@ impl Config {
             self.layout.default_width_preset = 1;
         }
 
-        // height_presets must not be empty
         if self.layout.height_presets.is_empty() {
             warnings.push(ConfigWarning {
                 field: "layout.height_presets".to_string(),
@@ -1242,7 +1198,6 @@ impl Config {
             self.layout.height_presets = default_height_presets();
         }
 
-        // focus_follows_mouse_delay_ms must be >= 50 when enabled
         if self.behavior.focus_follows_mouse && self.behavior.focus_follows_mouse_delay_ms < 50 {
             warnings.push(ConfigWarning {
                 field: "behavior.focus_follows_mouse_delay_ms".to_string(),
@@ -1254,7 +1209,6 @@ impl Config {
             self.behavior.focus_follows_mouse_delay_ms = 50;
         }
 
-        // snap_hints.duration_ms must be >= 50 when enabled
         if self.snap_hints.enabled && self.snap_hints.duration_ms < 50 {
             warnings.push(ConfigWarning {
                 field: "snap_hints.duration_ms".to_string(),
@@ -1266,7 +1220,6 @@ impl Config {
             self.snap_hints.duration_ms = 50;
         }
 
-        // active_border_color must be exactly 6 hex characters
         {
             let color = &self.appearance.active_border_color;
             let is_valid = color.len() == 6 && color.chars().all(|c| c.is_ascii_hexdigit());
@@ -1282,9 +1235,8 @@ impl Config {
             }
         }
 
-        // Tab strip colors must each be exactly 6 hex characters; height
-        // is clamped to a sane range so a typo doesn't make the strip
-        // invisible (height=1) or eat the screen (height=10000).
+        // Invalid strip heights reset to the default so a typo cannot hide the
+        // strip or make it consume the screen. Colors require six hex digits.
         for (field, value, default_fn) in [
             (
                 "appearance.tab_strip_bg",
@@ -1343,7 +1295,6 @@ impl Config {
             self.appearance.tab_strip_height = default_tab_strip_height();
         }
 
-        // behavior.log_level must be one of trace/debug/info/warn/error
         {
             let normalized = self.behavior.log_level.to_lowercase();
             let valid = matches!(
@@ -1513,7 +1464,6 @@ impl Config {
         compiled
     }
 
-    /// Load configuration from a specific path.
     pub fn load_from_path(path: &PathBuf) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -1521,10 +1471,8 @@ impl Config {
         let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
 
-        // Migrate legacy `outer_gap` → per-side outer gap fields.
         config.layout.migrate_outer_gap();
 
-        // Migrate deprecated hotkey command names.
         Self::migrate_hotkey_bindings(&mut config.hotkeys.bindings);
 
         Self::merge_default_hotkeys(&mut config.hotkeys);
@@ -1532,10 +1480,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Re-add default bindings for commands the user has neither bound nor
-    /// disabled. This surfaces new hotkeys to existing configs across updates
-    /// without overriding customizations — and without resurrecting a binding
-    /// the user intentionally cleared (those go in `hotkeys.disabled`).
+    /// Merge defaults without replacing explicitly bound or disabled commands.
     fn merge_default_hotkeys(hotkeys: &mut HotkeyConfig) {
         let user_commands: HashSet<String> = hotkeys.bindings.values().cloned().collect();
         let disabled: HashSet<&String> = hotkeys.disabled.iter().collect();
@@ -1581,13 +1526,11 @@ impl Config {
 /// Returns Ok(Some(path)) if a file was created, Ok(None) if it already exists.
 pub fn ensure_config_on_disk() -> Result<Option<PathBuf>> {
     let paths = config_paths();
-    // If any config file already exists, do nothing
     for path in &paths {
         if path.exists() {
             return Ok(None);
         }
     }
-    // Write to the primary path
     let path = paths
         .first()
         .ok_or_else(|| anyhow::anyhow!("No config path available"))?
@@ -1606,7 +1549,6 @@ pub fn ensure_config_on_disk() -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-/// Generate commented default config content for hand-editing.
 fn generate_default_config_content() -> String {
     leopardwm_ipc::config_template::render_default_config()
 }
@@ -1625,13 +1567,11 @@ pub fn config_paths() -> Vec<PathBuf> {
         paths.push(home.join(".config").join("leopardwm").join("config.toml"));
     }
 
-    // 3. Current directory: ./config.toml
     paths.push(PathBuf::from("config.toml"));
 
     paths
 }
 
-/// Get the user's home directory.
 fn dirs_home() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
@@ -1714,15 +1654,14 @@ mod tests {
 
     #[test]
     fn test_config_partial_parse() {
-        // Config with only some fields should use defaults for the rest
         let toml_str = r#"
             [layout]
             gap = 20
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.layout.gap, 20);
-        assert_eq!(config.layout.outer_gap_left, 10); // default
-        assert_eq!(config.layout.width_presets, vec![0.333, 0.5, 0.667]); // default
+        assert_eq!(config.layout.outer_gap_left, 10);
+        assert_eq!(config.layout.width_presets, vec![0.333, 0.5, 0.667]);
     }
 
     #[test]
@@ -1904,20 +1843,17 @@ mod tests {
             disabled: Vec::new(),
             bindings: HashMap::new(),
         };
-        // User only binds focus_left to a custom key
         user.bindings
             .insert("Ctrl+Alt+X".to_string(), "focus_left".to_string());
 
         Config::merge_default_hotkeys(&mut user);
 
-        // User's custom binding preserved (default focus_left key not added)
         assert_eq!(
             user.bindings.get("Ctrl+Alt+X"),
             Some(&"focus_left".to_string())
         );
         assert!(!user.bindings.contains_key("Ctrl+Alt+H"));
 
-        // New commands from defaults are present
         assert_eq!(
             user.bindings.get("Ctrl+Alt+["),
             Some(&"move_window_left".to_string())
@@ -1930,8 +1866,6 @@ mod tests {
 
     #[test]
     fn test_merge_skips_disabled_commands() {
-        // A user who cleared (disabled) consume_from_right should NOT get its
-        // default binding re-added by the merge.
         let mut hk = HotkeyConfig {
             scroll_modifier: default_scroll_modifier(),
             disabled: vec!["consume_from_right".to_string()],
@@ -1943,7 +1877,6 @@ mod tests {
             !hk.bindings.values().any(|c| c == "consume_from_right"),
             "disabled command should stay unbound after merge"
         );
-        // Other defaults are still merged in.
         assert!(hk.bindings.values().any(|c| c == "focus_left"));
     }
 
@@ -1994,16 +1927,13 @@ mod tests {
     #[test]
     fn test_default_width_preset_selects_fraction() {
         let mut config = LayoutConfig::default();
-        // Default is preset 1 (0.333).
         assert_eq!(config.default_width_fraction(), 0.333);
 
-        // Selecting the 2nd/3rd preset picks the matching fraction.
         config.default_width_preset = 2;
         assert_eq!(config.default_width_fraction(), 0.5);
         config.default_width_preset = 3;
         assert_eq!(config.default_width_fraction(), 0.667);
 
-        // Out-of-range (0 or beyond the list) falls back to the first preset.
         config.default_width_preset = 0;
         assert_eq!(config.default_width_fraction(), 0.333);
         config.default_width_preset = 99;
@@ -2013,7 +1943,7 @@ mod tests {
     #[test]
     fn test_default_width_preset_out_of_range_warns_and_clamps() {
         let mut config = Config::default();
-        config.layout.default_width_preset = 5; // only 3 presets
+        config.layout.default_width_preset = 5;
         let warnings = config.validate();
         assert!(warnings
             .iter()
@@ -2166,13 +2096,8 @@ mod tests {
         assert_eq!(config.behavior.focus_follows_mouse_delay_ms, 200);
     }
 
-    // =========================================================================
-    // Window Rule Edge Cases
-    // =========================================================================
-
     #[test]
     fn test_window_rule_multiple_matches_uses_first() {
-        // When multiple rules could match, the first one wins
         let rules = vec![
             WindowRule {
                 match_class: Some("Notepad".to_string()),
@@ -2194,7 +2119,7 @@ mod tests {
                 match_class: Some("Notepad".to_string()),
                 match_title: None,
                 match_executable: None,
-                action: WindowAction::Ignore, // Different action
+                action: WindowAction::Ignore,
                 width: None,
                 height: None,
                 corner_style: None,
@@ -2221,10 +2146,9 @@ mod tests {
 
     #[test]
     fn test_window_rule_regex_special_chars() {
-        // Test regex with special characters that need escaping
         let rule = WindowRule {
             match_class: None,
-            match_title: Some(r"^\[DEBUG\].*$".to_string()), // Escaped brackets
+            match_title: Some(r"^\[DEBUG\].*$".to_string()),
             match_executable: None,
             action: WindowAction::Ignore,
             width: None,
@@ -2246,7 +2170,6 @@ mod tests {
 
     #[test]
     fn test_window_rule_regex_case_sensitivity() {
-        // By default, regex is case-sensitive
         let rule = WindowRule {
             match_class: None,
             match_title: Some("Error".to_string()),
@@ -2266,12 +2189,11 @@ mod tests {
 
         let rule = compile_rule(rule);
         assert!(rule.matches("AnyClass", "Error Dialog", "app.exe", None));
-        assert!(!rule.matches("AnyClass", "error dialog", "app.exe", None)); // Case mismatch
+        assert!(!rule.matches("AnyClass", "error dialog", "app.exe", None));
     }
 
     #[test]
     fn test_window_rule_regex_case_insensitive() {
-        // Test case-insensitive regex with (?i) flag
         let rule = WindowRule {
             match_class: None,
             match_title: Some("(?i)error".to_string()),
@@ -2297,10 +2219,9 @@ mod tests {
 
     #[test]
     fn test_window_rule_invalid_regex_returns_false() {
-        // Invalid regex should not match anything
         let rule = WindowRule {
             match_class: None,
-            match_title: Some("[invalid(regex".to_string()), // Invalid regex
+            match_title: Some("[invalid(regex".to_string()),
             match_executable: None,
             action: WindowAction::Float,
             width: None,
@@ -2331,9 +2252,8 @@ mod tests {
 
     #[test]
     fn test_window_rule_empty_strings_match() {
-        // Test matching against empty strings
         let rule = WindowRule {
-            match_class: Some(".*".to_string()), // Match anything including empty
+            match_class: Some(".*".to_string()),
             match_title: None,
             match_executable: None,
             action: WindowAction::Float,
@@ -2350,13 +2270,12 @@ mod tests {
         };
 
         let rule = compile_rule(rule);
-        assert!(rule.matches("", "Title", "app.exe", None)); // Empty class matches .*
+        assert!(rule.matches("", "Title", "app.exe", None));
         assert!(rule.matches("SomeClass", "Title", "app.exe", None));
     }
 
     #[test]
     fn test_window_rule_width_height_optional() {
-        // Width and height are optional and independent
         let toml_str = r#"
             [[window_rules]]
             match_class = "Test"
@@ -2414,10 +2333,6 @@ mod tests {
             assert_eq!(compiled_width(invalid), None);
         }
     }
-
-    // =========================================================================
-    // Config Validation Tests
-    // =========================================================================
 
     #[test]
     fn test_validate_negative_gap_clamped() {
@@ -2481,7 +2396,6 @@ mod tests {
             config.animation.easing,
             leopardwm_core_layout::Easing::EaseOut
         );
-        // Reducing motion on battery is on by default (power saving).
         assert!(config.animation.reduce_motion_on_battery);
     }
 
@@ -2490,7 +2404,6 @@ mod tests {
         let toml = "[animation]\nreduce_motion_on_battery = false\n";
         let config: Config = toml::from_str(toml).expect("parse");
         assert!(!config.animation.reduce_motion_on_battery);
-        // A config that omits the field keeps the power-saving default.
         let config: Config = toml::from_str("[animation]\n").expect("parse");
         assert!(config.animation.reduce_motion_on_battery);
     }
@@ -2621,7 +2534,6 @@ mod tests {
             leopardwm_core_layout::Easing::EaseInOut
         );
         assert_eq!(config.animation.layout_duration_ms, 80);
-        // Unspecified fields fall back to defaults.
         assert_eq!(config.animation.scroll_duration_ms, 200);
         assert_eq!(config.animation.overview_duration_ms, 150);
     }
@@ -2649,11 +2561,8 @@ mod tests {
         let mut config = Config::default();
         config.workspaces.names = vec!["web".to_string(), "".to_string(), "  chat  ".to_string()];
         assert_eq!(config.workspaces.name_for(0).as_deref(), Some("web"));
-        // Empty entry -> unnamed.
         assert_eq!(config.workspaces.name_for(1), None);
-        // Whitespace is trimmed.
         assert_eq!(config.workspaces.name_for(2).as_deref(), Some("chat"));
-        // Out of range -> unnamed.
         assert_eq!(config.workspaces.name_for(8), None);
     }
 
@@ -2719,10 +2628,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Compiled Window Rule Tests
-    // =========================================================================
-
     #[test]
     fn test_compiled_window_rule_matches() {
         let config = Config {
@@ -2766,19 +2671,17 @@ mod tests {
         let compiled = config.compile_window_rules();
         assert_eq!(compiled.len(), 2 + BUILTIN_IGNORE_EXECUTABLES.len());
 
-        // First rule: class + title regex
         assert!(compiled[0].matches(
             "Chrome_WidgetWin_1",
             "YouTube - Google Chrome",
             "chrome.exe",
             None
         ));
-        assert!(!compiled[0].matches("Firefox", "YouTube", "firefox.exe", None)); // class doesn't match
-        assert!(!compiled[0].matches("Chrome_WidgetWin_1", "Google Chrome", "chrome.exe", None)); // title doesn't match
+        assert!(!compiled[0].matches("Firefox", "YouTube", "firefox.exe", None));
+        assert!(!compiled[0].matches("Chrome_WidgetWin_1", "Google Chrome", "chrome.exe", None));
 
-        // Second rule: executable only
         assert!(compiled[1].matches("AnyClass", "Any Title", "notepad.exe", None));
-        assert!(compiled[1].matches("AnyClass", "Any Title", "NOTEPAD.EXE", None)); // case insensitive
+        assert!(compiled[1].matches("AnyClass", "Any Title", "NOTEPAD.EXE", None));
         assert!(!compiled[1].matches("AnyClass", "Any Title", "wordpad.exe", None));
     }
 
@@ -2787,7 +2690,7 @@ mod tests {
         let config = Config {
             window_rules: vec![
                 WindowRule {
-                    match_class: Some("[invalid(regex".to_string()), // Invalid regex
+                    match_class: Some("[invalid(regex".to_string()),
                     match_title: None,
                     match_executable: None,
                     action: WindowAction::Float,
@@ -2823,7 +2726,6 @@ mod tests {
         };
 
         let compiled = config.compile_window_rules();
-        // First rule should be skipped due to invalid regex
         assert_eq!(compiled.len(), 1 + BUILTIN_IGNORE_EXECUTABLES.len());
         assert!(compiled[0].matches("ValidClass", "Any Title", "any.exe", None));
     }
@@ -3058,10 +2960,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Hex Color Validation Tests
-    // =========================================================================
-
     #[test]
     fn test_validate_hex_color_valid() {
         for color in ["ff0000", "FF0000"] {
@@ -3108,7 +3006,6 @@ mod tests {
         let mut config = Config::default();
         config.appearance.active_border_color = "#4285F4".to_string();
         let warnings = config.validate();
-        // Hash prefix makes it 7 chars, so it should be rejected
         assert_eq!(
             config.appearance.active_border_color,
             default_active_border_color()
@@ -3117,10 +3014,6 @@ mod tests {
             .iter()
             .any(|w| w.field == "appearance.active_border_color"));
     }
-
-    // =========================================================================
-    // Config Edge Case Tests
-    // =========================================================================
 
     #[test]
     fn test_empty_config_uses_defaults() {
@@ -3145,7 +3038,6 @@ mod tests {
         "#;
         let mut config: Config = toml::from_str(toml_str).unwrap();
         let warnings = config.validate();
-        // gap=0 and outer gaps=0 are valid (not negative)
         assert_eq!(config.layout.gap, 0);
         assert_eq!(config.layout.outer_gap_left, 0);
         assert_eq!(config.layout.outer_gap_right, 0);
@@ -3169,10 +3061,6 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.hotkeys.bindings.is_empty());
     }
-
-    // =========================================================================
-    // Regex Size Limit Test
-    // =========================================================================
 
     #[test]
     fn test_regex_size_limit_rejects_oversized_pattern() {
@@ -3211,10 +3099,6 @@ mod tests {
         assert!(small.matches("SmallClass", "Small Title", "small.exe", None));
         assert_eq!(small.action, WindowAction::Float);
     }
-
-    // =========================================================================
-    // Config Error-Path Tests
-    // =========================================================================
 
     #[test]
     fn test_invalid_toml_syntax_returns_error() {
