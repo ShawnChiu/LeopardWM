@@ -1,8 +1,5 @@
-//! Human-readable formatting of daemon IPC responses.
-
 use leopardwm_ipc::IpcResponse;
 
-/// Print a response in a human-readable format.
 pub(crate) fn print_response(response: &IpcResponse) {
     match response {
         IpcResponse::Ok => {
@@ -133,7 +130,6 @@ pub(crate) fn print_response(response: &IpcResponse) {
             println!("  Uptime: {}h {}m {}s", hours, mins, secs);
         }
         IpcResponse::HealthInfo { .. } => {
-            // Health command removed; display as generic success if received
             println!("OK");
         }
         IpcResponse::AutoStartState { enabled } => {
@@ -146,10 +142,8 @@ pub(crate) fn print_response(response: &IpcResponse) {
             println!("{}", if *value { "enabled" } else { "disabled" });
         }
         IpcResponse::Subscribed { events } => {
-            // Reaching this arm via the normal command path means the
-            // caller used send_command for Subscribe, which is wrong —
-            // Subscribe transitions the connection to stream mode and the
-            // dedicated `lwm subscribe` subcommand handles that flow.
+            // Subscription streams belong to the dedicated handler,
+            // not the single-response command path.
             println!("Subscribed (events: {:?}); stream mode active", events);
         }
         IpcResponse::WorkspaceStateReady { protocol_version } => {

@@ -1,5 +1,3 @@
-//! Clap argument definitions: CLI struct, subcommands, and direction enums.
-
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

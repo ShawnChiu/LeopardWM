@@ -1,9 +1,6 @@
-//! Mapping from parsed CLI commands to IPC commands.
-
 use crate::args::*;
 use leopardwm_ipc::IpcCommand;
 
-/// Convert CLI command to IPC command.
 pub(crate) fn to_ipc_command(cmd: &Commands) -> IpcCommand {
     match cmd {
         Commands::Focus { direction } => match direction {

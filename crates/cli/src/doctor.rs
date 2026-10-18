@@ -1,5 +1,3 @@
-//! Diagnostic checks (doctor) and log collection for bug reports.
-
 use crate::daemon_cmds::find_daemon_binary;
 use crate::ipc_client::{probe_daemon_running, send_command};
 use anyhow::Result;
@@ -13,7 +11,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Result of a single diagnostic check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CheckResult {
     Pass(String),
@@ -68,11 +65,8 @@ pub(crate) fn daemon_log_path(
     }
 }
 
-/// The `behavior.log_level` in the config file and what it writes. A missing
-/// file, missing key, or unrecognized value means info, as in daemon startup.
-/// The daemon applies the level only at startup, so this is the configured
-/// level, not necessarily the running daemon's. A file that exists but cannot
-/// be read is unknown, because the daemon may be able to read it.
+/// Configured `behavior.log_level`, not the running daemon's; a missing file, key, or unknown
+/// value means info, and an existing but unreadable file is unknown.
 pub(crate) fn configured_log_level(config: Option<(PathBuf, io::Result<String>)>) -> String {
     const LEVELS: [(&str, &str); 5] = [
         ("trace", "everything is written"),
@@ -186,7 +180,8 @@ impl CheckResult {
     }
 }
 
-/// Get the config file path (first one that exists, or the primary default).
+/// Returns the first existing config path, if any, and a display path that falls back to the
+/// primary default.
 pub(crate) fn doctor_config_path() -> (Option<PathBuf>, PathBuf) {
     let primary = ProjectDirs::from("", "", "leopardwm")
         .map(|dirs| dirs.config_dir().join("config.toml"))
@@ -212,7 +207,6 @@ pub(crate) fn doctor_config_path() -> (Option<PathBuf>, PathBuf) {
     (None, primary)
 }
 
-/// Validate that a file contains valid TOML.
 pub(crate) fn validate_toml_file(path: &std::path::Path) -> Result<(), String> {
     let content = fs::read_to_string(path).map_err(|e| format!("Cannot read file: {}", e))?;
     content
@@ -300,7 +294,6 @@ pub(crate) fn blocked_windows_check(
     }
 }
 
-/// Get the Windows version string.
 pub(crate) fn get_windows_version() -> String {
     #[cfg(windows)]
     {
@@ -323,7 +316,6 @@ pub(crate) fn get_windows_version() -> String {
     }
 }
 
-/// Handle the doctor command (run diagnostic checks).
 pub(crate) async fn handle_doctor() -> Result<()> {
     println!("LeopardWM Doctor");
     println!("===============");
@@ -468,7 +460,6 @@ pub(crate) async fn handle_doctor() -> Result<()> {
     Ok(())
 }
 
-/// Collect diagnostic logs into a text report for bug reports.
 pub(crate) async fn handle_collect_logs() -> Result<()> {
     println!("LeopardWM Log Collection");
     println!("=======================\n");
@@ -546,8 +537,6 @@ pub(crate) async fn handle_collect_logs() -> Result<()> {
     }
     println!();
 
-    // Watchdog tracing log. Daemon bootstrap stderr and early panics are kept
-    // separately in the daemon error log above.
     let watchdog_log_path = log_dir.join("leopardwm-watchdog.log");
     print!(
         "{}",
@@ -592,8 +581,7 @@ pub(crate) async fn handle_collect_logs() -> Result<()> {
     Ok(())
 }
 
-/// Format a log file as a collect-logs section. `tail_lines = None` dumps the
-/// whole file so dedicated capture reports are not truncated to last-100.
+/// Use `tail_lines = None` to preserve complete dedicated capture reports.
 pub(crate) fn format_file_section(heading: &str, path: &Path, tail_lines: Option<usize>) -> String {
     let mut out = format!("## {heading} ({}):\n", path.display());
     match fs::read_to_string(path) {

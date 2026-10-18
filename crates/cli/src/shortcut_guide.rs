@@ -1,5 +1,3 @@
-//! PowerToys Shortcut Guide manifest export.
-
 use crate::ipc_client::send_command;
 use anyhow::{Context, Result};
 use directories::BaseDirs;

@@ -1,9 +1,3 @@
-//! LeopardWM CLI
-//!
-//! Command-line interface for controlling the LeopardWM window manager.
-//!
-//! Commands are sent to the daemon via IPC (named pipe).
-
 mod args;
 mod command_map;
 mod config_cmds;
@@ -38,7 +32,6 @@ use window_inspect::handle_doctor_windows;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle locally-executed commands (do not use IPC command mapping)
     match cli.command {
         Commands::Run {
             no_apply,

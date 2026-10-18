@@ -1,22 +1,17 @@
-//! Config file management: init, reset, backup, restore, and template generation.
-
 use crate::args::ConfigAction;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;
 
-/// Generate default configuration content.
 pub(crate) fn generate_default_config() -> String {
     leopardwm_ipc::config_template::render_default_config()
 }
 
-/// Get the default config file path.
 pub(crate) fn default_config_path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "leopardwm").map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
-/// Handle the init command (generate default config).
 fn handle_init(output: Option<PathBuf>, force: bool, profile: Option<String>) -> Result<()> {
     let path = output
         .or_else(default_config_path)
@@ -59,7 +54,6 @@ fn handle_init(output: Option<PathBuf>, force: bool, profile: Option<String>) ->
     Ok(())
 }
 
-/// Generate config content for a named profile.
 pub(crate) fn generate_profile_config(profile: &str) -> String {
     use leopardwm_ipc::config_template::{render_config, TemplateOverrides};
 
@@ -78,12 +72,10 @@ pub(crate) fn generate_profile_config(profile: &str) -> String {
     })
 }
 
-/// Get the backup path for a config file.
 pub(crate) fn config_backup_path(config_path: &std::path::Path) -> PathBuf {
     config_path.with_extension("toml.bak")
 }
 
-/// Handle config subcommands (init, reset, backup, restore).
 pub(crate) fn handle_config(action: ConfigAction) -> Result<()> {
     let config_path = default_config_path().context("Could not determine config path.")?;
     let backup_path = config_backup_path(&config_path);

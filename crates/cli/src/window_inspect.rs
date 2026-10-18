@@ -1,5 +1,3 @@
-//! `lwm doctor windows` — read-only admission-path diagnostics.
-
 use anyhow::Result;
 use leopardwm_platform_win32::inspect::{inspect_windows, SkipReason, WindowInspection};
 use leopardwm_platform_win32::{
@@ -71,8 +69,7 @@ fn partition_for_display(
 
 fn run_watch(secs: u64, include_titles: bool, show_all: bool) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
-    // Full key includes verdicts so a stable hwnd+class re-prints when a verdict
-    // flips. Title is intentionally excluded: browser/editor titles thrash.
+    // Include verdict changes in deduplication, but ignore noisy browser/editor title changes.
     let mut seen: HashSet<WatchKey> = HashSet::new();
     let mut known_identities: HashSet<(u64, String)> = HashSet::new();
     let mut omitted_unique = 0usize;
@@ -158,11 +155,6 @@ fn run_watch(secs: u64, include_titles: bool, show_all: bool) -> Result<()> {
     Ok(())
 }
 
-/// Status line for a watch sample, if one should be emitted.
-///
-/// First failure reports; consecutive failures stay quiet; a success after
-/// failures reports recovery. Pure so the throttle/recovery rules can be unit
-/// tested without a live HWND.
 fn watch_sample_status_message(
     was_failing: bool,
     succeeded: bool,
@@ -301,10 +293,7 @@ fn display_or_empty(s: &str) -> &str {
     }
 }
 
-/// Single-line, control- and format-character-free form of an untrusted Win32
-/// string for report pasting. Escapes C0/C1 controls, Unicode format (Cf)
-/// characters, and U+2028/U+2029 line/paragraph separators; leaves ordinary
-/// class names intact.
+/// Escape untrusted Win32 text so pasted reports cannot inject controls or extra lines.
 fn sanitize_diag(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -321,8 +310,7 @@ fn sanitize_diag(s: &str) -> String {
     out
 }
 
-/// Unicode general category Cf (format) plus Zl/Zp line/paragraph separators.
-/// `char::is_control()` is Cc-only and misses these.
+/// `char::is_control()` misses Unicode format characters and line/paragraph separators.
 fn is_format_or_line_sep(c: char) -> bool {
     matches!(
         c,

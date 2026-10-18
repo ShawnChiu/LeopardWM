@@ -1,5 +1,3 @@
-//! Named-pipe IPC client: connect/retry, send/receive, and error classification.
-
 use anyhow::{Context, Result};
 use leopardwm_ipc::{pipe_name_candidates, IpcCommand, IpcResponse, MAX_IPC_MESSAGE_SIZE};
 use std::time::{Duration, Instant};
@@ -7,17 +5,13 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufRead
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::time::{sleep, timeout};
 
-/// Timeout budget for establishing an IPC connection to the daemon.
 pub(crate) const IPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Extended connect timeout budget for recovery commands that can race shutdown/startup.
 pub(crate) const IPC_RECOVERY_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
-/// Default timeout budget for daemon responses after request send.
 pub(crate) const IPC_DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Extended timeout for recovery commands that can race shutdown.
 pub(crate) const IPC_RECOVERY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
-/// How long to wait for daemon process/pipe teardown after stop-style commands.
 pub(crate) const SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
-/// Poll cadence for daemon shutdown confirmation.
 pub(crate) const SHUTDOWN_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// Fast-fail threshold for pure "pipe not found" states on command sends.
 pub(crate) const IPC_NOT_FOUND_FAST_FAIL_AFTER: Duration = Duration::from_millis(800);
@@ -253,14 +247,12 @@ where
     parse_ipc_response_frame(&frame, max_bytes)
 }
 
-/// Send a command to the daemon and return the response (with timeout).
 pub(crate) async fn send_command(cmd: IpcCommand) -> Result<IpcResponse> {
     let connect_timeout = command_connect_timeout(&cmd);
     let response_timeout = command_response_timeout(&cmd);
     send_command_with_timeouts(cmd, connect_timeout, response_timeout).await
 }
 
-/// Send command with explicit connect/response timeout budgets.
 async fn send_command_with_timeouts(
     cmd: IpcCommand,
     connect_timeout: Duration,
@@ -269,7 +261,6 @@ async fn send_command_with_timeouts(
     send_command_inner(cmd, connect_timeout, response_timeout).await
 }
 
-/// Inner implementation with separate connect/response timeout control.
 async fn send_command_inner(
     cmd: IpcCommand,
     connect_timeout: Duration,

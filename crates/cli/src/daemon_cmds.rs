@@ -1,5 +1,3 @@
-//! Daemon lifecycle and recovery handlers: run, stop, panic-revert, status, subscribe, autostart.
-
 use crate::args::AutostartAction;
 use crate::ipc_client::{
     error_chain_has_command_timeout, error_chain_has_connect_timeout,
@@ -94,9 +92,8 @@ fn spawn_daemon(safe_mode: bool) -> Result<u32> {
     let daemon_path = ensure_daemon_binary()?;
     let log_dir = leopardwm_ipc::log_dir();
     std::fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
-    // The daemon writes its own leopardwm-daemon.log; send its stdout to null
-    // so we don't open a second handle to the same file. Keep stderr for
-    // panics that fire before the tracing subscriber initializes.
+    // The daemon writes its own log, so null its stdout;
+    // keep stderr for panics before tracing starts.
     let stderr_path = log_dir.join("leopardwm-daemon.err.log");
     let stderr = File::create(&stderr_path).context("Failed to create daemon stderr log")?;
 
@@ -154,9 +151,7 @@ fn find_watchdog_binary() -> Option<PathBuf> {
 
 fn spawn_watchdog(safe_mode: bool) -> Result<u32> {
     let Some(watchdog_path) = find_watchdog_binary() else {
-        // Watchdog not bundled (e.g. dev build that didn't `cargo build` it).
-        // Fall back to direct daemon spawn rather than failing — preserves
-        // backwards-compatible behavior for users who build a partial workspace.
+        // Partial workspace builds may omit the watchdog; allow direct daemon startup.
         eprintln!(
             "leopardwm-watchdog binary not found alongside this CLI; \
              falling back to direct daemon spawn (no crash recovery)."
@@ -164,9 +159,7 @@ fn spawn_watchdog(safe_mode: bool) -> Result<u32> {
         return spawn_daemon(safe_mode);
     };
 
-    // Make sure the daemon binary is buildable / present too — the watchdog
-    // looks for it next to itself, so resolve it via the same search the
-    // direct-spawn path uses (covers the "ran from cargo target/" case).
+    // Build the daemon if it is missing; the watchdog itself only looks beside its own binary.
     ensure_daemon_binary()?;
 
     let log_dir = leopardwm_ipc::log_dir();
@@ -559,7 +552,6 @@ pub(crate) fn handle_emergency_uncloak() -> Result<()> {
         .context("Failed to execute local emergency visibility restore")
 }
 
-/// Parse user-facing event filter names into the shared IPC filter set.
 pub(crate) fn parse_event_kinds(
     events: Option<Vec<String>>,
 ) -> Result<std::collections::BTreeSet<EventKind>> {
@@ -843,7 +835,6 @@ async fn open_stream_command(
     Ok(client)
 }
 
-/// Subscribe to daemon events and stream them as newline-delimited JSON.
 pub(crate) async fn handle_subscribe(events: Option<Vec<String>>) -> Result<()> {
     let requested = parse_event_kinds(events)?;
     let workspace_state = requested.contains(&EventKind::WorkspaceState);
@@ -864,7 +855,6 @@ pub(crate) async fn handle_subscribe(events: Option<Vec<String>>) -> Result<()> 
     .await
 }
 
-/// Query and print one complete workspace-state snapshot as NDJSON.
 pub(crate) async fn handle_query_workspaces() -> Result<()> {
     let client = open_stream_command(IpcCommand::QueryWorkspaceState).await?;
     let (reader, _writer) = tokio::io::split(client);
@@ -874,7 +864,6 @@ pub(crate) async fn handle_query_workspaces() -> Result<()> {
     let mut stdout = tokio::io::stdout();
     forward_event_frames(&mut reader, &mut stdout, EventReadMode::WorkspaceQuery).await
 }
-/// Handle the autostart command (enable/disable Registry run key).
 pub(crate) fn handle_autostart(action: AutostartAction) -> Result<()> {
     use leopardwm_platform_win32::autostart;
 

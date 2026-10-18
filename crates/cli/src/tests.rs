@@ -1,5 +1,3 @@
-//! Unit tests for the CLI modules.
-
 use crate::args::*;
 use crate::command_map::*;
 use crate::config_cmds::*;
@@ -15,10 +13,6 @@ use leopardwm_ipc::{
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
-
-// =========================================================================
-// to_ipc_command tests
-// =========================================================================
 
 #[test]
 fn test_wrap_cycle_verbs_map_to_ipc() {
@@ -711,10 +705,6 @@ fn test_cli_export_shortcut_guide_rejects_output_with_install() {
     assert!(result.is_err());
 }
 
-// =========================================================================
-// generate_default_config tests
-// =========================================================================
-
 #[test]
 fn test_generate_default_config_contains_layout_section() {
     let config = generate_default_config();
@@ -745,10 +735,6 @@ fn test_generate_default_config_contains_centering_mode() {
     assert!(config.contains("center") || config.contains("just_in_view"));
 }
 
-// =========================================================================
-// default_config_path tests
-// =========================================================================
-
 #[test]
 fn test_default_config_path_returns_some() {
     let path = default_config_path().expect("default config path must be available");
@@ -762,13 +748,8 @@ fn test_default_config_path_returns_some() {
     );
 }
 
-// =========================================================================
-// IPC timeout and framing tests
-// =========================================================================
-
 #[test]
 fn test_ipc_connect_timeout_is_reasonable() {
-    // Timeout should be between 1 and 30 seconds
     assert!(IPC_CONNECT_TIMEOUT >= Duration::from_secs(1));
     assert!(IPC_CONNECT_TIMEOUT <= Duration::from_secs(30));
 }
@@ -853,7 +834,6 @@ fn test_command_response_timeout_for_regular_command_uses_default() {
 
 #[test]
 fn test_empty_response_parse_fails() {
-    // Verify that an empty string cannot be parsed as a valid IPC response
     let result: Result<IpcResponse, _> = serde_json::from_str("");
     assert!(
         result.is_err(),
@@ -1305,10 +1285,6 @@ fn test_generate_default_config_contains_snap_hints() {
     assert!(config.contains("[snap_hints]"));
 }
 
-// =========================================================================
-// Doctor helper tests
-// =========================================================================
-
 #[test]
 fn test_doctor_config_path_returns_primary() {
     let (_found, display) = doctor_config_path();
@@ -1485,10 +1461,6 @@ fn test_get_windows_version_does_not_panic() {
     assert!(!version.is_empty());
 }
 
-// =========================================================================
-// CLI completeness tests
-// =========================================================================
-
 #[test]
 fn test_config_backup_path() {
     let config = PathBuf::from("/some/path/config.toml");
@@ -1585,10 +1557,6 @@ fn collect_logs_includes_full_gesture_capture_not_last_100() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// =========================================================================
-// Profile config tests
-// =========================================================================
 
 #[test]
 fn test_generate_profile_config_laptop() {

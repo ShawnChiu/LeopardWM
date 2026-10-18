@@ -1,14 +1,5 @@
-//! Opt-in exact-pipe diagnostics validation client.
-//!
-//! Ordinary `cargo test` compiles this module and runs the pure tests. The
-//! native client entrypoint is `#[ignore]` and fail-closed unless
-//! `LEOPARDWM_DIAGNOSTICS_VALIDATION=1`. It never consults
-//! `pipe_name_candidates()` and never opens the daily-driver pipe.
-//!
-//! Missing HealthInfo leaves Daemon integrity unavailable. The CLI RID is
-//! rendered separately and is never copied into the daemon line.
-//! Stop/PanicRevert are not sent by this client; negative-command coverage
-//! lives in the restricted host test seam.
+//! Native diagnostics is opt-in only: connect to the exact scoped pipe without candidate fallback,
+//! and verify the server identity before sending commands.
 
 use crate::doctor::{blocked_windows_check, format_integrity_line, integrity_check, CheckResult};
 use crate::ipc_client::parse_ipc_response_frame;
