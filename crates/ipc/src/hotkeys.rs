@@ -1,10 +1,4 @@
-//! Single source of truth for hotkey actions: default binding, human
-//! label, and display grouping for each bindable action.
-//!
-//! Both the daemon (default config, settings UI) and the CLI
-//! (`generate-config`) derive everything from [`hotkey_catalog`], so a new
-//! hotkey is defined exactly once instead of in `default_bindings`, the
-//! config template, the CLI template, and the settings JS tables.
+//! Single source of truth for hotkey actions: default bindings, labels, and display groups.
 
 use std::collections::HashMap;
 
@@ -528,10 +522,7 @@ mod tests {
 
     #[test]
     fn test_default_bindings_match_frozen_expected_set() {
-        // Golden set: the complete key-chord -> action map the catalog must
-        // produce. Guards against transcription drift (a typo would keep the
-        // count unchanged but change a binding). Update deliberately when the
-        // intended defaults change.
+        // Exact bindings catch transcription errors that leave the binding count unchanged.
         let expected: &[(&str, &str)] = &[
             ("Ctrl+Alt+H", "focus_left"),
             ("Ctrl+Alt+L", "focus_right"),
@@ -617,8 +608,6 @@ mod tests {
 
     #[test]
     fn test_every_catalog_action_has_command_mapping() {
-        // Drift guard: a new catalog row without a command_for_action
-        // mapping fails here instead of silently parsing to None.
         for a in hotkey_catalog() {
             assert!(
                 command_for_action(&a.id).is_some(),
@@ -677,7 +666,6 @@ mod tests {
         assert!(block.contains("# Focus\n"));
         assert!(block.contains("\"Ctrl+Alt+H\" = \"focus_left\"\n"));
         assert!(block.contains("\"Ctrl+Alt+,\" = \"consume_from_left\"\n"));
-        // Numbered workspaces are present.
         assert!(block.contains("\"Ctrl+Alt+1\" = \"switch_workspace_1\""));
     }
 }
