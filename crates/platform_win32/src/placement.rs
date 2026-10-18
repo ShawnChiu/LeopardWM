@@ -1792,7 +1792,9 @@ fn pending_async_entries(entries: &[DeferEntry], probe_owners: bool) -> AsyncPos
                     submissions.remove(&window_id);
                     deferrals.probe_expired.insert(window_id);
                 }
-                AsyncPositionState::Expired => {}
+                AsyncPositionState::Expired => {
+                    submissions.remove(&window_id);
+                }
             }
         }
     }
@@ -1868,7 +1870,18 @@ fn record_async_coordinates(
     let now = std::time::Instant::now();
     let mut guard = lock_async_positions();
     let submissions = guard.get_or_insert_with(HashMap::new);
-    let previous = submissions.get(&window_id).copied();
+    let previous = submissions.get(&window_id).copied().filter(|previous| {
+        if previous.wait_for_owner
+            || now.saturating_duration_since(previous.first_submitted)
+                < ASYNC_POSITION_PENDING_LIMIT
+        {
+            return true;
+        }
+        if origin == Some((previous.x, previous.y)) {
+            credit_applied_queued_move(window_id, *previous);
+        }
+        false
+    });
     let mut next = async_position_submission(previous, (x, y), now);
     if previous.is_none() {
         next.origin = origin;
@@ -2008,7 +2021,10 @@ pub fn pending_async_position(window_id: WindowId) -> bool {
             clear_queued_recovery(window_id);
             false
         }
-        AsyncPositionState::Expired => false,
+        AsyncPositionState::Expired => {
+            submissions.remove(&window_id);
+            false
+        }
     }
 }
 
@@ -4563,6 +4579,180 @@ mod tests {
             .as_mut()
         {
             answers.remove(&owner_thread);
+        }
+    }
+
+    #[test]
+    fn expired_queued_move_is_removed_by_pending_position() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = HiddenPopup::new(48, 48, 160, 120);
+        let _cleanup = ClearPlacementOnDrop(window.id);
+        let entry = DeferEntry {
+            hwnd: window.hwnd,
+            x: 300,
+            y: 100,
+            flags: SWP_ASYNCWINDOWPOS,
+            ..fresh_inset_entry(window.id, 0)
+        };
+        record_async_position(&entry, Some((48, 48)));
+        lock_async_positions()
+            .as_mut()
+            .unwrap()
+            .get_mut(&window.id)
+            .unwrap()
+            .first_submitted = std::time::Instant::now()
+            - ASYNC_POSITION_PENDING_LIMIT
+            - std::time::Duration::from_millis(1);
+
+        assert!(!pending_async_position(window.id));
+        assert!(
+            !lock_async_positions()
+                .as_ref()
+                .unwrap()
+                .contains_key(&window.id),
+            "expired queued move survived the public checker"
+        );
+        assert!(!mover::is_marked(window.id));
+    }
+
+    #[test]
+    fn expired_queued_move_is_removed_by_pending_entries() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = HiddenPopup::new(48, 48, 160, 120);
+        let _cleanup = ClearPlacementOnDrop(window.id);
+        let entry = DeferEntry {
+            hwnd: window.hwnd,
+            x: 300,
+            y: 100,
+            flags: SWP_ASYNCWINDOWPOS,
+            ..fresh_inset_entry(window.id, 0)
+        };
+        record_async_position(&entry, Some((48, 48)));
+        lock_async_positions()
+            .as_mut()
+            .unwrap()
+            .get_mut(&window.id)
+            .unwrap()
+            .first_submitted = std::time::Instant::now()
+            - ASYNC_POSITION_PENDING_LIMIT
+            - std::time::Duration::from_millis(1);
+
+        let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
+        assert!(deferrals.pending.is_empty());
+        assert!(deferrals.probe_expired.is_empty());
+        assert!(
+            !lock_async_positions()
+                .as_ref()
+                .unwrap()
+                .contains_key(&window.id),
+            "expired queued move survived the batch checker"
+        );
+        assert!(!mover::is_marked(window.id));
+    }
+
+    #[test]
+    fn expired_queued_move_resubmission_marks_never_applying_owner() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for probe_via_entries in [false, true] {
+            let window = HiddenPopup::new(48, 48, 160, 120);
+            let _cleanup = ClearPlacementOnDrop(window.id);
+            let mut entry = DeferEntry {
+                hwnd: window.hwnd,
+                x: 300,
+                y: 100,
+                flags: SWP_ASYNCWINDOWPOS,
+                ..fresh_inset_entry(window.id, 0)
+            };
+            record_async_position(&entry, Some((90, 90)));
+            {
+                let mut guard = lock_async_positions();
+                let previous = guard.as_mut().unwrap().get_mut(&window.id).unwrap();
+                previous.first_submitted = std::time::Instant::now()
+                    - ASYNC_POSITION_PENDING_LIMIT
+                    - std::time::Duration::from_millis(1);
+                previous.synchronous = true;
+            }
+            entry.x = 500;
+            entry.flags |= SWP_NOSIZE;
+            let before = std::time::Instant::now();
+            record_async_position(&entry, observed_async_position(window.hwnd));
+            let fresh = lock_async_positions().as_ref().unwrap()[&window.id];
+            std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
+            prepare_self_move_owner_probe(&window);
+            if probe_via_entries {
+                let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
+                assert!(deferrals.pending.is_empty());
+                assert!(deferrals.probe_expired.contains(&window.id));
+            } else {
+                assert!(!pending_async_position(window.id));
+            }
+            assert!(
+                mover::is_marked(window.id),
+                "an expired predecessor prevented marking a never-applying owner"
+            );
+            assert!(fresh.first_submitted >= before);
+            assert_eq!(fresh.origin, Some((48, 48)));
+            assert!(!fresh.synchronous);
+            assert_eq!(fresh.size, None);
+        }
+    }
+
+    #[test]
+    fn expired_queued_move_replacement_credits_observed_drain_once() {
+        let _owner_sweep = OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = HiddenPopup::new(48, 48, 160, 120);
+        let _cleanup = ClearPlacementOnDrop(window.id);
+        let mut entry = DeferEntry {
+            hwnd: window.hwnd,
+            x: 300,
+            y: 100,
+            flags: SWP_ASYNCWINDOWPOS | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+            ..fresh_inset_entry(window.id, 0)
+        };
+        record_async_position(&entry, observed_async_position(window.hwnd));
+        unsafe {
+            SetWindowPos(
+                window.hwnd,
+                None,
+                entry.x,
+                entry.y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+            .unwrap();
+        }
+        assert_eq!(observed_async_position(window.hwnd), Some((300, 100)));
+        lock_async_positions()
+            .as_mut()
+            .unwrap()
+            .get_mut(&window.id)
+            .unwrap()
+            .first_submitted = std::time::Instant::now()
+            - ASYNC_POSITION_PENDING_LIMIT
+            - std::time::Duration::from_millis(1);
+
+        for (target, should_mark) in [(500, false), (700, true)] {
+            entry.x = target;
+            record_async_position(&entry, observed_async_position(window.hwnd));
+            std::thread::sleep(RESPONSIVE_OWNER_DRAIN_WAIT + std::time::Duration::from_millis(10));
+            prepare_self_move_owner_probe(&window);
+            let deferrals = pending_async_entries(std::slice::from_ref(&entry), true);
+            assert!(deferrals.probe_expired.contains(&window.id));
+            assert!(deferrals.pending.is_empty());
+            assert_eq!(
+                mover::is_marked(window.id),
+                should_mark,
+                "replacement did not preserve single-use drain credit"
+            );
         }
     }
 
