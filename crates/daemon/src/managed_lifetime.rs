@@ -1,8 +1,6 @@
-//! Session-only identity for managed HWNDs.
-//!
-//! Separate from temporary-ignore tokens. A delayed Destroyed event keeps
-//! membership only when the managed property still matches the token recorded
-//! for that admission.
+//! Managed HWND identity is separate from temporary-ignore identity. A delayed
+//! Destroyed event preserves a recorded member when its property matches or
+//! the identity read is transient.
 
 use crate::state::{AppState, ScratchpadState, DRAG_PLACEHOLDER_HWND};
 use crate::temporary_ignore::IdentityReadError;
@@ -17,11 +15,10 @@ pub(crate) fn is_stashed_scratchpad(scratchpad: Option<ScratchpadState>, hwnd: u
 }
 
 impl AppState {
-    /// Stamp and record a managed lifetime. Stamp failure logs and leaves no record.
+    /// Stamp and record a managed lifetime; log stamp failures.
     ///
-    /// `admitted_at_event_ms` is the triggering Create/Show time. `None` (enumeration,
-    /// readmit, or any other eventless admission) records no Hidden-guard time and
-    /// drops one left by an older lifetime.
+    /// `admitted_at_event_ms` is the triggering Create/Show time. Eventless
+    /// admission records no Hidden-guard time and drops any older one.
     pub(crate) fn record_managed_lifetime(&mut self, hwnd: u64, admitted_at_event_ms: Option<u32>) {
         if hwnd == DRAG_PLACEHOLDER_HWND {
             return;
@@ -71,12 +68,8 @@ impl AppState {
         }
     }
 
-    /// Whether Destroyed should keep the current lifetime.
-    ///
-    /// A managed member with a record is kept only when the managed token
-    /// matches or the read is transient. No record uses the pre-existing
-    /// ignore-lifetime liveness check, so unrecorded members and temporary
-    /// ignores behave as before.
+    /// A recorded member survives Destroyed only on a matching token or a
+    /// transient read. Without a record, use ignore-lifetime liveness instead.
     pub(crate) fn destroyed_names_current_lifetime(&self, hwnd: u64) -> bool {
         if self.is_managed_member(hwnd) {
             if let Some(&recorded) = self.managed_lifetime_tokens.get(&hwnd) {
@@ -137,7 +130,6 @@ impl AppState {
         self.read_managed_identity(hwnd).ok().flatten()
     }
 
-    /// Token to store on a Hidden entry: the live property, else the record just departed.
     pub(crate) fn managed_token_for_hidden_record(
         &self,
         hwnd: u64,
@@ -146,7 +138,6 @@ impl AppState {
         self.readable_managed_token(hwnd).or(recorded)
     }
 
-    /// Drop the recorded lifetime and its admission time together.
     pub(crate) fn take_managed_lifetime_token(&mut self, hwnd: u64) -> Option<u64> {
         leopardwm_platform_win32::clear_suspected_oversize(hwnd);
         self.window_move_recheck_attempts.remove(&hwnd);

@@ -1,16 +1,7 @@
-//! System tray icon management for LeopardWM daemon.
-//!
-//! Provides a system tray icon with a context menu for common operations:
-//! - Pause/resume tiling
-//! - Quick toggles for common settings
-//! - Configuration access (Settings GUI, Edit Config, Reload)
-//! - Troubleshooting (Refresh, View Logs, Release All Windows)
-//! - Exit
-//!
 //! The tray icon and its hidden notification window live on a dedicated thread
-//! that runs a Win32 message pump. This is required for the right-click context
-//! menu to appear — the `tray-icon` crate needs `WM_RBUTTONUP` and related
-//! shell notification messages to be dispatched on the owning thread.
+//! that runs a Win32 message pump. The `tray-icon` crate needs
+//! `WM_RBUTTONUP` and related shell notifications dispatched on the owning
+//! thread for the context menu to appear.
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
@@ -23,9 +14,6 @@ use tray_icon::{
     TrayIconBuilder,
 };
 
-/// Minimal Win32 FFI for the tray icon message pump.
-///
-/// Only the functions needed to run a message loop and signal the thread.
 mod win32_msg {
     use std::ffi::c_void;
 
@@ -49,13 +37,9 @@ mod win32_msg {
 
     pub const WM_QUIT: u32 = 0x0012;
     pub const PM_NOREMOVE: u32 = 0x0000;
-    /// Application-private message: signal the thread to apply a tooltip update.
     pub const WM_APP_UPDATE_TOOLTIP: u32 = 0x8000; // WM_APP
-    /// Application-private message: signal the thread to update pause text.
     pub const WM_APP_UPDATE_PAUSE: u32 = 0x8001; // WM_APP + 1
-    /// Application-private message: signal the thread to sync quick-toggle check marks.
     pub const WM_APP_UPDATE_TOGGLES: u32 = 0x8002; // WM_APP + 2
-    /// Application-private message: signal the thread to refresh the update-status item.
     pub const WM_APP_UPDATE_RELEASE_INFO: u32 = 0x8003; // WM_APP + 3
 
     extern "system" {
@@ -74,7 +58,6 @@ mod win32_msg {
     }
 }
 
-/// Menu item IDs for tray context menu.
 mod menu_ids {
     pub const REFRESH: &str = "refresh";
     pub const RELOAD: &str = "reload";
@@ -100,51 +83,30 @@ mod menu_ids {
     pub const CHECK_UPDATES: &str = "check_updates";
 }
 
-/// Events emitted by the tray icon.
 #[derive(Debug, Clone)]
 pub enum TrayEvent {
-    /// User clicked "Refresh Windows" menu item.
     Refresh,
-    /// User clicked "Reload Config" menu item.
     Reload,
-    /// User clicked "Exit" menu item.
     Exit,
-    /// User clicked "Pause/Resume Tiling" menu item.
     TogglePause,
-    /// User clicked "Settings" menu item.
     OpenConfig,
-    /// User clicked the title / "About" menu item.
     OpenAbout,
-    /// User clicked "Edit Config" menu item.
     EditConfig,
-    /// User clicked "View Logs" menu item.
     ViewLogs,
-    /// User clicked "Release All Windows" menu item.
     ReleaseAllWindows,
-    /// User toggled "Active Border" check item.
     ToggleActiveBorder,
-    /// User toggled "Focus New Windows" check item.
     ToggleFocusNewWindows,
-    /// User toggled "Focus Follows Mouse" check item.
     ToggleFocusFollowsMouse,
     SetTaskbarButtons(crate::config::TaskbarButtons),
-    /// User toggled "Start with Windows" check item.
     ToggleAutoStart,
-    /// User selected "Center" centering mode.
     SetCenteringCenter,
-    /// User selected "Just in View" centering mode.
     SetCenteringJustInView,
-    /// User selected "On Overflow" centering mode.
     SetCenteringOnOverflow,
-    /// User selected "New Column" new-window placement.
     SetPlacementNewColumn,
-    /// User selected "In Focused Column" new-window placement.
     SetPlacementInColumn,
-    /// User clicked "Check for Updates" / "Update available" menu item.
     OpenReleasesPage,
 }
 
-/// Centering mode values for atomic storage.
 pub const CENTERING_CENTER: u8 = 0;
 pub const CENTERING_JUST_IN_VIEW: u8 = 1;
 pub const CENTERING_ON_OVERFLOW: u8 = 2;
@@ -170,11 +132,9 @@ struct SharedState {
     auto_start: AtomicBool,
     centering_mode: AtomicU8,
     placement_mode: AtomicU8,
-    /// `Some(tag)` when a newer release has been observed; `None` otherwise.
     available_update: Mutex<Option<String>>,
 }
 
-/// Items returned by `build_tray` that the message-loop thread needs to update.
 struct TrayItems {
     menu: Menu,
     pause_item: MenuItem,
@@ -193,7 +153,6 @@ struct TrayItems {
     update_item: MenuItem,
 }
 
-/// Initial state for quick-toggle menu items.
 pub struct QuickToggleState {
     pub language: String,
     pub active_border: bool,
@@ -215,20 +174,13 @@ pub struct QuickToggleState {
 pub struct TrayManager {
     shared: Arc<SharedState>,
     _event_sender: Arc<mpsc::Sender<TrayEvent>>,
-    /// Win32 thread ID of the message-loop thread (for `PostThreadMessageW`).
     msg_thread_id: u32,
-    /// Join handle for the message-loop thread.
     msg_thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Init handshake sent from the message-loop thread back to the caller.
 type InitResult = Result<u32, TrayError>;
 
 impl TrayManager {
-    /// Create a new tray manager with icon and context menu.
-    ///
-    /// The provided sender will receive tray events when menu items are clicked.
-    /// `initial` sets the starting check state for quick-toggle items.
     pub fn new(
         event_sender: mpsc::Sender<TrayEvent>,
         initial: QuickToggleState,
@@ -261,14 +213,12 @@ impl TrayManager {
             })
             .map_err(|e| TrayError::Build(format!("Failed to spawn tray thread: {e}")))?;
 
-        // Wait for the message-loop thread to finish building the tray icon.
         let thread_id = init_rx
             .recv()
             .map_err(|_| TrayError::Build("Tray thread exited during init".into()))??;
 
         quit_thread_id.store(thread_id, Ordering::SeqCst);
 
-        // Spawn thread to listen for menu events and forward them.
         let event_sender = Arc::new(event_sender);
         let menu_sender = Arc::downgrade(&event_sender);
         std::thread::Builder::new()
@@ -288,8 +238,6 @@ impl TrayManager {
             })
             .ok();
 
-        // Spawn thread for tray-icon clicks: double-click opens Settings
-        // (single/right click keep showing the context menu).
         // TrayIconEvent::receiver() is one process-global stream; this must
         // stay the only consumer or readers would compete for events.
         let click_sender = Arc::downgrade(&event_sender);
@@ -320,7 +268,6 @@ impl TrayManager {
         })
     }
 
-    /// Update the pause menu item text based on the current paused state.
     pub fn update_pause_text(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Relaxed);
         unsafe {
@@ -328,7 +275,6 @@ impl TrayManager {
         }
     }
 
-    /// Sync quick-toggle check marks with the current config state.
     pub fn update_quick_toggles(&self, toggles: &QuickToggleState) {
         if let Ok(mut language) = self.shared.language.lock() {
             *language = toggles.language.clone();
@@ -396,7 +342,6 @@ impl TrayManager {
             }
             *text = tooltip;
         }
-        // Wake the message-loop thread to apply the new tooltip.
         unsafe {
             win32_msg::PostThreadMessageW(
                 self.msg_thread_id,
@@ -509,7 +454,7 @@ fn run_tray_thread(
     }
 
     if init_tx.send(Ok(thread_id)).is_err() {
-        return; // Caller dropped the receiver.
+        return;
     }
 
     // Win32 message loop — pumps messages for the hidden tray-icon window.
@@ -709,7 +654,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
             .map_err(|e| TrayError::Menu(e.to_string()))
     };
 
-    // Title item (clickable — opens About section in Settings)
     let version = env!("CARGO_PKG_VERSION");
     append(&MenuItem::with_id(
         menu_ids::OPEN_ABOUT,
@@ -729,7 +673,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
     append(&toggle_pause)?;
     append(&PredefinedMenuItem::separator())?;
 
-    // Quick toggles
     let active_border_item = CheckMenuItem::with_id(
         menu_ids::TOGGLE_ACTIVE_BORDER,
         menu_label(&initial.language, "toggle_active_border"),
@@ -799,7 +742,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
     );
     append(&auto_start_item)?;
 
-    // Centering Mode submenu
     let centering_sub = Submenu::with_id(
         "centering",
         menu_label(&initial.language, "centering"),
@@ -837,7 +779,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
         .map_err(|e| TrayError::Menu(e.to_string()))?;
     append(&centering_sub)?;
 
-    // New Window Placement submenu
     let placement_sub = Submenu::with_id(
         "placement",
         menu_label(&initial.language, "placement"),
@@ -866,7 +807,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
     append(&placement_sub)?;
     append(&PredefinedMenuItem::separator())?;
 
-    // Update checker — relabels itself when a newer release is detected.
     let update_item = MenuItem::with_id(
         menu_ids::CHECK_UPDATES,
         menu_label(&initial.language, "check_updates"),
@@ -876,7 +816,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
     append(&update_item)?;
     append(&PredefinedMenuItem::separator())?;
 
-    // Configuration group
     append(&MenuItem::with_id(
         menu_ids::OPEN_CONFIG,
         menu_label(&initial.language, "open_config"),
@@ -897,7 +836,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
     ))?;
     append(&PredefinedMenuItem::separator())?;
 
-    // Troubleshooting submenu
     let troubleshoot = Submenu::with_id(
         "troubleshooting",
         menu_label(&initial.language, "troubleshooting"),
@@ -930,7 +868,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
     append(&troubleshoot)?;
     append(&PredefinedMenuItem::separator())?;
 
-    // Exit
     append(&MenuItem::with_id(
         menu_ids::EXIT,
         menu_label(&initial.language, "exit"),
@@ -938,7 +875,6 @@ fn build_tray(initial: &QuickToggleState) -> Result<(tray_icon::TrayIcon, TrayIt
         None,
     ))?;
 
-    // Create the tray icon with a simple embedded icon
     let icon = create_default_icon()?;
 
     let tray = TrayIconBuilder::new()
@@ -1029,7 +965,6 @@ fn map_menu_id_to_event(menu_id: &str) -> Option<TrayEvent> {
     }
 }
 
-/// Format the tray tooltip text (testable without requiring a real tray icon).
 pub fn format_tooltip_text(
     language: &str,
     window_count: usize,
@@ -1069,7 +1004,6 @@ pub fn format_tooltip_text(
     tooltip
 }
 
-/// Create the tray icon from the embedded 32x32 PNG.
 fn create_default_icon() -> Result<tray_icon::Icon, TrayError> {
     let png_bytes = include_bytes!("../../../assets/icon-32.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
@@ -1082,7 +1016,6 @@ fn create_default_icon() -> Result<tray_icon::Icon, TrayError> {
         .map_err(|e| TrayError::Icon(format!("PNG frame error: {e}")))?;
     buf.truncate(info.buffer_size());
 
-    // Convert RGB to RGBA if needed
     let rgba = if info.color_type == png::ColorType::Rgb {
         let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
         for chunk in buf.chunks(3) {
@@ -1098,7 +1031,6 @@ fn create_default_icon() -> Result<tray_icon::Icon, TrayError> {
         .map_err(|e| TrayError::Icon(e.to_string()))
 }
 
-/// Errors that can occur during tray operations.
 #[derive(Debug, Error)]
 pub enum TrayError {
     #[error("Failed to create menu: {0}")]
@@ -1220,7 +1152,6 @@ mod tests {
 
     #[test]
     fn test_tooltip_format_no_hotkey_mismatch() {
-        // When registered == requested, no mismatch line
         let tooltip = format_tooltip_text("en", 10, 2, false, Some((10, 10)), 1);
         assert_eq!(tooltip, "LeopardWM - Active (WS 1, 10 windows, 2 monitors)");
     }
@@ -1234,7 +1165,6 @@ mod tests {
 
     #[test]
     fn test_menu_ids_constants() {
-        // Ensure menu IDs are distinct
         let ids = [
             menu_ids::REFRESH,
             menu_ids::RELOAD,

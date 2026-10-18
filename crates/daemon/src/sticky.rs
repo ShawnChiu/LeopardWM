@@ -1,21 +1,16 @@
-//! Sticky windows: pin a window visible on every workspace.
-//!
-//! A sticky window is kept floating and re-homed to the active workspace
-//! whenever the workspace changes, so it appears to follow you everywhere.
-//! Session-scoped: the set is keyed by HWND and is not persisted across a
-//! daemon restart.
+//! Sticky windows follow workspace switches on their own monitor, preserving
+//! tiled or floating mode. The HWND set is session-only.
 
 use tracing::{info, warn};
 
 use crate::state::AppState;
 
 impl AppState {
-    /// Toggle "sticky" for the OS-focused window. Pinning floats the window
-    /// (so it can overlay any workspace) and adds it to the sticky set;
-    /// un-pinning removes it from the set and leaves it floating in place.
+    /// Pinning preserves tiled or floating mode; unpinning leaves the window
+    /// on its current workspace in that mode.
     pub(crate) fn toggle_sticky(&mut self) {
-        // Use the OS-foreground window: a sticky window is floating, which
-        // `Workspace::focused_window` does not report.
+        // Prefer tracked foreground focus because Workspace::focused_window
+        // does not report floating windows.
         let Some(wid) = self
             .previous_focused_hwnd
             .or_else(|| self.focused_workspace().and_then(|ws| ws.focused_window()))
@@ -25,7 +20,6 @@ impl AppState {
         };
 
         if self.sticky_windows.remove(&wid) {
-            // Un-pin: stop following workspaces, but leave it floating.
             if let Some((mon, ws_idx)) = self.find_window_workspace(wid) {
                 if let Some(ws) = self
                     .workspaces
@@ -59,10 +53,8 @@ impl AppState {
         info!("Sticky: pinned window {}", wid);
     }
 
-    /// Move every sticky window onto the focused monitor's active workspace
-    /// (preserving its floating rect), so pinned windows follow workspace
-    /// switches. Drops any sticky window that no longer exists. Call this
-    /// after changing the active workspace, before the layout is applied.
+    /// Rehome sticky windows on the focused monitor after switching its active
+    /// workspace and before applying layout. Other monitors stay untouched.
     pub(crate) fn rehome_sticky_windows(&mut self) {
         if self.sticky_windows.is_empty() {
             return;
@@ -76,7 +68,6 @@ impl AppState {
         sticky.sort_unstable();
         for wid in sticky {
             let Some((mon, ws_idx)) = self.find_window_workspace(wid) else {
-                // No longer tracked anywhere (closed); drop it.
                 self.sticky_windows.remove(&wid);
                 continue;
             };
@@ -141,7 +132,6 @@ impl AppState {
                 continue;
             }
 
-            // Floating sticky: preserve its float rect across the move.
             let rect = self
                 .workspaces
                 .get(&mon)
@@ -199,14 +189,9 @@ impl AppState {
         }
     }
 
-    /// Re-assert focus on a sticky window after a workspace switch, when
-    /// the user was focused on it before the switch (mirrors
-    /// `refocus_scratchpad_if_active`). The pin follows the switch, so
-    /// focus must too. Both `sync_foreground_window` passes (immediate and
-    /// animation-landing) prefer `previous_focused_hwnd` when it floats on
-    /// the active workspace, so setting it here holds focus across both.
-    /// Returns `true` if the refocus applied; no-op (`false`) unless the
-    /// window is still sticky and floating on the now-active workspace.
+    /// Preserve sticky focus across a workspace switch. Tiled focus must agree
+    /// with previous_focused_hwnd; floating focus is retained by both the
+    /// immediate and animation-landing foreground sync passes.
     pub(crate) fn refocus_sticky_window(&mut self, wid: u64) -> bool {
         if !self.sticky_windows.contains(&wid) {
             return false;
@@ -245,7 +230,6 @@ impl AppState {
         true
     }
 
-    /// Drop a window from the sticky set when it is destroyed.
     pub(crate) fn sticky_on_window_destroyed(&mut self, wid: u64) {
         if self.sticky_windows.remove(&wid) {
             info!("Sticky: pinned window {} closed; unpinned", wid);

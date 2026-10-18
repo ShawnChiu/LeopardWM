@@ -1,5 +1,3 @@
-//! Shared helper methods on AppState: window lookup, config application, snap suppression, pause.
-
 use crate::config;
 use crate::state::*;
 use anyhow::Result;
@@ -26,11 +24,9 @@ pub(crate) enum StalePruneLayout {
 /// pass `None` and keep execution-time foreground sampling.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FocusedPruneContext {
-    /// HWND from the Focused event that reached this prune.
     pub(crate) focused_hwnd: u64,
     /// `previous_focused_hwnd` captured before stale cleanup.
     pub(crate) tracked: Option<u64>,
-    /// WinEvent time of the Focused event that reached this prune.
     pub(crate) event_time_ms: u32,
     /// The focused HWND is a restore activation, so tracked-iconic reconciliation
     /// must not infer an OS minimize/departure handoff from this Focused event.
@@ -57,11 +53,8 @@ pub(crate) fn taskbar_button_action(
     }
 }
 
-/// Pre-scaled layout parameters for a specific monitor's DPI.
-///
-/// Config values are in logical pixels (96 DPI). This struct holds the
-/// scaled values for a specific monitor, avoiding repeated scaling in
-/// multiple call sites.
+/// Config distances are logical pixels (96 DPI); workspace distances are
+/// scaled for the monitor.
 pub(crate) struct ScaledLayoutParams {
     pub gap: i32,
     pub outer_gap_left: i32,
@@ -73,7 +66,6 @@ pub(crate) struct ScaledLayoutParams {
 }
 
 impl ScaledLayoutParams {
-    /// Compute scaled layout parameters from config + monitor DPI + viewport width.
     pub fn from_config(
         layout: &config::LayoutConfig,
         appearance: &config::AppearanceConfig,
@@ -85,15 +77,11 @@ impl ScaledLayoutParams {
         let outer_gap_right = scale_px(layout.outer_gap_right, scale_factor);
         let outer_gap_top = scale_px(layout.outer_gap_top, scale_factor);
         let outer_gap_bottom = scale_px(layout.outer_gap_bottom, scale_factor);
-        // Reserve room for the strip PLUS the inter-element gap below
-        // it, so the strip's bottom edge sits `gap` pixels above the
-        // active tab — same spacing as between adjacent columns and
-        // within a Vertical column. Reusing `layout.gap` keeps the
-        // visual rhythm consistent across the workspace.
+        // Include the gap below the strip so tab-to-window spacing matches
+        // column and vertical-stack spacing.
         let strip_with_gap = appearance.tab_strip_height as i32 + layout.gap.max(0);
         let tab_strip_reserve_px = scale_px(strip_with_gap, scale_factor);
 
-        // Compute default column width using scaled gap values (mirrors LayoutConfig::default_column_width_px)
         let base = viewport_width
             .saturating_sub(outer_gap_left.max(0))
             .saturating_sub(outer_gap_right.max(0))
@@ -112,7 +100,6 @@ impl ScaledLayoutParams {
         }
     }
 
-    /// Apply scaled gap and width values to a workspace.
     pub fn apply_to(&self, workspace: &mut Workspace) {
         workspace.set_gap(self.gap);
         workspace.set_outer_gaps(
@@ -127,10 +114,7 @@ impl ScaledLayoutParams {
 }
 
 impl AppState {
-    /// Look up window info for a given window handle.
-    ///
-    /// In production, calls `enumerate_windows()` and finds the matching entry.
-    /// In tests, returns from the injected window info map if available.
+    /// Tests may override individual HWNDs; otherwise query the window directly.
     pub(crate) fn lookup_window_info(
         &self,
         hwnd: u64,
@@ -168,12 +152,9 @@ impl AppState {
         false
     }
 
-    /// Apply configuration to all workspaces.
     pub(crate) fn apply_config(&mut self, config: config::Config) {
-        // Config reload may turn off swap_chain_ghost_animation, change
-        // monitor geometry assumptions, or simply re-evaluate behavior.
-        // Cleanest contract: any in-flight ghost animation dies on
-        // reload — the next transition starts from a clean slate.
+        // Reload can change ghost-animation settings or monitor assumptions;
+        // abort the in-flight transition before applying the new config.
         self.abort_active_ghost_transition();
         let old_border_on = self.config.appearance.active_border;
         let previous_rules =
@@ -181,13 +162,11 @@ impl AppState {
 
         self.config = config;
 
-        // Update scroll modifier for the gesture hook
         leopardwm_platform_win32::set_scroll_modifier(&self.config.hotkeys.scroll_modifier);
         leopardwm_platform_win32::set_wheel_swipes(self.config.gestures.wheel_swipes);
 
         self.refresh_high_contrast();
 
-        // Handle border transitions with new config values
         if let Some(hwnd) = self.previous_focused_hwnd {
             if self.config.appearance.active_border {
                 self.show_border(hwnd);
@@ -229,7 +208,6 @@ impl AppState {
                 workspace.set_center_past_edges(self.config.layout.center_past_edges);
                 workspace.set_center_single_column(self.config.layout.center_single_column);
 
-                // Rescale column widths to preserve fractions under new gap values
                 workspace.rescale_column_widths(
                     old_gap,
                     old_ol,
@@ -246,24 +224,18 @@ impl AppState {
                     workspace.reconcile_scroll_bounds(viewport_width);
                 }
 
-                // Recalculate scroll offset for new gap values so all columns
-                // are positioned correctly (not just the rightmost ones).
                 workspace.ensure_focused_visible_animated(viewport_width);
             }
         }
 
-        // Re-evaluate window rules for already-managed windows so that
-        // newly added/changed rules take effect without restart.
         self.reapply_window_rules(&previous_rules);
 
-        // Pick up previously-ignored windows that should now be tiled/floated.
         if let Ok(added) = self.enumerate_and_add_windows() {
             if added > 0 {
                 info!("Config reload: tiled {} previously-ignored windows", added);
             }
         }
 
-        // Re-check animation state (accessibility setting + power state)
         self.refresh_reduce_motion();
 
         // Handle snap layout config change (skip when paused — pause already restored all)
@@ -283,9 +255,6 @@ impl AppState {
         );
     }
 
-    /// Collect all managed window IDs across all workspaces.
-    ///
-    /// Returns tiled and floating window IDs from every monitor's workspace.
     pub(crate) fn all_managed_window_ids(&self) -> Vec<u64> {
         let mut ids = Vec::new();
         for ws_vec in self.workspaces.values() {
@@ -337,8 +306,6 @@ impl AppState {
             self.restore_taskbar_buttons();
             return;
         }
-        // Disabled: make sure no button stays hidden (restores any we hid before
-        // the user turned the option off), then leave the taskbar alone.
         if self.config.behavior.taskbar_buttons == config::TaskbarButtons::ShowAll {
             for ws_vec in self.workspaces.values() {
                 for workspace in ws_vec {
@@ -795,8 +762,6 @@ impl AppState {
         self.finish_stale_window_prune(stale, None)
     }
 
-    /// Find which workspace contains a window.
-    /// Returns `(monitor_id, workspace_index)` so callers can index into the correct workspace.
     pub(crate) fn find_window_workspace(&self, window_id: u64) -> Option<(MonitorId, usize)> {
         for (monitor_id, ws_vec) in &self.workspaces {
             for (idx, workspace) in ws_vec.iter().enumerate() {
@@ -844,15 +809,11 @@ impl AppState {
         Some((col, sibling))
     }
 
-    /// Get the rectangle of the focused column for snap hint display.
-    ///
-    /// Returns the absolute screen position of the focused column.
     pub(crate) fn get_focused_column_rect(&self) -> Option<Rect> {
         let workspace = self.focused_workspace()?;
         self.monitors.get(&self.focused_monitor)?;
         let placements = workspace.compute_placements(self.layout_viewport(self.focused_monitor));
 
-        // Find the placement for the focused window
         let focused_hwnd = workspace.focused_window()?;
         placements
             .iter()
@@ -860,14 +821,8 @@ impl AppState {
             .map(|p| p.rect)
     }
 
-    // =========================================================================
-    // Snap layout suppression helpers
-    // =========================================================================
-
-    /// Remove WS_MAXIMIZEBOX from a tiled window to disable Snap Layouts.
-    /// No-op when snap layouts are disabled in config, tiling is paused, or
-    /// the window is already tracked. Successful resume re-suppresses tiled
-    /// windows.
+    /// Removing WS_MAXIMIZEBOX suppresses Snap Layouts. Skip when suppression is
+    /// disabled in config, tiling is paused, or this HWND is already tracked.
     pub(crate) fn disable_snap_for_window(&mut self, hwnd: u64) {
         if !self.config.behavior.disable_snap_layouts {
             return;
@@ -915,7 +870,6 @@ impl AppState {
         }
     }
 
-    /// Restore WS_MAXIMIZEBOX on a window when it leaves tiled management.
     pub(crate) fn restore_snap_for_window(&mut self, hwnd: u64) {
         if !self.snap_disabled_hwnds.remove(&hwnd) {
             return;
@@ -931,7 +885,6 @@ impl AppState {
         }
     }
 
-    /// Restore WS_MAXIMIZEBOX on all tracked windows (bulk).
     pub(crate) fn restore_snap_for_all_windows(&mut self) {
         let hwnds: Vec<u64> = self.snap_disabled_hwnds.drain().collect();
         if !hwnds.is_empty() {
@@ -940,7 +893,6 @@ impl AppState {
         }
     }
 
-    /// Apply snap layout suppression to all currently tiled (non-floating) windows.
     pub(crate) fn disable_snap_for_all_tiled_windows(&mut self) {
         if !self.config.behavior.disable_snap_layouts {
             return;
@@ -966,12 +918,8 @@ impl AppState {
     /// without waiting for another command/event. If resume reapply fails,
     /// paused state is restored to avoid claiming a healthy resumed mode.
     pub(crate) fn toggle_pause(&mut self, source: &str) -> Result<()> {
-        // Pause/resume invalidates any in-flight ghost animation:
-        // - apply_layout no-ops while paused (helpers.rs:1044), so a
-        //   ghosted window would remain cloaked indefinitely.
-        // - send_animation_frame returns Ok(false) when paused, so
-        //   the per-frame thumbnail updates would stop mid-animation.
-        // Aborting now drops handles + uncloaks sources cleanly.
+        // Paused layout application is a no-op and animation frames stop.
+        // Abort first so ghost sources cannot remain cloaked indefinitely.
         self.abort_active_ghost_transition();
         let was_paused = self.paused;
         self.paused = !was_paused;
@@ -982,11 +930,9 @@ impl AppState {
         );
         if self.paused {
             self.restore_taskbar_buttons();
-            // Restore WS_MAXIMIZEBOX so windows behave normally while paused
             self.restore_snap_for_all_windows();
             self.hide_border();
             self.hide_tab_strip();
-            // Hide any visible drag ghost overlay
             self.pending_drag_hint = Some(crate::state::DragHintAction::Hide);
         } else {
             self.resume_deferred_apply_worker_recovery();
@@ -1003,7 +949,6 @@ impl AppState {
             // Park inactive workspaces only after a successful active apply so a
             // failed resume cannot move them while rolling back to paused.
             self.prepare_inactive_workspace_windows();
-            // Re-apply snap suppression after resuming
             self.disable_snap_for_all_tiled_windows();
             self.sync_taskbar_buttons();
             self.sync_foreground_window();

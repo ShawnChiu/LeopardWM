@@ -1,5 +1,3 @@
-//! Named-pipe IPC server and client handling.
-
 use super::DaemonEvent;
 use crate::events::SubscribeStartup;
 use anyhow::Result;
@@ -14,17 +12,12 @@ use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, error, warn};
 
-/// IPC read timeout - clients must send within this period.
 pub(crate) const IPC_READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// IPC responder timeout - daemon must answer within this period.
 pub(crate) const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound stalled clients so disconnected consumers cannot retain stream tasks.
 const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Heartbeat interval for stream-mode subscribers. Subscribers receive a
-/// `IpcEvent::Heartbeat` after this much silence so they can detect a
-/// dead daemon pipe by missing keepalives.
+/// Periodic stream keepalive, including while other events are flowing.
 pub(crate) const STREAM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-/// Poll interval for cooperative timed thread joins.
 const JOIN_WITH_TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(crate) fn response_for_ipc_wait_failure(cmd: &IpcCommand, timed_out: bool) -> IpcResponse {
@@ -39,7 +32,6 @@ pub(crate) fn response_for_ipc_wait_failure(cmd: &IpcCommand, timed_out: bool) -
     }
 }
 
-/// Run the IPC server, accepting connections and dispatching commands.
 pub(crate) async fn run_ipc_server(event_tx: mpsc::Sender<DaemonEvent>) {
     let mut is_first_instance = true;
     let pipe_name = preferred_pipe_name();
@@ -82,13 +74,12 @@ pub(crate) async fn run_ipc_server(event_tx: mpsc::Sender<DaemonEvent>) {
         };
         let server = match create_result {
             Ok(s) => {
-                is_first_instance = false; // Subsequent instances don't need this flag
+                is_first_instance = false;
                 s
             }
             Err(e) => {
                 error!("Failed to create named pipe server: {}", e);
                 if is_first_instance {
-                    // If we can't create the first instance, maybe another daemon is running
                     error!("Is another leopardwm daemon already running?");
                 }
                 drop(permit);
@@ -116,7 +107,6 @@ pub(crate) async fn run_ipc_server(event_tx: mpsc::Sender<DaemonEvent>) {
     }
 }
 
-/// Serialize an `IpcResponse` to a newline-terminated frame and write it.
 async fn write_response_frame<W>(writer: &mut W, response: &IpcResponse) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -151,7 +141,6 @@ where
     Ok(())
 }
 
-/// Serialize an `IpcEvent` to a newline-terminated frame and write it.
 async fn write_event_frame<W>(writer: &mut W, event: &IpcEvent) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -166,16 +155,13 @@ where
             tokio::time::timeout(IPC_WRITE_TIMEOUT, writer.write_all(frame.as_bytes())).await??;
             anyhow::bail!("oversize workspace snapshot frame");
         }
-        // Oversize events shouldn't happen given the small variant
-        // payloads, but if a future LayoutChanged ever blows the cap,
-        // surface a Lagged-style hint instead of a corrupt frame.
+        // Send a Lagged hint rather than a corrupt oversized event frame.
         json = serde_json::to_string(&IpcEvent::Lagged { skipped: 0 })? + "\n";
     }
     tokio::time::timeout(IPC_WRITE_TIMEOUT, writer.write_all(json.as_bytes())).await??;
     Ok(())
 }
 
-/// Handle a single client connection.
 async fn handle_client(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
     event_tx: mpsc::Sender<DaemonEvent>,
@@ -186,18 +172,16 @@ async fn handle_client(
     let mut reader = BufReader::new(limited_reader);
     let mut line = String::new();
 
-    // Read command (single line of JSON) with timeout and size bound
     let read_result = tokio::time::timeout(IPC_READ_TIMEOUT, reader.read_line(&mut line)).await;
     let bytes_read = match read_result {
         Ok(Ok(n)) => n,
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => {
-            // Timeout: client did not send in time, silently close
             return Ok(());
         }
     };
     if bytes_read == 0 {
-        return Ok(()); // Client disconnected
+        return Ok(());
     }
 
     if !line.ends_with('\n') {
@@ -213,7 +197,6 @@ async fn handle_client(
     let line = line.trim_end_matches(['\r', '\n']);
     debug!("Received command: {}", line);
 
-    // Parse the command
     let cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(cmd) => cmd,
         Err(e) => {
@@ -243,11 +226,9 @@ async fn handle_client(
         .await;
     }
 
-    // Everything else: existing oneshot path through the daemon main loop.
     handle_command_oneshot(writer, event_tx, cmd, permit).await
 }
 
-/// Existing single-command request/response path.
 async fn handle_command_oneshot<W>(
     mut writer: W,
     event_tx: mpsc::Sender<DaemonEvent>,
@@ -257,7 +238,7 @@ async fn handle_command_oneshot<W>(
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let _permit = permit; // released when this task returns
+    let _permit = permit;
 
     let (resp_tx, resp_rx) = oneshot::channel();
     let response_cmd = cmd.clone();
@@ -299,8 +280,8 @@ async fn handle_subscribe<W>(
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    // Preserve the legacy default for clients whose event enum is closed.
-    // New snapshot events require an explicit workspace_state filter.
+    // Clients with closed event enums need the legacy default; workspace
+    // snapshots require an explicit workspace_state filter.
     let requested = if requested_raw.is_empty() {
         EventKind::legacy_default()
     } else {
@@ -367,12 +348,10 @@ where
         ack
     };
 
-    // Write ack
     if write_response_frame(&mut writer, &ack).await.is_err() {
         return Ok(());
     }
 
-    // Write snapshot frames
     for ev in &snapshot {
         if write_event_frame(&mut writer, ev).await.is_err()
             || matches!(ev, IpcEvent::WorkspaceSnapshotError { .. })
@@ -387,12 +366,8 @@ where
 
     let mut in_snapshot = false;
 
-    // Stream loop: events + heartbeat. The heartbeat's uptime field is
-    // per-subscriber connection time (since we entered stream mode),
-    // NOT the daemon process uptime — that's intentional, callers can
-    // detect "did we just reconnect" vs "are we still on the original
-    // connection". Computing daemon-wide uptime would require an extra
-    // mutex acquisition per heartbeat for negligible signal.
+    // Heartbeat uptime measures this connection, not daemon lifetime, so
+    // clients can distinguish a reconnect from a continuing stream.
     let stream_started = std::time::Instant::now();
     let mut heartbeat = tokio::time::interval(STREAM_HEARTBEAT_INTERVAL);
     // Skip the immediate first tick so we don't send a heartbeat right
@@ -436,8 +411,6 @@ where
     }
 }
 
-/// Spawn a named forwarding thread that receives events from a std::sync::mpsc channel
-/// and forwards them to a tokio mpsc sender. Returns the JoinHandle for graceful shutdown.
 pub(crate) fn spawn_forwarding_thread<T: Send + 'static>(
     name: &str,
     receiver: std::sync::mpsc::Receiver<T>,
@@ -450,7 +423,7 @@ pub(crate) fn spawn_forwarding_thread<T: Send + 'static>(
         .spawn(move || {
             while let Ok(event) = receiver.recv() {
                 if sender.blocking_send(map_fn(event)).is_err() {
-                    break; // Channel closed, daemon shutting down
+                    break;
                 }
             }
         })

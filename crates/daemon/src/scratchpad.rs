@@ -1,11 +1,6 @@
-//! Scratchpad: one designated window that hides to a holding area and
-//! re-summons floating on a hotkey.
-//!
-//! While hidden, the window is removed from every workspace (so the
-//! layout engine never touches it) and DWM-cloaked in place. While shown,
-//! it lives as a floating window on whichever workspace was active when it
-//! was summoned. Session-scoped: the designation is keyed by HWND and is
-//! not persisted across a daemon restart.
+//! Hidden scratchpads leave every workspace so layout cannot touch them;
+//! they are DWM-cloaked and parked off-screen. A summoned scratchpad floats
+//! on the workspace active at summon time. The designation is session-only.
 
 use crate::state::{AppState, ScratchpadState};
 use leopardwm_core_layout::Rect;
@@ -100,8 +95,6 @@ where
 }
 
 impl AppState {
-    /// Remove `wid` from whichever workspace currently holds it (tiled or
-    /// floating). Returns true if it was found and removed.
     fn detach_window_from_workspace(&mut self, wid: u64) -> bool {
         let Some((mon, ws_idx)) = self.find_window_workspace(wid) else {
             return false;
@@ -121,7 +114,6 @@ impl AppState {
         false
     }
 
-    /// A centered floating rect on the focused monitor's work area.
     pub(crate) fn centered_float_rect(&self) -> Rect {
         let wa = self.focused_viewport();
         let w = 900.min((wa.width - 80).max(200));
@@ -242,16 +234,9 @@ impl AppState {
     /// different scratchpad is already stashed, summon it back first so it
     /// is not stranded hidden.
     pub(crate) fn scratchpad_stash(&mut self) {
-        // Pick the window to stash. The tiled focused window is authoritative
-        // and immune to async OS-foreground events: a late
-        // EVENT_SYSTEM_FOREGROUND from a window the user just moved off of can
-        // clobber `previous_focused_hwnd` right after a focus change, which
-        // would otherwise make us stash the wrong window (e.g. a column's
-        // stackmate instead of the focused window, leaving the intended target
-        // stranded alone in its column). Fall back to the OS-foreground window
-        // only for a summoned scratchpad, which floats and so is not reported
-        // by `Workspace::focused_window` — that path is how "stash the shown
-        // scratchpad to release it" is recognised.
+        // A late foreground event can overwrite previous_focused_hwnd, so
+        // prefer tiled focus. A focused summoned scratchpad takes precedence
+        // because floating windows are absent from Workspace::focused_window.
         let tiled_focus = self.focused_workspace().and_then(|ws| ws.focused_window());
         let shown_scratchpad = self.scratchpad.filter(|s| s.shown).map(|s| s.window_id);
         let wid = match shown_scratchpad {
@@ -284,8 +269,6 @@ impl AppState {
             }
         }
 
-        // Only stash a window that still exists; otherwise we would cloak /
-        // move a dead HWND and record a dangling designation.
         #[cfg(not(test))]
         if !leopardwm_platform_win32::is_window_valid(wid) {
             info!(
@@ -456,7 +439,6 @@ impl AppState {
         true
     }
 
-    /// Hide the currently-shown scratchpad window.
     fn scratchpad_hide(&mut self, wid: u64) -> Option<Rect> {
         let rect = self.scratchpad_visible_rect(wid);
         self.hide_window_to_holding(wid);
@@ -465,7 +447,6 @@ impl AppState {
         rect
     }
 
-    /// Toggle scratchpad visibility (summon if hidden, hide if shown).
     pub(crate) fn scratchpad_toggle(&mut self) {
         let Some(state) = self.scratchpad else {
             info!("Scratchpad toggle: none designated");
@@ -491,8 +472,6 @@ impl AppState {
                 });
                 info!("Scratchpad: summoned window {}", state.window_id);
             } else {
-                // Window vanished or could not be floated; drop the designation
-                // rather than keep a dangling, un-summonable scratchpad.
                 self.scratchpad = None;
                 info!(
                     "Scratchpad: summon of window {} failed; cleared designation",
@@ -502,8 +481,6 @@ impl AppState {
         }
     }
 
-    /// Clear the scratchpad designation if `wid` was the scratchpad
-    /// (called when a window is destroyed).
     pub(crate) fn scratchpad_on_window_destroyed(&mut self, wid: u64) {
         if self.scratchpad.map(|s| s.window_id) == Some(wid) {
             self.scratchpad = None;
