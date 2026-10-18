@@ -29,11 +29,9 @@ pub fn current_event_time_ms() -> u32 {
     unsafe { GetTickCount() }
 }
 
-/// Milliseconds since the user last produced a real input event
-/// (keyboard or mouse). Used to distinguish user-initiated focus changes
-/// from spurious `EVENT_SYSTEM_FOREGROUND` events fired by background
-/// apps that steal focus on their own (notifications, app-internal focus
-/// shuffles, etc.). Returns `None` if the API call fails.
+/// Milliseconds since the last input event reported by Windows (keyboard or mouse).
+/// Used as a heuristic for whether a focus change was user-initiated; this does
+/// not distinguish physical from injected input. Returns `None` if the API fails.
 pub fn ms_since_last_user_input() -> Option<u32> {
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
@@ -222,14 +220,12 @@ pub fn set_foreground_window(hwnd: WindowId) -> Result<bool, Win32Error> {
         let current_thread = GetCurrentThreadId();
         let mut diagnostics: Vec<String> = Vec::new();
 
-        // Attach our input queue to BOTH the current foreground window's thread
-        // and the target window's thread so Windows permits the foreground
-        // change. Attaching to the foreground thread is what lets us steal focus
-        // from an active holder (e.g. a borderless fullscreen game): hotkeys now
-        // arrive via a low-level keyboard hook, which does not grant this process
-        // the "last input event" foreground right that RegisterHotKey conferred.
-        // Without it the window scrolls into place but stays behind the
-        // foreground app.
+        // Attach our input queue to BOTH the foreground and target threads so
+        // Windows permits the foreground change, including from an active holder
+        // such as a borderless fullscreen game. Low-level keyboard hook delivery
+        // does not grant the "last input event" foreground right that RegisterHotKey
+        // provides; without the foreground attachment the window can scroll into
+        // place but remain behind the foreground app.
         let foreground_thread = {
             let fg = GetForegroundWindow();
             if fg.0.is_null() {
@@ -260,7 +256,6 @@ pub fn set_foreground_window(hwnd: WindowId) -> Result<bool, Win32Error> {
 
         let mut foreground_set = SetForegroundWindow(hwnd).as_bool();
 
-        // If SetForegroundWindow failed, try BringWindowToTop as fallback
         if !foreground_set {
             match BringWindowToTop(hwnd) {
                 Ok(()) => {

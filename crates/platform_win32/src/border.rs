@@ -130,7 +130,6 @@ fn plan_overlay_stack(
     }
 }
 
-/// Cached rendering state to avoid re-rendering when only position changes.
 struct BorderState {
     color_bgr: u32,
     corner_radius: f32,
@@ -450,7 +449,6 @@ impl BorderFrame {
         }
     }
 
-    /// Render the anti-aliased border frame bitmap and update the layered window.
     fn render_and_update(
         &self,
         x: i32,
@@ -473,13 +471,10 @@ impl BorderFrame {
             (state.color_bgr, state.corner_radius)
         };
 
-        // Extract color components (BGR → individual channels)
         let cb = ((color_bgr >> 16) & 0xFF) as u8;
         let cg = ((color_bgr >> 8) & 0xFF) as u8;
         let cr = (color_bgr & 0xFF) as u8;
 
-        // Compute corner radii from the per-window base radius (set by the
-        // caller from `get_window_corner_radius`, with a per-rule override).
         let (outer_r, inner_r) = match position {
             BorderPosition::Outside => {
                 // Rect was shrunk by 1px, so visual radius is base - 1.
@@ -536,7 +531,6 @@ impl BorderFrame {
                 for px in 0..w {
                     let pxf = px as f32 + 0.5;
 
-                    // Skip pixels far from any edge (interior of the window)
                     if !in_vert_band {
                         let in_left_band = pxf < band;
                         let in_right_band = pxf > wf - band;
@@ -545,7 +539,6 @@ impl BorderFrame {
                         }
                     }
 
-                    // Signed distance to outer and inner rounded rects
                     let sdf_outer = rounded_rect_sdf(pxf, pyf, 0.0, 0.0, wf, hf, outer_r);
                     let sdf_inner =
                         rounded_rect_sdf(pxf, pyf, bw, bw, wf - 2.0 * bw, hf - 2.0 * bw, inner_r);

@@ -1,13 +1,9 @@
 //! Global hotkey matching via a low-level keyboard hook.
 //!
-//! A `WH_KEYBOARD_LL` hook is LeopardWM's sole hotkey matcher: it inspects every
-//! key-down, and when the modifiers and key match a configured bind it swallows
-//! the keystroke and re-emits it as a [`HotkeyEvent`] so the daemon runs the
-//! bound command. Matching here (rather than `RegisterHotKey`) lets us tell
-//! left/right modifiers apart, so AltGr (Left Ctrl + Right Alt on international
-//! layouts) types normally instead of firing Ctrl+Alt binds.
-//!
-//! Mirrors the dedicated-thread + message-pump pattern in `gestures.rs`.
+//! A `WH_KEYBOARD_LL` hook inspects key-downs, swallows configured chords, and
+//! emits hotkey or Settings-recorder events. Matching here rather than with
+//! `RegisterHotKey` distinguishes left/right modifiers, so AltGr (Left Ctrl +
+//! Right Alt on international layouts) does not fire Ctrl+Alt binds.
 
 use crate::{
     fn_mod_bit, recover_poisoned_mutex, HotkeyEvent, HotkeyId, Modifiers, Win32Error,
@@ -48,14 +44,12 @@ pub enum KeyboardHookEvent {
     Recorded { modifiers: Modifiers, vk: u32 },
 }
 
-/// Sender the hook proc uses to deliver matched binds to the daemon.
 static HOOK_SENDER: std::sync::Mutex<Option<mpsc::Sender<KeyboardHookEvent>>> =
     std::sync::Mutex::new(None);
-/// The set of binds the hook should match.
 static HOOK_BINDS: std::sync::Mutex<Vec<HotkeyBind>> = std::sync::Mutex::new(Vec::new());
-/// Virtual-keys of currently-held matched main keys. Lets us fire once per
-/// physical press and swallow auto-repeat, tracking each key independently so a
-/// second matched key held at the same time can't reset the first.
+/// Held main keys, including unmatched presses: adding modifiers during
+/// auto-repeat must not turn an existing press into a new hotkey. Each key is
+/// tracked independently so another held key cannot reset its repeat guard.
 static HOOK_HELD: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 // A hotkey consumed over the overview owns its repeats until key-up, even
 // if modifiers change and the next repeat would otherwise reach WM_KEYDOWN.
@@ -70,13 +64,10 @@ static HOOK_FN_HELD: std::sync::Mutex<u16> = std::sync::Mutex::new(0);
 /// F13–F24 keys held while Settings recording is active, including keys that
 /// are not configured as normal hotkey modifiers.
 static HOOK_RECORDING_FN_HELD: std::sync::Mutex<u16> = std::sync::Mutex::new(0);
-/// The singleton hook's Settings capture mode.
 static HOOK_RECORDING: AtomicBool = AtomicBool::new(false);
 /// Recorded key whose auto-repeat remains swallowed until its key-up arrives.
 static HOOK_RECORDED_PENDING: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
 
-// Modifier virtual-key codes (both the generic and left/right variants the
-// low-level hook reports).
 const VK_SHIFT: i32 = 0x10;
 const VK_CONTROL: i32 = 0x11;
 const VK_MENU: i32 = 0x12; // Alt
@@ -154,8 +145,7 @@ enum Action {
     },
 }
 
-// While recording, bare Esc/Tab/Backspace/Delete pass through; representable chords
-// are captured, and unrepresentable chords are swallowed while capture remains armed.
+// Bare Esc/Tab/Backspace/Delete must remain usable as Settings recording controls.
 fn is_recording_control(vk: u32, modifiers: Modifiers) -> bool {
     modifiers == Modifiers::default() && matches!(vk, VK_ESCAPE | VK_TAB | VK_BACK | VK_DELETE)
 }
@@ -1194,7 +1184,6 @@ mod tests {
         let binds = vec![bind(f13, 0x48)]; // F13+H
                                            // Exact F-modifier held -> fires.
         assert!(find_bind(&binds, f13, 0x48).is_some());
-        // No modifier held (bare H) -> no match.
         assert!(find_bind(&binds, Modifiers::default(), 0x48).is_none());
         // A superset F-modifier (F13+F14) does not fire an F13-only bind.
         let f13_f14 = Modifiers {

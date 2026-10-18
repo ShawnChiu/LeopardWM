@@ -54,10 +54,10 @@ pub fn get_window_corner_radius(hwnd: WindowId) -> Option<f32> {
 }
 
 /// Fetch the window's small icon as a raw `HICON` handle. Resolution order:
-/// 1. `SendMessageW(WM_GETICON, ICON_SMALL2)` (taskbar size — preferred)
-/// 2. `SendMessageW(WM_GETICON, ICON_SMALL)` (legacy)
+/// 1. `SendMessageTimeoutW(WM_GETICON, ICON_SMALL2)` (taskbar size — preferred)
+/// 2. `SendMessageTimeoutW(WM_GETICON, ICON_SMALL)` (legacy)
 /// 3. `GetClassLongPtrW(GCLP_HICONSM)` (class-registered small)
-/// 4. `SendMessageW(WM_GETICON, ICON_BIG)` (big icon, scaled down by caller)
+/// 4. `SendMessageTimeoutW(WM_GETICON, ICON_BIG)` (big icon, scaled down by caller)
 /// 5. `GetClassLongPtrW(GCLP_HICON)` (class-registered big)
 ///
 /// The returned handle is owned by the app (not by us); callers must NOT
@@ -77,11 +77,10 @@ pub fn get_window_icon(hwnd: WindowId) -> Option<isize> {
         if !IsWindow(Some(target)).as_bool() {
             return None;
         }
-        // Bounded `SendMessage` so a frozen app can't stall the daemon's
-        // per-frame tab strip update. `SMTO_ABORTIFHUNG` returns early
-        // (with 0 in the out-param) if the target window is unresponsive;
-        // 50ms is comfortably above normal Win32 response time and well
-        // below the human-perceptible animation frame budget.
+        // Bound each icon message probe so a frozen app cannot stall the daemon
+        // indefinitely. SMTO_ABORTIFHUNG can return before the 50 ms timeout for
+        // an unresponsive owner; 50 ms allows normal Win32 response time, but a
+        // timed-out probe can still exceed an animation frame budget.
         let smto: SEND_MESSAGE_TIMEOUT_FLAGS = SMTO_ABORTIFHUNG;
         let timeout_ms: u32 = 50;
         let probe = |wparam: usize| -> Option<isize> {
@@ -121,9 +120,8 @@ pub fn get_window_icon(hwnd: WindowId) -> Option<isize> {
     }
 }
 
-/// The minimized (iconic) state of a window: `None` if the handle is dead or
-/// invalid, otherwise `Some(is_iconic)`. Bundles the validity check with the
-/// state read so a caller gets one snapshot rather than probing separately.
+/// The minimized (iconic) state of a window: `None` if a validity check fails,
+/// otherwise `Some(is_iconic)`. This is a best-effort read, not an atomic snapshot.
 pub fn window_minimized_state(hwnd: WindowId) -> Option<bool> {
     if hwnd == 0 {
         return None;
@@ -158,8 +156,6 @@ pub fn is_window_maximized(hwnd: WindowId) -> bool {
     }
 }
 
-/// Whether a window style has the classic dialog shape: a caption with neither
-/// a minimize nor a maximize button.
 fn is_dialog_like_style(style: u32) -> bool {
     let has_caption = style & WS_CAPTION.0 == WS_CAPTION.0;
     let has_min = style & WS_MINIMIZEBOX.0 != 0;
@@ -332,7 +328,6 @@ pub fn get_window_visible_rect(hwnd: WindowId) -> Option<Rect> {
                 extended_rect.bottom - extended_rect.top,
             ));
         }
-        // Fall back to GetWindowRect
         let mut win_rect = RECT::default();
         if GetWindowRect(hwnd_win, &mut win_rect).is_ok() {
             Some(Rect::new(
@@ -396,7 +391,6 @@ pub fn is_cursor_on_resize_border(hwnd: WindowId) -> bool {
         let border_x = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
         let border_y = GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
 
-        // If cursor is within the border thickness of any edge, it's a resize
         cx <= win_rect.left + border_x
             || cx >= win_rect.right - border_x
             || cy <= win_rect.top + border_y
@@ -404,11 +398,9 @@ pub fn is_cursor_on_resize_border(hwnd: WindowId) -> bool {
     }
 }
 
-/// Cheap existence check for a window handle. Returns `false` if the
-/// HWND has been recycled / the window no longer exists. Does NOT
-/// require visibility or non-minimized state. Suitable for guarding
-/// async deferred operations whose target may have been destroyed
-/// between request and apply time.
+/// Cheap existence check for a window handle, independent of visibility and
+/// minimized state. A recycled handle naming another live window also passes;
+/// callers that need identity protection must check more than handle validity.
 pub fn is_window_valid(hwnd: WindowId) -> bool {
     if hwnd == 0 {
         return false;
@@ -466,17 +458,13 @@ mod tests {
 
     #[test]
     fn test_is_dialog_like_style() {
-        // A primary app window: caption + both buttons -> not dialog-like.
         let primary = WS_CAPTION.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
         assert!(!is_dialog_like_style(primary));
-        // A dialog: caption, no min/max buttons -> dialog-like (even if resizable).
         assert!(is_dialog_like_style(WS_CAPTION.0));
         use windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME;
         assert!(is_dialog_like_style(WS_CAPTION.0 | WS_THICKFRAME.0));
-        // Only one button present -> still a real window, not dialog-like.
         assert!(!is_dialog_like_style(WS_CAPTION.0 | WS_MINIMIZEBOX.0));
         assert!(!is_dialog_like_style(WS_CAPTION.0 | WS_MAXIMIZEBOX.0));
-        // No caption (borderless surface, splash, game) -> not dialog-like.
         assert!(!is_dialog_like_style(0));
         assert!(!is_dialog_like_style(WS_MINIMIZEBOX.0));
         assert!(!is_dialog_like_style(0x16880080));
@@ -485,14 +473,12 @@ mod tests {
     #[test]
     fn test_is_frameless_popup_style() {
         use windows::Win32::UI::WindowsAndMessaging::WS_POPUP;
-        // Frameless ephemeral popup (no caption, no minimize) -> true.
         assert!(is_frameless_popup_style(0));
         assert!(is_frameless_popup_style(WS_POPUP.0));
         assert!(is_frameless_popup_style(WS_POPUP.0 | WS_THICKFRAME.0));
         // Real app window keeps a minimize box even with a custom title bar.
         assert!(!is_frameless_popup_style(WS_MINIMIZEBOX.0));
         assert!(!is_frameless_popup_style(WS_POPUP.0 | WS_MINIMIZEBOX.0));
-        // A captioned window (dialog or normal) is not a frameless popup.
         assert!(!is_frameless_popup_style(WS_CAPTION.0));
         assert!(!is_frameless_popup_style(
             WS_CAPTION.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0

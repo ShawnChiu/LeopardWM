@@ -18,10 +18,6 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
-// ============================================================================
-// Border color
-// ============================================================================
-
 /// Set the DWM border color for a window (Windows 11+).
 ///
 /// Returns Ok(true) if the border was set, Ok(false) if the API is unsupported.
@@ -33,7 +29,6 @@ pub fn set_window_border_color(hwnd: WindowId, color: u32) -> Result<bool, Win32
             return Err(Win32Error::WindowNotFound(window_id));
         }
 
-        // DWMWA_BORDER_COLOR = 34
         const DWMWA_BORDER_COLOR: u32 = 34;
         let colorref = color;
         let result = DwmSetWindowAttribute(
@@ -76,10 +71,6 @@ fn is_border_color_unsupported_hresult(code: windows::core::HRESULT) -> bool {
     code.0 == E_INVALIDARG_HRESULT || code.0 == E_NOTIMPL_HRESULT
 }
 
-// ============================================================================
-// Snap layout suppression (WS_MAXIMIZEBOX removal)
-// ============================================================================
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct WindowIdentity {
     process_id: u32,
@@ -114,8 +105,8 @@ fn window_identity_matches(hwnd: HWND, identity: WindowIdentity) -> bool {
         })
 }
 
-/// Global set of window IDs whose WS_MAXIMIZEBOX style has been removed.
-/// Used for panic recovery when AppState may be poisoned/unavailable.
+/// Tracks window identities queued for WS_MAXIMIZEBOX removal.
+/// Available for panic recovery when AppState is poisoned or unavailable.
 static SNAP_DISABLED_HWNDS: Mutex<Option<HashMap<WindowId, WindowIdentity>>> = Mutex::new(None);
 static PENDING_RESTORES: OnceLock<Mutex<HashMap<(WindowId, WindowIdentity), usize>>> =
     OnceLock::new();
@@ -193,10 +184,6 @@ impl Drop for InFlightStyleRequestGuard {
         self.retire();
     }
 }
-
-// ============================================================================
-// Maximize-box geometry diagnostics
-// ============================================================================
 
 const MAXIMIZEBOX_GEOMETRY_TARGET: &str = "leopardwm::window_style";
 const MAXIMIZEBOX_GEOMETRY_EVENT: &str = "maximizebox_geometry";
@@ -286,7 +273,6 @@ fn log_maximizebox_geometry(
     correlation_id: u64,
     set_window_pos_hr: Option<i32>,
 ) {
-    // Skip Win32 geometry queries unless this dedicated debug target is enabled.
     if !tracing::enabled!(target: MAXIMIZEBOX_GEOMETRY_TARGET, tracing::Level::DEBUG) {
         return;
     }
@@ -687,7 +673,8 @@ pub fn restore_maximizebox(window_id: WindowId) -> Result<bool, Win32Error> {
     Ok(true)
 }
 
-/// Wait until every window style request queued before this call has completed.
+/// Wait up to `timeout` for all previously queued window style requests.
+/// Returns whether the worker reached the barrier; `false` does not cancel requests.
 pub fn wait_for_window_style_requests(timeout: Duration) -> bool {
     let Some(worker) = WINDOW_STYLE_WORKER.get() else {
         return true;

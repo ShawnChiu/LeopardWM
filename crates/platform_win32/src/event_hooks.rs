@@ -32,7 +32,6 @@ const OBJID_WINDOW: i32 = 0;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
 
-/// Custom message ID used to signal the WinEvent hook thread to exit.
 const WM_QUIT_WINEVENT_THREAD: u32 = WM_USER + 3;
 
 /// Window event types that the daemon needs to handle.
@@ -86,10 +85,8 @@ fn focused_window_event(window_id: WindowId, event_time_ms: u32) -> WindowEvent 
     WindowEvent::Focused(window_id, event_time_ms)
 }
 
-/// Global sender for window events from WinEvent callbacks.
-///
-/// This uses a thread-safe channel because WinEvent callbacks run on Windows'
-/// internal thread pool and we need to forward events to the async runtime.
+/// Global sender for callbacks dispatched on the dedicated WinEvent pump thread.
+/// The channel forwards those events to the daemon event loop.
 static EVENT_SENDER: std::sync::Mutex<Option<std::sync::Arc<mpsc::Sender<WindowEvent>>>> =
     std::sync::Mutex::new(None);
 
@@ -131,7 +128,6 @@ pub struct EventHookHandle {
 
 impl Drop for EventHookHandle {
     fn drop(&mut self) {
-        // Signal the dedicated thread to exit
         unsafe {
             let _ = PostThreadMessageW(
                 self.thread_id,
@@ -166,13 +162,10 @@ impl Drop for EventHookHandle {
 /// - Focus within app (EVENT_OBJECT_FOCUS)
 pub fn install_event_hooks(
 ) -> Result<(EventHookHandle, mpsc::Receiver<WindowEvent>), crate::Win32Error> {
-    // Create channel for events
     let (tx, rx) = mpsc::channel();
 
-    // Store sender globally for callback access
     set_event_sender(tx)?;
 
-    // Channel to receive init result from the dedicated thread
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<u32, crate::Win32Error>>();
 
     let thread = std::thread::Builder::new()
@@ -185,7 +178,6 @@ pub fn install_event_hooks(
                 let mut msg = MSG::default();
                 let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
 
-                // Define events to hook: (min_event, max_event)
                 let event_ranges = [
                     (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
                     (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
@@ -238,7 +230,6 @@ pub fn install_event_hooks(
                     let _ = DispatchMessageW(&msg);
                 }
 
-                // Clean up hooks
                 for hook in &hooks {
                     if !UnhookWinEvent(*hook).as_bool() {
                         tracing::warn!("Failed to unhook WinEvent: {:?}", hook);
@@ -253,7 +244,6 @@ pub fn install_event_hooks(
             ))
         })?;
 
-    // Wait for init result
     match init_rx.recv() {
         Ok(Ok(thread_id)) => Ok((
             EventHookHandle {
@@ -277,10 +267,8 @@ pub fn install_event_hooks(
     }
 }
 
-/// Callback function for WinEvent hooks.
-///
-/// This runs on Windows' thread pool, so we forward events to the channel.
-/// Wrapped with catch_unwind to prevent panics from crashing the application.
+/// Runs on the installing WinEvent pump thread and forwards events to the channel.
+/// `catch_unwind` prevents a panic from unwinding across the FFI boundary.
 unsafe extern "system" fn win_event_callback(
     hook: HWINEVENTHOOK,
     event: u32,
@@ -308,7 +296,6 @@ unsafe extern "system" fn win_event_callback(
     }
 }
 
-/// Inner implementation of WinEvent callback.
 fn win_event_callback_inner(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -318,20 +305,14 @@ fn win_event_callback_inner(
     _id_event_thread: u32,
     dwms_event_time: u32,
 ) {
-    // Only handle window-level events (not child objects like menus).
-    // Exception: EVENT_OBJECT_FOCUS fires with OBJID_CLIENT, and
-    // EVENT_SYSTEM_* events always have id_object == 0, so we allow
-    // focus/foreground events regardless of id_object.
-    // EVENT_SYSTEM_FOREGROUND and EVENT_OBJECT_FOCUS fire with id_object == 0
-    // or OBJID_CLIENT, so allow them regardless. But EVENT_OBJECT_SHOW/HIDE
-    // must be OBJID_WINDOW only — child control visibility changes should not
-    // be emitted as top-level window lifecycle events.
+    // Focus events may name OBJID_CLIENT, so allow them regardless of id_object.
+    // Other events must name OBJID_WINDOW: child-control show/hide events must
+    // not become top-level window lifecycle events.
     let is_focus_event = matches!(event, EVENT_SYSTEM_FOREGROUND | EVENT_OBJECT_FOCUS);
     if id_object != OBJID_WINDOW && !is_focus_event {
         return;
     }
 
-    // Ignore invalid HWNDs
     if hwnd.0.is_null() {
         return;
     }
@@ -364,7 +345,6 @@ fn win_event_callback_inner(
         return;
     }
 
-    // Map event to our WindowEvent type
     let window_event = match event {
         EVENT_OBJECT_CREATE | EVENT_OBJECT_SHOW => WindowEvent::Created(window_id, dwms_event_time),
         EVENT_OBJECT_DESTROY => WindowEvent::Destroyed(window_id),
@@ -392,7 +372,6 @@ fn win_event_callback_inner(
         _ => return,
     };
 
-    // Send event through channel
     if let Some(sender) = clone_event_sender() {
         let _ = sender.send(window_event);
     }

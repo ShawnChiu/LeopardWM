@@ -84,7 +84,6 @@ unsafe fn process_integrity(process: HANDLE) -> Option<u32> {
 }
 
 unsafe fn token_integrity(token: HANDLE) -> Option<u32> {
-    // Size probe, then read the TOKEN_MANDATORY_LABEL.
     let mut len = 0u32;
     let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut len);
     if len == 0 {
@@ -170,8 +169,6 @@ mod tests {
 
     #[test]
     fn current_process_is_manageable_by_itself() {
-        // Our own process is at our own integrity level, so it's never blocked,
-        // regardless of whether we're elevated.
         let our_pid = std::process::id();
         assert!(!manage_block(our_pid).is_blocked());
     }

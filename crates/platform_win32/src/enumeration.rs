@@ -95,7 +95,6 @@ pub fn get_window_info(hwnd_id: WindowId) -> Option<WindowInfo> {
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
 
-        // Skip tool windows (unless they are a resizable WS_EX_APPWINDOW)
         if is_excluded_tool_window(style, ex_style) {
             return None;
         }
@@ -104,7 +103,6 @@ pub fn get_window_info(hwnd_id: WindowId) -> Option<WindowInfo> {
             return None;
         }
 
-        // Skip owned windows
         if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
             if !owner.is_invalid() {
                 return None;
@@ -176,7 +174,6 @@ pub fn enumerate_windows() -> Result<Vec<WindowInfo>, Win32Error> {
     let mut windows: Vec<WindowInfo> = Vec::new();
 
     unsafe {
-        // EnumWindows callback receives a raw pointer to our Vec
         let windows_ptr = &mut windows as *mut Vec<WindowInfo>;
 
         let result = EnumWindows(Some(enum_windows_callback), LPARAM(windows_ptr as isize));
@@ -192,9 +189,7 @@ pub fn enumerate_windows() -> Result<Vec<WindowInfo>, Win32Error> {
     Ok(windows)
 }
 
-/// Get the primary monitor's information.
-///
-/// Returns the work area (excluding taskbar) which is suitable for window positioning.
+/// Get the primary monitor's information, including its work area excluding the taskbar.
 pub fn get_primary_monitor() -> Result<MonitorInfo, Win32Error> {
     let monitors = enumerate_monitors()?;
 
@@ -204,15 +199,12 @@ pub fn get_primary_monitor() -> Result<MonitorInfo, Win32Error> {
         .ok_or_else(|| Win32Error::MonitorEnumerationFailed("No primary monitor found".to_string()))
 }
 
-/// Find which monitor contains the center of a given rectangle.
-///
-/// Returns the monitor info if found, or None if no monitor contains the point.
-/// Falls back to primary monitor if no exact match.
+/// Find the monitor containing the rectangle's center, falling back to the primary.
+/// Returns `None` when neither is available.
 pub fn find_monitor_for_rect<'a>(
     monitors: &'a [MonitorInfo],
     rect: &Rect,
 ) -> Option<&'a MonitorInfo> {
-    // First, try to find a monitor that contains the rect's center
     let center_x = rect.x + rect.width / 2;
     let center_y = rect.y + rect.height / 2;
 
@@ -259,7 +251,6 @@ pub fn monitor_to_right(monitors: &[MonitorInfo], current_id: MonitorId) -> Opti
     }
 }
 
-/// Center point of a monitor's rect.
 fn monitor_center(m: &MonitorInfo) -> (i32, i32) {
     (m.rect.x + m.rect.width / 2, m.rect.y + m.rect.height / 2)
 }
@@ -325,7 +316,6 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>, Win32Error> {
     Ok(monitors)
 }
 
-/// Callback for EnumDisplayMonitors that collects monitor info.
 unsafe extern "system" fn enum_monitors_callback(
     hmonitor: HMONITOR,
     _hdc: HDC,
@@ -334,7 +324,6 @@ unsafe extern "system" fn enum_monitors_callback(
 ) -> BOOL {
     let monitors = &mut *(lparam.0 as *mut Vec<MonitorInfo>);
 
-    // Initialize MONITORINFOEXW with correct size
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
 
@@ -342,7 +331,6 @@ unsafe extern "system" fn enum_monitors_callback(
         let mon_rect = info.monitorInfo.rcMonitor;
         let work_rect = info.monitorInfo.rcWork;
 
-        // Convert device name from wide string
         let device_name_len = info
             .szDevice
             .iter()
@@ -350,9 +338,7 @@ unsafe extern "system" fn enum_monitors_callback(
             .unwrap_or(info.szDevice.len());
         let device_name = String::from_utf16_lossy(&info.szDevice[..device_name_len]);
 
-        // Query per-monitor DPI for scaling gap/border values.
-        // Clamp to [1.0, 8.0] to guard against API failure returning 0 or
-        // non-finite values. Windows supports up to 500% (5.0) scaling.
+        // Bound gap/border scaling and fall back to 1.0 for an invalid DPI reading.
         let scale_factor = {
             use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
             let mut dpi_x: u32 = 96;
@@ -388,7 +374,6 @@ unsafe extern "system" fn enum_monitors_callback(
 
         TRUE
     } else {
-        // Continue enumeration even if one monitor fails
         TRUE
     }
 }
@@ -402,7 +387,6 @@ unsafe extern "system" fn enum_monitors_callback(
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let windows = &mut *(lparam.0 as *mut Vec<WindowInfo>);
 
-    // Skip invisible windows
     if !IsWindowVisible(hwnd).as_bool() {
         return TRUE;
     }
@@ -419,17 +403,14 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         return TRUE;
     }
 
-    // Skip tool windows (unless they are a resizable WS_EX_APPWINDOW)
     if is_excluded_tool_window(style, ex_style) {
         return TRUE;
     }
 
-    // Skip windows with WS_EX_NOACTIVATE (tooltips, popups, etc.)
     if ex_style & WS_EX_NOACTIVATE.0 != 0 {
         return TRUE;
     }
 
-    // Skip owned windows (dialogs, secondary windows)
     if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
         if !owner.is_invalid() {
             return TRUE;
@@ -447,7 +428,7 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
 
     let title_len = GetWindowTextLengthW(hwnd);
     if title_len == 0 {
-        return TRUE; // Skip windows with no title
+        return TRUE;
     }
 
     let mut title_buf: Vec<u16> = vec![0; (title_len + 1) as usize];
@@ -457,7 +438,6 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
     }
     let title = String::from_utf16_lossy(&title_buf[..actual_len as usize]);
 
-    // Skip known system windows by title
     if should_skip_window_by_title(&title) {
         return TRUE;
     }
@@ -489,7 +469,6 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         win_rect.bottom - win_rect.top,
     );
 
-    // Skip zero-size windows
     if rect.width == 0 || rect.height == 0 {
         return TRUE;
     }
@@ -648,7 +627,6 @@ pub(crate) fn normalize_to_root_window(hwnd: HWND) -> HWND {
     }
 }
 
-/// Check if a window should be skipped based on its title.
 pub(crate) fn should_skip_window_by_title(title: &str) -> bool {
     const SKIP_TITLES: &[&str] = &[
         "Program Manager",
@@ -696,7 +674,6 @@ fn should_treat_cloak_query_failure_as_cloaked(window_is_valid: bool) -> bool {
     !window_is_valid
 }
 
-/// Check if a window should be skipped based on its class name.
 pub(crate) fn should_skip_window_by_class(class_name: &str) -> bool {
     const SKIP_CLASSES: &[&str] = &[
         "Progman",                    // Program Manager
@@ -706,8 +683,7 @@ pub(crate) fn should_skip_window_by_class(class_name: &str) -> bool {
         "Windows.UI.Core.CoreWindow", // UWP system windows
         "IME",                        // Legacy input-method helper window
         "MSCTFIME UI",                // Text Services Framework IME helper window
-        // ApplicationFrameWindow removed: allows tiling UWP apps (Calculator, Photos, etc.)
-        // Empty/cloaked UWP frames are already filtered by the cloaked window check.
+        // ApplicationFrameWindow must remain eligible so UWP application hosts can tile.
         "XamlExplorerHostIslandWindow",        // XAML islands
         "TopLevelWindowForOverflowXamlIsland", // Overflow islands
         "RAIL_WINDOW", // WSLg RemoteApp (msrdc.exe) — RDP-projected from Linux;
@@ -729,10 +705,6 @@ pub(crate) fn should_skip_window_by_class(class_name: &str) -> bool {
 
     SKIP_CLASSES.contains(&class_name)
 }
-
-// ============================================================================
-// Process Information
-// ============================================================================
 
 /// Get the executable name for a process by PID.
 ///
@@ -917,12 +889,10 @@ mod tests {
             },
         ];
 
-        // Window on first monitor
         let window1 = Rect::new(100, 100, 800, 600);
         let found = find_monitor_for_rect(&monitors, &window1);
         assert_eq!(found.unwrap().id, 1);
 
-        // Window on second monitor
         let window2 = Rect::new(2000, 100, 800, 600);
         let found = find_monitor_for_rect(&monitors, &window2);
         assert_eq!(found.unwrap().id, 2);
@@ -950,8 +920,8 @@ mod tests {
         ];
 
         let sorted = monitors_by_position(&monitors);
-        assert_eq!(sorted[0].id, 1); // Left monitor first
-        assert_eq!(sorted[1].id, 2); // Right monitor second
+        assert_eq!(sorted[0].id, 1);
+        assert_eq!(sorted[1].id, 2);
     }
 
     #[test]
@@ -975,19 +945,15 @@ mod tests {
             },
         ];
 
-        // From monitor 1, go right
         let right = monitor_to_right(&monitors, 1);
         assert_eq!(right.unwrap().id, 2);
 
-        // From monitor 2, go left
         let left = monitor_to_left(&monitors, 2);
         assert_eq!(left.unwrap().id, 1);
 
-        // From monitor 1, can't go left (edge)
         let no_left = monitor_to_left(&monitors, 1);
         assert!(no_left.is_none());
 
-        // From monitor 2, can't go right (edge)
         let no_right = monitor_to_right(&monitors, 2);
         assert!(no_right.is_none());
     }

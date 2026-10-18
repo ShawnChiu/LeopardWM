@@ -69,8 +69,8 @@ static GESTURE_DIAGNOSTIC_CAPTURE_STATE: AtomicU64 = AtomicU64::new(0);
 /// Keeps an already-admitted diagnostic emitter visible to capture shutdown.
 ///
 /// `admit_gesture_diagnostic_capture()` is the only source, so the admission
-/// count cannot be decremented by work that was never admitted. Neither the
-/// original unit form nor a field literal can reconstruct it externally:
+/// count cannot be decremented by work that was never admitted. Neither a
+/// unit expression nor a field literal can construct it externally:
 ///
 /// ```compile_fail
 /// use leopardwm_platform_win32::GestureDiagnosticAdmission;
@@ -136,8 +136,7 @@ const WHEEL_DELTA: i32 = 120;
 const STREAM_END_MS: u128 = 80;
 const NAVIGATION_COOLDOWN_MS: u128 = 150;
 
-/// Timeout in milliseconds: if no swipe event arrives within this window,
-/// partial accumulators are reset.
+/// Reset partial swipe accumulators when wheel input resumes after this idle interval.
 const GESTURE_TIMEOUT_MS: u128 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,7 +397,6 @@ fn scroll_event(delta: i32) -> GestureEvent {
     }
 }
 
-/// Gesture accumulator state for the low-level mouse hook.
 struct GestureAccumState {
     engine: WheelGestureEngine,
     started_at: std::time::Instant,
@@ -408,12 +406,9 @@ struct GestureAccumState {
 /// Bit 0 = Ctrl, Bit 1 = Alt, Bit 2 = Shift, Bit 3 = Win.
 static SCROLL_MODIFIER_FLAGS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0x03); // default: Ctrl + Alt
 
-/// Global sender for gesture events.
 static GESTURE_SENDER: std::sync::Mutex<Option<mpsc::Sender<GestureEvent>>> =
     std::sync::Mutex::new(None);
 
-/// Global gesture accumulator state.
-/// Initialized to `None`; `register_gestures()` sets it to `Some(...)`.
 static GESTURE_STATE: std::sync::Mutex<Option<GestureAccumState>> = std::sync::Mutex::new(None);
 static RAW_GESTURES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WHEEL_SWIPES_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -523,7 +518,6 @@ pub fn set_scroll_modifier(modifier_str: &str) {
         }
     }
     if flags == 0 {
-        // Fallback to Ctrl+Alt if nothing valid was parsed
         flags = 0x03;
     }
     SCROLL_MODIFIER_FLAGS.store(flags, std::sync::atomic::Ordering::Relaxed);
@@ -562,10 +556,8 @@ pub fn register_gestures_with_raw_input(
         ));
     }
 
-    // Create channel for events
     let (tx, rx) = mpsc::channel();
 
-    // Store sender globally
     {
         let mut sender = GESTURE_SENDER.lock().map_err(|_| {
             Win32Error::HookInstallFailed("Gesture sender mutex poisoned".to_string())
@@ -587,7 +579,6 @@ pub fn register_gestures_with_raw_input(
 }
 
 fn start_gesture_thread(raw_input: bool) -> Result<(GestureHandle, Option<String>), Win32Error> {
-    // Initialize accumulator state
     {
         let mut state = GESTURE_STATE.lock().map_err(|_| {
             Win32Error::HookInstallFailed("Gesture state mutex poisoned".to_string())
@@ -598,7 +589,6 @@ fn start_gesture_thread(raw_input: bool) -> Result<(GestureHandle, Option<String
         });
     }
 
-    // Channel to receive init result from the dedicated thread
     let (init_tx, init_rx) =
         std::sync::mpsc::channel::<Result<(u32, Option<String>), Win32Error>>();
 
@@ -684,7 +674,6 @@ fn start_gesture_thread(raw_input: bool) -> Result<(GestureHandle, Option<String
             Win32Error::HookInstallFailed(format!("Failed to spawn gesture thread: {}", e))
         })?;
 
-    // Wait for initialization
     let initialization = init_rx
         .recv()
         .map_err(|_| {
@@ -820,10 +809,6 @@ fn wheel_swipe_candidate(flags: u32, native_active: bool, wheel_swipes: bool) ->
     wheel_swipes && flags & LLMHF_INJECTED != 0 && !native_active
 }
 
-/// Low-level mouse hook callback for gesture detection.
-///
-/// Handles WM_MOUSEWHEEL and WM_MOUSEHWHEEL to normalize modifier navigation
-/// and fire swipe gesture events when the threshold is exceeded.
 unsafe extern "system" fn gesture_mouse_hook_proc(
     ncode: i32,
     wparam: windows::Win32::Foundation::WPARAM,
