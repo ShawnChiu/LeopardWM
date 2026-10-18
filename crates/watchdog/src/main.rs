@@ -1,12 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! LeopardWM Watchdog
-//!
-//! Spawns the daemon (`leopardwm.exe`) as a child process, monitors its
-//! exit code, runs the panic-revert recovery path on abnormal exit, and
-//! optionally auto-restarts within a crash-loop budget. Designed to be
-//! invoked transparently by `lwm run`; can also be run directly by users
-//! who want the supervision layer.
+//! Supervises the daemon, uncloaks windows after abnormal exits, and bounds crash restarts.
 
 use anyhow::{Context, Result};
 use std::fs::{self, OpenOptions};
@@ -58,11 +52,7 @@ impl WatchdogLogPaths {
 /// restarting the daemon after a console-close / Ctrl+C kill mid-cleanup.
 static CONSOLE_CTRL_RECEIVED: AtomicBool = AtomicBool::new(false);
 
-/// Crash-loop detection: if the daemon exits abnormally
-/// `MAX_CRASHES_PER_WINDOW` or more times within `CRASH_WINDOW`, the
-/// watchdog gives up and exits — the user has to intervene (run
-/// `lwm doctor`, check the crash log, etc.). This prevents an infinite
-/// restart loop that masks a deterministic startup bug.
+/// Bound crash restarts so deterministic startup failures cannot loop indefinitely.
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const MAX_CRASHES_PER_WINDOW: usize = 3;
 
@@ -134,19 +124,12 @@ fn run(log_paths: &WatchdogLogPaths) -> Result<()> {
         warn!(%err, "Console control fallback not installed — console close may kill daemon before cleanup");
     }
 
-    // Put ourselves in a Job Object with KILL_ON_JOB_CLOSE so any daemon
-    // we spawn dies with us if the watchdog itself is killed (`taskkill
-    // /IM leopardwm-watchdog.exe`, parent process death, etc). Without
-    // this, the daemon child is orphaned and continues unsupervised.
-    // Non-fatal on failure — supervision still works without this safety
-    // net, just leaks orphan processes on watchdog death.
+    // Kill daemon children with the watchdog to avoid leaving an unsupervised daemon.
     if let Err(err) = install_kill_on_close_job() {
         warn!(%err, "Job Object kill-on-close not installed — daemon may orphan if watchdog dies");
     }
 
-    // Register AUMID + bind it to this process so toast recovery
-    // notifications can render. Non-fatal on failure — we still want to
-    // supervise the daemon even if toasts can't be set up.
+    // Toast setup must not prevent daemon supervision.
     if let Err(err) = leopardwm_platform_win32::toast::init(TOAST_AUMID, TOAST_APP_NAME) {
         warn!(%err, "Toast notifications disabled (AUMID setup failed)");
     }
@@ -154,8 +137,6 @@ fn run(log_paths: &WatchdogLogPaths) -> Result<()> {
     let daemon_path = find_daemon_binary()?;
     info!(path = %daemon_path.display(), "Resolved daemon binary");
 
-    // Forward our argv (minus argv[0]) to the daemon every restart so
-    // flags like --safe-mode propagate through.
     let daemon_args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut crashes: Vec<Instant> = Vec::new();
@@ -163,9 +144,7 @@ fn run(log_paths: &WatchdogLogPaths) -> Result<()> {
     loop {
         let status = spawn_daemon(&daemon_path, &daemon_args, &log_paths.daemon_error)?;
 
-        // Console-control path: do not recover/restart. A mid-cleanup kill
-        // would otherwise spawn a fresh daemon that re-tiles and re-parks
-        // windows at the sentinel right as the session is ending.
+        // Restarting during console shutdown would re-tile and re-park windows during cleanup.
         if CONSOLE_CTRL_RECEIVED.load(Ordering::SeqCst) {
             info!(
                 ?status,
@@ -220,12 +199,7 @@ enum CrashDecision {
     GiveUp { count: usize },
 }
 
-/// Adds a crash event, evicts stale events outside the window, and decides
-/// whether to keep restarting. Pulled out for testability.
-///
-/// The retain check uses strict `<`: a crash exactly `window` seconds old
-/// is treated as outside the window and evicted. So crashes at t=0, t=30,
-/// t=60 with a 60s window count as 2 (the t=0 entry is evicted at t=60).
+/// A crash exactly one window old is excluded from the restart budget.
 fn record_crash_and_decide(
     crashes: &mut Vec<Instant>,
     now: Instant,
@@ -278,12 +252,7 @@ fn spawn_daemon(path: &Path, args: &[String], error_log_path: &Path) -> Result<E
 }
 
 fn recover_from_crash() {
-    // Only call uncloak — `restore_maximizebox_panic_recovery()` reads
-    // a process-local set populated by the daemon, so calling it from
-    // the watchdog process is a no-op. The daemon's own panic hook
-    // handles maximizebox restore in-process when a Rust panic fires;
-    // a hard kill (taskkill /F) skips that and leaves maximizebox state
-    // unrestored — the user can run `lwm panic-revert` if needed.
+    // Maximize-box recovery uses daemon-local state unavailable to the watchdog.
     info!("Running emergency uncloak");
     leopardwm_platform_win32::uncloak_all_visible_windows();
 }
@@ -302,10 +271,8 @@ fn install_kill_on_close_job() -> Result<()> {
         .context("SetInformationJobObject failed")?;
         AssignProcessToJobObject(job, GetCurrentProcess())
             .context("AssignProcessToJobObject failed")?;
-        // The HANDLE is Copy (no Drop), so simply letting it go out of
-        // scope here does not call CloseHandle. The OS keeps the handle
-        // in our process table until the watchdog exits, which is exactly
-        // when we want the KILL_ON_JOB_CLOSE cascade to fire.
+        // HANDLE has no Drop, so the job stays open until process exit,
+        // when kill-on-close should fire.
         let _ = job;
     }
     Ok(())
@@ -319,16 +286,8 @@ fn install_console_ctrl_handler() -> Result<()> {
     Ok(())
 }
 
-/// Fallback handler for console-attached debug or manual launches.
-///
-/// For CTRL_CLOSE / CTRL_LOGOFF / CTRL_SHUTDOWN, returning from the handler
-/// terminates the process immediately. Park forever instead (mirroring tokio's
-/// windows signal driver) so the process stays alive for the OS grace period
-/// and the supervised daemon can finish cleanup before the Job Object handle
-/// closes and KILL_ON_JOB_CLOSE fires.
-///
-/// For CTRL_C / CTRL_BREAK, return TRUE so the default ExitProcess handler does
-/// not run — the watchdog must keep supervising while the daemon restores.
+/// Park on console close/logoff/shutdown to preserve the OS cleanup grace period.
+/// Swallow Ctrl+C/Ctrl+Break so the default handler cannot terminate supervision early.
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     match ctrl_type {
         CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
@@ -350,7 +309,6 @@ mod tests {
     use super::*;
 
     fn t(secs: u64) -> Instant {
-        // Anchor test instants to a single base so durations are exact.
         thread_local! {
             static BASE: Instant = Instant::now();
         }
@@ -387,7 +345,6 @@ mod tests {
     fn well_separated_crashes_always_restart() {
         let mut crashes = Vec::new();
         for i in 0..10 {
-            // Each crash is a full window apart — none should ever accumulate.
             let decision =
                 record_crash_and_decide(&mut crashes, t(i * 120), Duration::from_secs(60), 3);
             assert_eq!(decision, CrashDecision::Restart { attempt: 1 });
