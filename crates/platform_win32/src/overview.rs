@@ -1,27 +1,15 @@
-//! Overview overlay: a fullscreen, interactive "map" of the focused
-//! monitor's non-empty workspaces (Win+Tab-like), one row per workspace
-//! with placeholder cards (title bar + icon body) for each visible window.
+//! Interactive overview of the focused monitor's non-empty workspaces.
 //!
-//! Mirrors `TabStripOverlay`'s structure (background message-pump thread,
-//! mpsc init handshake, daemon-facing handle) but with two differences:
-//! 1. The backdrop is the DESKTOP BLURRED through the window: at creation
-//!    the overlay enables the undocumented `SetWindowCompositionAttribute`
-//!    accent (acrylic, then plain blur). The window stays non-layered and
-//!    paints through WM_PAINT: each frame is rendered into a 32bpp DIB —
-//!    shapes are SDF-anti-aliased straight into the bits with per-region
-//!    alpha (backdrop translucent, cards opaque), GDI draws only text and
-//!    icons — and the premultiplied result is `BitBlt`-ed to the window
-//!    DC. DWM composites it over the blurred backdrop using the surface
-//!    alpha.
-//!    When the accent call is unavailable or fails, the overlay falls
-//!    back to the previous per-pixel-alpha layered pipeline
-//!    (`UpdateLayeredWindow`, alpha-dim instead of blur).
-//! 2. It takes the foreground when shown: the overlay handles keyboard
-//!    (arrows/Enter/Esc/digits) against its local model copy.
+//! A background message-pump thread owns the window. The daemon supplies
+//! an [`OverviewModel`] in client coordinates; the overlay draws and
+//! hit-tests it, reporting intent through [`OverviewEvent`].
 //!
-//! The overlay is dumb: the daemon sends a complete [`OverviewModel`]
-//! (client-coordinate rects); the overlay only draws and hit-tests it,
-//! reporting user intent back through [`OverviewEvent`]s.
+//! The non-layered window uses undocumented `SetWindowCompositionAttribute`
+//! acrylic or plain blur. Premultiplied 32bpp DIB frames reach DWM through
+//! WM_PAINT and `BitBlt`, retaining surface alpha over the blurred backdrop.
+//! If the accent API is unavailable or fails, `UpdateLayeredWindow` supplies
+//! per-pixel alpha dimming without blur. The overlay takes the foreground
+//! for keyboard input.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
@@ -291,9 +279,7 @@ pub const DEFAULT_ACCENT_WIDTH: u32 = 2;
 pub const VIEWPORT_RING_PAD: i32 = 6;
 
 /// Padding between a row panel's edge (or label strip) and the viewport
-/// ring. The daemon adds VIEWPORT_RING_PAD to it for the body inset; the
-/// renderer folds both into [`PANEL_RADIUS`] so the rounding constants
-/// stay in sync with the layout.
+/// ring. The daemon adds [`VIEWPORT_RING_PAD`] for the body inset.
 pub const PANEL_INNER_PAD: i32 = 10;
 
 impl Default for OverviewModel {
@@ -313,8 +299,6 @@ impl Default for OverviewModel {
 const BACKDROP_BG: u32 = 0x001A1A1A;
 const PANEL_BG: u32 = 0x00262626;
 const PANEL_ACTIVE_BG: u32 = 0x00303030;
-/// Label strip across each panel's top: slightly darker than the panel
-/// body, mirroring the card title-bar treatment.
 const LABEL_STRIP_BG: u32 = 0x001E1E1E;
 const LABEL_STRIP_ACTIVE_BG: u32 = 0x00262626;
 const PANEL_BORDER: u32 = 0x003A3A3A;
@@ -333,15 +317,12 @@ const PILL_TEXT: u32 = 0x00FFFFFF;
 /// clearly against the panel without competing with the accent rings.
 const VIEWPORT_RING_COLOR: u32 = 0x00A8A8A8;
 
-// Geometry (Win+Tab-like chrome).
 const CARD_RADIUS: i32 = 8;
 /// Panel rounding matches the viewport ring's radius (card radius + ring
 /// pad): full concentric (radius + body inset) read as too round, while
 /// the bare card radius read as too square on the larger panel.
 const PANEL_RADIUS: i32 = CARD_RADIUS + VIEWPORT_RING_PAD;
-/// Title bar strip across the top of each card (icon + window title).
 const CARD_TITLE_H: i32 = 26;
-/// App icon size inside the card title bar.
 const TITLE_ICON: i32 = 16;
 /// Minimum card size to get the title-bar/body split; smaller cards use
 /// the compact one-row rendering.
@@ -371,7 +352,6 @@ const OPAQUE: u8 = 255;
 /// Acrylic tint (AABBGGRR) passed in the accent policy's gradient color.
 const ACRYLIC_TINT: u32 = 0xCC1A_1A1A;
 
-/// How the backdrop translucency is produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackdropMode {
     /// `ACCENT_ENABLE_ACRYLICBLURBEHIND`: blur + noise + tint from the
@@ -396,7 +376,6 @@ const WM_OVERVIEW_START_ANIM: u32 = WM_USER + 6;
 const WM_OVERVIEW_NAVIGATE: u32 = WM_USER + 7;
 const WM_OVERVIEW_REPLAY_INPUT: u32 = WM_USER + 8;
 
-/// WM_TIMER id for the zoom-animation driver.
 const ANIM_TIMER_ID: usize = 1;
 
 /// Animation tick interval (ms). The OS clamps to USER_TIMER_MINIMUM
@@ -430,30 +409,17 @@ fn chrome_step_for_k(k: f32) -> usize {
     }
 }
 
-/// Which way the zoom animation is running.
+/// Live DWM thumbnails carry the zoom at timer cadence. Full-monitor
+/// software SDF rendering costs tens of milliseconds in debug builds, so
+/// chrome instead fades through pre-rendered [`CHROME_FADE_FACTORS`] steps.
+/// `show()` builds those frames before showing the window; the first open
+/// tick restarts the clock so pre-rendering cannot consume the glide.
+/// Each tick blits the frame selected by [`chrome_step_for_k`].
 ///
-/// The zoom is carried ENTIRELY by the live DWM thumbnails: retargeting
-/// a thumbnail (`thumbnail::update`) is a near-free DWM property change,
-/// so the glide runs at the full timer cadence. The painted chrome
-/// cannot re-render per tick (the full-monitor software SDF render
-/// costs tens of ms in debug builds — re-rendering it per tick is what
-/// reduced the old animation to 3-4 visible frames), so it fades in
-/// STEPS instead: `show()` renders the frame ONCE and derives faded
-/// copies at the [`CHROME_FADE_FACTORS`] global alpha factors BEFORE
-/// the animation clock starts (the first tick restarts the clock, so
-/// the pre-render cost never eats into the glide), and each tick
-/// cheaply `BitBlt`s the
-/// prebuilt DIB for the current motion parameter `k`
-/// ([`chrome_step_for_k`]) — chrome fades in under the gliding
-/// thumbnails on open and back out on close. Caveats: in Acrylic mode
-/// the OS-side blur/tint lives in the accent policy and cannot fade
-/// (only our painted chrome does; in Blur mode the painted backdrop
-/// TINT scales with the steps, approximating a backdrop fade), and the
-/// step frames snapshot the show-time model — a refresh landing
-/// mid-animation shows its new chrome only when the open settles. Cards
-/// without a thumbnail (compact, placeholder/snapshot mode) fade with
-/// the chrome steps; the AlphaDim fallback never animates and skips the
-/// staged fade entirely.
+/// Acrylic's OS-side blur/tint cannot fade; Blur's painted tint fades with
+/// the chrome. Step frames retain the show-time model, so mid-animation
+/// refreshes appear in chrome only at open-settle. Cards without live
+/// thumbnails fade with the chrome. AlphaDim skips animation entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnimPhase {
     /// Overlay opening: every row's thumbnails glide from their windows'
@@ -461,13 +427,12 @@ enum AnimPhase {
     /// chrome; inactive rows additionally fade in (0 -> 255) while
     /// gliding (active row stays 255).
     Opening,
-    /// Overlay closing: every row's thumbnails glide back toward their
-    /// would-be rects; the target row stays at 255 while the other rows
-    /// fade out (255 -> 0), the chrome stays, then the window hides.
+    /// Overlay closing: thumbnails return to their would-be rects; the
+    /// target row stays opaque while other rows and chrome fade out,
+    /// then the window hides.
     Closing,
 }
 
-/// One in-flight open/close animation.
 #[derive(Debug, Clone, Copy)]
 struct AnimState {
     phase: AnimPhase,
@@ -489,7 +454,6 @@ struct AnimState {
     notify: bool,
 }
 
-/// Linear progress of `anim` in `[0, 1]`.
 fn anim_progress(anim: &AnimState) -> f32 {
     if anim.duration_ms == 0 {
         return 1.0;
@@ -498,8 +462,6 @@ fn anim_progress(anim: &AnimState) -> f32 {
     (elapsed / anim.duration_ms as f32).clamp(0.0, 1.0)
 }
 
-/// Apply the configured easing curve to a progress value (f32 shim over
-/// the f64 [`Easing::apply`]).
 fn apply_easing(easing: Easing, t: f32) -> f32 {
     easing.apply(f64::from(t)) as f32
 }
@@ -546,8 +508,6 @@ fn anim_k(anim: &AnimState) -> f32 {
     eased_k(anim.phase, anim.easing, anim_progress(anim))
 }
 
-/// Pure core of [`anim_k`]: ease `progress` with the configured curve
-/// and orient it for the phase (open 0 -> 1, close 1 -> 0).
 fn eased_k(phase: AnimPhase, easing: Easing, progress: f32) -> f32 {
     let t = apply_easing(easing, progress);
     match phase {
@@ -582,17 +542,12 @@ fn inactive_row_opacity(k: f32) -> u8 {
 struct OverviewState {
     model: OverviewModel,
     visible: bool,
-    /// Screen rect the overlay occupies; rendering needs the destination
-    /// position/size on every re-render.
     window_rect: Rect,
-    /// `(row_idx, card_idx)` under the mouse, if any.
     hovered: Option<(usize, usize)>,
-    /// `(row_idx, card_idx)` of the keyboard selection, if any.
     selected: Option<(usize, usize)>,
     input_generation: Option<u32>,
     pending_move: bool,
     deferred_keys: VecDeque<u16>,
-    /// Whether `TrackMouseEvent` is armed for WM_MOUSELEAVE.
     mouse_tracking_armed: bool,
     backdrop: BackdropMode,
     event_tx: Option<mpsc::Sender<OverviewEvent>>,
@@ -600,7 +555,6 @@ struct OverviewState {
     /// window id. RAII: dropping an entry unregisters its thumbnail.
     /// Cleared on hide and overlay drop; re-diffed on every model push.
     thumbnails: HashMap<u64, ThumbnailHandle>,
-    /// In-flight open/close zoom animation, if any.
     anim: Option<AnimState>,
     /// Pre-rendered staged chrome-fade frames, one per
     /// [`CHROME_FADE_FACTORS`] entry, built in `show()` and freed via
@@ -643,14 +597,12 @@ struct OverviewState {
     mask_pushed: (Rect, Vec<CornerCap>),
 }
 
-/// Cached settled frame so a hover change repaints two cards instead of
-/// re-running the full-monitor SDF render (~40-50ms in debug — the old
-/// per-mouse-move hitch/flicker). `work_*` is the premultiplied DIB the
-/// window shows (kept selected into its memory DC for rect blits);
-/// `base_*` is the same frame BEFORE the hover and the premultiply
-/// (straight color + region-alpha plane), so a repaint resets a card
-/// rect from the base and redoes only that card's chrome. Handles are
-/// `isize` like [`ChromeStep`]; all access runs under the state lock.
+/// Cached settled frame: hover changes repaint two cards instead of
+/// repeating the full-monitor SDF render (~40-50ms in debug).
+/// `work_*` is the premultiplied DIB, kept selected into its memory DC;
+/// `base_*` holds hover-free straight color and region alpha, so card
+/// repaints reset from the base before redrawing and premultiplying.
+/// Handles are `isize` like [`ChromeStep`]; all access holds the state lock.
 struct HoverCache {
     work_dc: isize,
     work_bmp: isize,
@@ -741,7 +693,6 @@ fn rect_contains(r: &Rect, x: i32, y: i32) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
-/// Locate a window's card in `model` as `(row_idx, card_idx)`.
 fn locate_card(model: &OverviewModel, wid: u64) -> Option<(usize, usize)> {
     model.rows.iter().enumerate().find_map(|(ri, row)| {
         row.cards
@@ -751,14 +702,12 @@ fn locate_card(model: &OverviewModel, wid: u64) -> Option<(usize, usize)> {
     })
 }
 
-/// Derive the initial keyboard selection from the model's `selected` flags.
 fn selection_from_model(model: &OverviewModel) -> Option<(usize, usize)> {
     for (ri, row) in model.rows.iter().enumerate() {
         if let Some(ci) = row.cards.iter().position(|c| c.selected) {
             return Some((ri, ci));
         }
     }
-    // Fall back to the active row's first card, then any first card.
     model
         .rows
         .iter()
@@ -774,7 +723,7 @@ fn selection_from_model(model: &OverviewModel) -> Option<(usize, usize)> {
         .map(|(ri, _)| (ri, 0))
 }
 
-// --- Accent backdrop (undocumented SetWindowCompositionAttribute) -------
+// Undocumented SetWindowCompositionAttribute accent policy.
 
 const WCA_ACCENT_POLICY: u32 = 19;
 const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
@@ -834,23 +783,12 @@ unsafe fn enable_backdrop_blur(hwnd: HWND) -> BackdropMode {
     BackdropMode::AlphaDim
 }
 
-// --- Corner-cap mask layer ----------------------------------------------
-//
-// Live DWM thumbnails composite ABOVE everything the overlay paints, so
-// their square corners overflow the cards' rounded BOTTOM corners and
-// nothing in the frame DIB can clip them. A companion click-through
-// layered window owned by the overlay (always above its owner) paints
-// small anti-aliased caps over each thumbnail-carrying card's bottom two
-// corners. A cap restores everything the square preview corner covers,
-// in the overlay's own layer order: panel background outside the card's
-// rounding, the card's 1px frame arc, and (selected card only) the
-// accent ring's corner arc — alpha 0 over the preview interior (inside
-// the frame's inner rounding) and everywhere else. The squares sit at
-// the THUMBNAIL dest rect corners (the preview body, [`thumb_body`]),
-// mirroring the snapshot path's [`mask_snapshot_corners`], so the cap
-// never repaints pixels the preview doesn't cover. Shown only on the
-// SETTLED map (the caps sit on fixed card corners; mid-glide they'd
-// float over moving thumbnails).
+// DWM thumbnails composite above the painted frame, so the frame cannot
+// clip their square bottom corners. An owned click-through layered window
+// paints caps over the thumbnail destination corners: panel background,
+// frame arc, and the selected card's accent arc, transparent inside the
+// preview. Caps mirror snapshot masking and appear only when settled;
+// fixed card-corner caps would float over thumbnails during a glide.
 
 /// One corner cap: pixels covering everything the square preview corner
 /// overlaps within `square` (alpha = 1 - coverage of the frame's INNER
@@ -901,7 +839,6 @@ fn caps_bounds(caps: &[CornerCap], w: i32, h: i32) -> Option<Rect> {
     (x0 < x1 && y0 < y1).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
-/// Bounding box of a non-empty rect iterator.
 fn bounding_rect(rects: impl Iterator<Item = Rect>) -> Rect {
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
     for r in rects {
@@ -962,9 +899,8 @@ unsafe fn create_mask_window(owner: HWND) -> isize {
     }
 }
 
-/// Compute the caps for the current model: one pair per titled card
-/// whose live thumbnail is registered (`thumb_wids`). The keyboard
-/// selection adds the accent ring to its card's caps. Pure for tests.
+/// One cap pair per titled card with a registered live thumbnail.
+/// The keyboard selection adds its accent ring to the caps.
 fn corner_caps(
     model: &OverviewModel,
     thumb_wids: &HashSet<u64>,
@@ -1051,7 +987,6 @@ fn sync_mask() {
 /// overlay). Never activates.
 unsafe fn update_mask_window(hwnd: HWND, rect: Rect, caps: &[CornerCap]) {
     let Some(bounds) = caps_bounds(caps, rect.width, rect.height) else {
-        // Caps entirely clipped out: nothing to show.
         let _ = ShowWindow(hwnd, SW_HIDE);
         return;
     };
@@ -1250,8 +1185,6 @@ impl OverviewOverlay {
                         Ok(h) => {
                             let mode = enable_backdrop_blur(h);
                             if mode == BackdropMode::AlphaDim {
-                                // Fallback: per-pixel-alpha layered pipeline
-                                // (UpdateLayeredWindow + alpha dim).
                                 SetWindowLongPtrW(
                                     h,
                                     GWL_EXSTYLE,
@@ -1266,7 +1199,6 @@ impl OverviewOverlay {
                                 let mut s = state();
                                 s.backdrop = mode;
                                 s.mask_hwnd = mask;
-                                // Fresh mask window: it shows nothing yet.
                                 s.mask_pushed = (Rect::new(0, 0, 0, 0), Vec::new());
                             }
                             let _ = tx.send(Ok((h.0 as isize, thread_id)));
@@ -1464,7 +1396,6 @@ impl OverviewOverlay {
         }
         sync_thumbnails(self.hwnd);
         render_overlay(self.hwnd);
-        // Card rects/thumbnails may have moved: refresh the corner caps.
         sync_mask();
     }
 
@@ -1527,19 +1458,13 @@ impl OverviewOverlay {
         drop_pending_hover_cache();
     }
 
-    /// Request an ANIMATED close: every row's live thumbnails glide back
-    /// toward their windows' would-be rects — the row for
-    /// `target_workspace` (the activated workspace; `None` = the active
-    /// row) at full opacity, the other rows fading out — while the chrome
-    /// stays, then the window hides — all driven by the overlay's own
-    /// WM_TIMER ticks.
+    /// Request a non-blocking animated close toward `target_workspace`
+    /// (`None` selects the active row). Its live thumbnails stay opaque;
+    /// other rows and chrome fade out while thumbnails return to their
+    /// would-be window rects. The daemon may focus/switch underneath the glide.
     ///
-    /// Deliberately non-blocking: the daemon proceeds with its
-    /// focus/switch flow immediately while the overlay closes over the
-    /// changing windows underneath — that compose-over-the-switch look is
-    /// exactly Task View's. Falls back to an instant [`Self::hide`] when
-    /// there is nothing to animate (`anim_ms == 0` or no live
-    /// thumbnails); no-op when a close is already in flight.
+    /// Falls back to [`Self::hide`] when there is nothing to animate
+    /// (`anim_ms == 0` or no live thumbnails); no-op if already closing.
     pub fn hide_animated(&self, target_workspace: Option<usize>) {
         release_input();
         let start = {
@@ -1551,9 +1476,8 @@ impl OverviewOverlay {
         };
         match start {
             CloseStart::Started => {
-                // Re-derive the faded chrome steps from the retained
-                // full frame (freed at open-settle); ticks skip step
-                // blits until they exist, so this never races the timer.
+                // Rebuild faded copies from the full frame retained at open-settle.
+                // Ticks skip step blits until the copies exist, avoiding a timer race.
                 rebuild_faded_chrome_steps();
                 // The glide is starting: the caps' card corners are about
                 // to move out from under them.
@@ -1591,36 +1515,27 @@ fn apply_model_update(s: &mut OverviewState, model: OverviewModel) -> bool {
     if is_closing_state(s) {
         return false;
     }
-    // Unchanged refresh: the daemon re-pushes on every window event, so
-    // an identical model must be a strict no-op. Re-applying it repainted
-    // a hover-free frame and re-pushed the mask layer per event — the
-    // stationary-mouse hover-flicker storm.
+    // Identical event-driven refreshes must not repaint a hover-free
+    // frame or re-push the mask: either can cause stationary-cursor flicker.
     if s.model == model {
         return false;
     }
-    // Preserve the current selection and hover if their windows survived.
     let prev_wid = s.selection_window_id();
     let hover_wid = s
         .hovered
         .and_then(|(ri, ci)| s.model.rows.get(ri)?.cards.get(ci))
         .map(|c| c.window_id);
-    // Carry an in-flight zoom across the refresh: every frame
-    // re-reads the model, so the new geometry simply takes over
-    // mid-flight. Re-locate the animating row by workspace index
-    // (rows may have been inserted/removed); the zoom is dropped
-    // only when its row is gone. Without this, ANY window event
-    // arriving during the 150ms open (browser title ticks, app
-    // launches) snapped the animation to its final state.
+    // Window events can arrive during opening. Carry the zoom across
+    // refreshes to avoid snapping it to the final state; relocate its row
+    // by workspace index because rows can be inserted or removed.
     let anim_ws = s
         .anim
         .and_then(|a| s.model.rows.get(a.row).map(|r| r.workspace_index));
     s.selected = prev_wid
         .and_then(|wid| locate_card(&model, wid))
         .or_else(|| selection_from_model(&model));
-    // The mouse hasn't moved: the full repaint this refresh triggers
-    // rebuilds the frame from `s.hovered`, so clearing it here painted a
-    // hover-free frame that the next (synthetic) WM_MOUSEMOVE patched
-    // back — the visible hover flicker on every refresh.
+    // A stationary cursor generates no new hover intent. Preserve hover
+    // for the full repaint so synthetic WM_MOUSEMOVE cannot flicker it back.
     s.hovered = hover_wid.and_then(|wid| locate_card(&model, wid));
     s.model = model;
     let next_anim = match (s.anim, anim_ws) {
@@ -1639,14 +1554,13 @@ fn apply_model_update(s: &mut OverviewState, model: OverviewModel) -> bool {
     true
 }
 
-/// Outcome of [`start_close`].
 enum CloseStart {
     /// A closing [`AnimState`] is installed; post `WM_OVERVIEW_START_ANIM`.
     Started,
     /// A close is already in flight: do nothing (double-close guard).
     AlreadyClosing,
-    /// Nothing to animate (`anim_ms == 0` or no live thumbnails on the
-    /// target row): the caller closes instantly instead.
+    /// Nothing to animate (`anim_ms == 0` or no registered gliders):
+    /// the caller closes instantly instead.
     NotAnimatable,
 }
 
@@ -1724,11 +1638,9 @@ fn start_close(s: &mut OverviewState, target_workspace: Option<usize>, notify: b
     CloseStart::Started
 }
 
-/// Overlay-initiated dismissal (Esc, backdrop click, focus loss): run the
-/// close animation to completion and only THEN send `Dismissed`, so the
-/// daemon's subsequent `hide()` finds the window already hidden and just
-/// does its bookkeeping. Sends `Dismissed` immediately when there is
-/// nothing to animate (the daemon then hides instantly, as before).
+/// Overlay-initiated dismissal waits for the animation before sending
+/// `Dismissed`, so the daemon's `hide()` cannot interrupt the glide.
+/// Sends immediately when there is nothing to animate.
 fn user_close(hwnd: HWND) {
     release_input();
     let start = {
@@ -1770,8 +1682,7 @@ impl Drop for OverviewOverlay {
         free_chrome_steps();
         drop_hover_cache();
         drop_pending_hover_cache();
-        // Wake the UI thread out of its message loop, then join. Mirrors
-        // TabStripOverlay::drop (PostThreadMessageW fallback included).
+        // PostThreadMessageW wakes the UI thread if posting to its window fails.
         let posted_via_window = unsafe {
             PostMessageW(
                 Some(self.hwnd),
@@ -1798,14 +1709,10 @@ impl Drop for OverviewOverlay {
     }
 }
 
-// --- Live thumbnails ------------------------------------------------------
-//
-// DWM composites registered thumbnails ON TOP of the window's painted
-// content within their dest rects, so the painted card body stays as the
-// backing and the title strip / selection ring (drawn outside the card)
-// remain visible. Per-pixel-alpha UpdateLayeredWindow destinations don't
-// reliably composite thumbnails, so the AlphaDim fallback skips them and
-// keeps the placeholder bodies.
+// DWM thumbnails composite above painted content. Body previews leave
+// the title strip and outside selection ring visible. UpdateLayeredWindow
+// destinations do not reliably composite thumbnails, so AlphaDim uses
+// placeholder bodies instead.
 
 /// The thumbnail dest rect for a card: the body below the title strip,
 /// inset by [`THUMB_INSET`]. `None` for compact (untitled) cards — a
@@ -1823,9 +1730,6 @@ fn thumb_body(card_rect: &Rect) -> Option<Rect> {
     (body.width > 0 && body.height > 0).then_some(body)
 }
 
-/// Whether a card's preview can carry the zoom animation: it requests a
-/// live thumbnail, knows its window's real rect, and is large enough for
-/// a thumbnail body.
 fn card_can_glide(card: &OverviewCard) -> bool {
     card.live && card.from_rect.is_some() && thumb_body(&card.rect).is_some()
 }
@@ -1907,30 +1811,18 @@ fn sync_thumbnails(hwnd: HWND) {
     state().thumbnails = next;
 }
 
-/// One zoom-animation timer tick: retarget every gliding thumbnail to
-/// its interpolated rect and opacity-ramp the non-anim rows' thumbnails
-/// at [`inactive_row_opacity`]`(k)` on top (anim row stays opaque). The
-/// painted chrome NEVER re-renders here — when `k` crosses into a new
-/// [`chrome_step_for_k`] step, the tick `BitBlt`s that pre-rendered
-/// fade frame (a cheap blit, no SDF pass), so the glide actually runs
-/// at the timer cadence instead of being throttled to a few
-/// full-monitor software renders.
-///
-/// On completion (`t >= 1`) the timer is killed and the phase resolves:
-/// an open settles every thumbnail on its exact card body; a close hides
-/// the window and, for overlay-initiated closes, sends `Dismissed` only
-/// now (see [`user_close`]).
+/// Retarget thumbnails at timer cadence and blit pre-rendered chrome
+/// steps without repeating the expensive full-monitor SDF render.
+/// On completion, settle thumbnails on card bodies or hide the window;
+/// overlay-initiated closes send `Dismissed` only after hiding.
 fn on_anim_tick(hwnd: HWND) {
     let (anim, updates) = {
         let mut s = state();
         let anim = match s.anim.as_mut() {
             Some(a) => {
-                // First tick of an open: the initial full-chrome WM_PAINT
-                // (the one expensive software render, processed before any
-                // WM_TIMER) may have eaten tens of ms; restart the clock so
-                // the glide plays its full duration. Closes never restart —
-                // an Esc-mid-open close carries a back-dated start time
-                // that keeps `k` continuous.
+                // Restart the opening clock after show-time rendering and queued
+                // WM_PAINT work so neither consumes the glide duration. Closes retain
+                // their back-dated start to keep an interrupted open's `k` continuous.
                 if a.ticks == 0 && a.phase == AnimPhase::Opening {
                     a.started = std::time::Instant::now();
                 }
@@ -1938,7 +1830,6 @@ fn on_anim_tick(hwnd: HWND) {
                 *a
             }
             None => {
-                // Animation cancelled (instant hide): stop ticking.
                 drop(s);
                 tracing::debug!("overview zoom cancelled: timer stopped");
                 unsafe {
@@ -1983,13 +1874,10 @@ fn on_anim_tick(hwnd: HWND) {
             .filter_map(|(ri, c)| {
                 let body = thumb_body(&c.rect)?;
                 let handle = s.thumbnails.get(&c.window_id)?.as_isize();
-                // Every card with a from_rect glides at the shared `k`;
-                // cards without one stay static.
                 let dest = match c.from_rect {
                     Some(from) => lerp_rect(&from, &body, k),
                     None => body,
                 };
-                // Non-anim rows: opacity rides `k` on top of the glide.
                 let opacity = if ri == anim.row { OPAQUE } else { fade };
                 Some((handle, dest, opacity))
             })
@@ -2018,7 +1906,6 @@ fn on_anim_tick(hwnd: HWND) {
                 s.anim = None;
                 s.chrome_last_step = None;
             }
-            // Settle every thumbnail on its exact card body.
             sync_thumbnails(hwnd);
             // Adopt the show-time hover cache when the state is
             // unchanged — the settled full-strength frame is already on
@@ -2046,9 +1933,8 @@ fn on_anim_tick(hwnd: HWND) {
                 s.visible = false;
             }
             release_input();
-            // Hide FIRST, then unregister: tearing the thumbnails down on
-            // the still-visible window made DWM recomposite the bare map
-            // chrome for a few ms — the "map reappears then hides" flash.
+            // Hide before unregistering: tearing thumbnails down while visible
+            // makes DWM briefly composite bare map chrome, causing a close flash.
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 // Drop any repaint queued during the close so a later
@@ -2182,8 +2068,6 @@ impl OverviewState {
             .map(|c| c.window_id)
     }
 
-    /// Hit-test a client point against cards (title bar included — the
-    /// card rect covers both the title strip and the body).
     fn card_at(&self, x: i32, y: i32) -> Option<(usize, usize)> {
         for (ri, row) in self.model.rows.iter().enumerate() {
             for (ci, card) in row.cards.iter().enumerate() {
@@ -2195,8 +2079,6 @@ impl OverviewState {
         None
     }
 
-    /// Hit-test a client point against row panels (the label strip is
-    /// inside the panel).
     fn row_at(&self, x: i32, y: i32) -> Option<usize> {
         self.model
             .rows
@@ -2204,9 +2086,6 @@ impl OverviewState {
             .position(|r| rect_contains(&r.panel, x, y))
     }
 
-    /// Move the selection one card left/right within the current row
-    /// (x-order), or up/down to the nearest-x card of the adjacent
-    /// non-empty row. Returns true when the selection changed.
     fn move_selection(&mut self, key: u16) -> bool {
         let Some((ri, ci)) = self.selected else {
             self.selected = selection_from_model(&self.model);
@@ -2222,14 +2101,11 @@ impl OverviewState {
     }
 }
 
-/// Compute the next `(row, card)` for an arrow key, or `None` when the
-/// selection cannot move that way (edge of the map).
 fn next_selection(model: &OverviewModel, ri: usize, ci: usize, key: u16) -> Option<(usize, usize)> {
     let rows = &model.rows;
     let cur = rows.get(ri)?.cards.get(ci)?;
     let cur_cx = cur.rect.x + cur.rect.width / 2;
     if key == VK_LEFT.0 || key == VK_RIGHT.0 {
-        // Order this row's cards by x and step within it.
         let row = &rows[ri];
         let mut order: Vec<usize> = (0..row.cards.len()).collect();
         order.sort_by_key(|&i| row.cards[i].rect.x);
@@ -2241,8 +2117,6 @@ fn next_selection(model: &OverviewModel, ri: usize, ci: usize, key: u16) -> Opti
         };
         order.get(next).map(|&i| (ri, i))
     } else {
-        // Up/Down: nearest non-empty row in that direction, card with
-        // the closest x-center.
         let mut candidates: Box<dyn Iterator<Item = usize>> = if key == VK_UP.0 {
             Box::new((0..ri).rev())
         } else {
@@ -2259,7 +2133,6 @@ fn next_selection(model: &OverviewModel, ri: usize, ci: usize, key: u16) -> Opti
     }
 }
 
-/// Handle WM_KEYDOWN. Returns true when the key was consumed.
 fn handle_key_down(hwnd: HWND, vk: u16) -> bool {
     dispatch_pending_input(hwnd, Some(vk))
 }
@@ -2290,7 +2163,6 @@ fn dispatch_input_result(hwnd: HWND, result: OverviewInputResult) -> bool {
     true
 }
 
-/// Handle mouse buttons. `middle` selects the close gesture.
 fn handle_mouse_button(hwnd: HWND, x: i32, y: i32, middle: bool) {
     let (card_hit, row_hit) = {
         let s = state();
@@ -2317,7 +2189,6 @@ fn handle_mouse_button(hwnd: HWND, x: i32, y: i32, middle: bool) {
     match (card_hit, row_hit) {
         (Some(wid), _) => send_event(OverviewEvent::ActivateWindow(wid)),
         (None, Some(ws_idx)) => send_event(OverviewEvent::SwitchWorkspace(ws_idx)),
-        // Backdrop click: overlay-owned animated close (like Esc).
         (None, None) => user_close(hwnd),
     }
 }
@@ -2524,7 +2395,6 @@ struct FrameDib {
     bits: *mut u32,
 }
 
-/// Everything one frame render needs besides the bitmap dimensions.
 struct FrameInput<'a> {
     model: &'a OverviewModel,
     hovered: Option<(usize, usize)>,
@@ -2548,7 +2418,7 @@ unsafe fn render_frame_straight(w: i32, h: i32, input: &FrameInput) -> Option<(F
     let mem_dc = CreateCompatibleDC(Some(hdc_screen));
     let old_bmp = SelectObject(mem_dc, hbitmap.into());
 
-    // 1. Backdrop clear (GDI), flushed before the direct-bit shape pass.
+    // Flush GDI before the direct-bit shape pass.
     fill(mem_dc, &Rect::new(0, 0, w, h), BACKDROP_BG);
     let _ = GdiFlush();
 
@@ -2559,7 +2429,7 @@ unsafe fn render_frame_straight(w: i32, h: i32, input: &FrameInput) -> Option<(F
     };
     let mut alpha = vec![backdrop_alpha; (w * h) as usize];
 
-    // 2. Shapes: anti-aliased rounded panels/cards/outline into the bits.
+    // Rounded shapes write directly into the DIB bits.
     let saves = {
         let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
         draw_shapes(pixels, &mut alpha, w, h, input);
@@ -2567,11 +2437,10 @@ unsafe fn render_frame_straight(w: i32, h: i32, input: &FrameInput) -> Option<(F
         save_snapshot_corners(pixels, w, h, input)
     };
 
-    // 3. Text + icons via GDI, flushed before the direct-bit passes below.
+    // Flush GDI text and icons before the direct-bit masking pass.
     draw_content(mem_dc, input.model, input.thumb_wids);
     let _ = GdiFlush();
 
-    // 4. Mask the snapshots' bottom corners back to the card rounding.
     let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
     mask_snapshot_corners(pixels, w, h, &saves);
 
@@ -2601,7 +2470,6 @@ unsafe fn build_frame_dib(w: i32, h: i32, input: &FrameInput) -> Option<FrameDib
 /// Saved straight-color pixels under one snapshot card's bottom-corner
 /// squares, captured before the GDI pass draws the (square) snapshot.
 struct CornerSave {
-    /// Snapshot dest rect (the card's thumb body).
     body: Rect,
     /// Body rounding radius: card radius minus the body inset, so the
     /// mask follows the inner edge of the card frame.
@@ -2670,7 +2538,6 @@ fn mask_snapshot_corners(pixels: &mut [u32], w: i32, h: i32, saves: &[CornerSave
     }
 }
 
-/// 32bpp top-down BITMAPINFO for the frame and step DIB sections.
 fn top_down_bmi(w: i32, h: i32) -> BITMAPINFO {
     BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -2851,8 +2718,6 @@ fn build_chrome_steps(w: i32, h: i32) {
     s.pending_hover_cache = pending;
 }
 
-/// Create one blank step DIB selected into its own memory DC; the raw
-/// bits pointer for the copy + fade fill rides in `ChromeStep::bits`.
 unsafe fn create_step_dib(w: i32, h: i32) -> Option<ChromeStep> {
     let bmi = top_down_bmi(w, h);
     let mut bits: *mut c_void = std::ptr::null_mut();
@@ -2867,7 +2732,6 @@ unsafe fn create_step_dib(w: i32, h: i32) -> Option<ChromeStep> {
     })
 }
 
-/// Free one fade step's GDI objects.
 unsafe fn free_chrome_step(st: ChromeStep) {
     let dc = HDC(st.mem_dc as *mut c_void);
     SelectObject(dc, HGDIOBJ(st.old_bmp as *mut c_void));
@@ -2890,12 +2754,9 @@ fn free_chrome_steps() {
     }
 }
 
-/// At open-settle, pop the full-strength frame into `chrome_full` and
-/// return the faded steps for freeing (pure bookkeeping for tests; the
-/// caller frees). Holding only the full frame while the overview sits
-/// open saves 3x w*h*4 bytes (~85MB at 5120x1440); the close-start
-/// rebuild re-derives the faded copies. No-op unless the full step set
-/// is present.
+/// Retain only the full frame at open-settle, saving three w*h*4-byte
+/// faded copies (~85MB at 5120x1440) until the close rebuilds them.
+/// Returns frames for the caller to free; no-op without a full step set.
 fn take_faded_steps(s: &mut OverviewState) -> Vec<ChromeStep> {
     if s.chrome_steps.len() != CHROME_FADE_FACTORS.len() {
         return Vec::new();
@@ -2908,7 +2769,6 @@ fn take_faded_steps(s: &mut OverviewState) -> Vec<ChromeStep> {
     steps
 }
 
-/// [`take_faded_steps`] against the global state, freeing the result.
 fn demote_chrome_steps_to_full() {
     let faded = take_faded_steps(&mut state());
     for st in faded {
@@ -3137,7 +2997,6 @@ unsafe fn build_hover_cache(w: i32, h: i32, input: &FrameInput) -> Option<HoverC
     })
 }
 
-/// Free a hover cache's GDI objects (same handle shape as a chrome step).
 unsafe fn free_hover_cache(cache: HoverCache) {
     free_chrome_step(ChromeStep {
         mem_dc: cache.work_dc,
@@ -3157,8 +3016,6 @@ fn drop_hover_cache() {
     }
 }
 
-/// Take and free the show-time pending hover cache (hide, close finish,
-/// overlay drop, re-show).
 fn drop_pending_hover_cache() {
     let pending = state().pending_hover_cache.take();
     if let Some(p) = pending {
@@ -3166,10 +3023,9 @@ fn drop_pending_hover_cache() {
     }
 }
 
-/// Whether the show-time pending hover cache still reflects the live
-/// state at open-settle: same model, selection, thumbnail set, and
-/// frame size, with no hover baked anywhere (mouse moves are blocked
-/// mid-anim, so `hovered` should be `None`). Pure for tests.
+/// A pending cache is reusable only for the same model, selection,
+/// thumbnail set, and size. Hover must remain absent: mouse moves are
+/// blocked during animation, so no hover is baked into these frames.
 fn pending_matches_state(p: &PendingHoverCache, s: &OverviewState) -> bool {
     let wids: HashSet<u64> = s.thumbnails.keys().copied().collect();
     s.visible
@@ -3249,7 +3105,6 @@ unsafe fn repaint_card_in_cache(
         hovered,
         refill_body,
     );
-    // GDI content for the repainted areas (fonts mirror draw_content).
     let hdc = HDC(cache.work_dc as *mut c_void);
     SetBkMode(hdc, TRANSPARENT);
     let card_font = make_font(13, FW_NORMAL.0 as i32);
@@ -3322,7 +3177,6 @@ fn hover_repaint(hwnd: HWND, old: Option<(usize, usize)>, new: Option<(usize, us
     true
 }
 
-/// Layered fallback: render the DIB and push it with `UpdateLayeredWindow`.
 unsafe fn render_and_update(
     hwnd: HWND,
     rect: Rect,
@@ -3370,22 +3224,13 @@ unsafe fn render_and_update(
     release_frame_dib(dib);
 }
 
-// --- Software (SDF) shape renderer --------------------------------------
-//
-// GDI's RoundRect is hard-edged, so every rounded shape (panel and card
-// fills/frames, label and title strips, the selection outline) is
-// rasterized directly into the DIB with the same anti-aliased
-// rounded-rect SDF the border overlay uses. The color plane holds
-// straight (non-premultiplied) pixels in DIB order — 0x00RRGGBB as u32,
-// i.e. R in bits 16..24 (BGRA in memory) — so COLORREF values must go
-// through [`bgr_to_pixel`] first (the grey palette constants are
-// channel-symmetric and need no swap). A parallel alpha plane
-// accumulates coverage-weighted region alpha. GDI is kept only for text
-// and icons.
+// GDI RoundRect is hard-edged, so rounded shapes use the border overlay's
+// anti-aliased SDF directly in the DIB. Straight-color pixels are
+// 0x00RRGGBB (BGRA in memory), unlike COLORREF's 0x00BBGGRR; colored
+// values must pass through bgr_to_pixel. A parallel alpha plane tracks
+// coverage-weighted region alpha; GDI supplies text and icons.
 
-/// COLORREF byte order (0x00BBGGRR) -> DIB pixel order (0x00RRGGBB).
-/// Same channel mapping as `border.rs`, which splits its `color_bgr`
-/// into components and writes R into bits 16..24 of the DIB pixel.
+/// COLORREF (0x00BBGGRR) to DIB pixel order (0x00RRGGBB).
 fn bgr_to_pixel(color: u32) -> u32 {
     (color & 0x0000_FF00) | ((color & 0xFF) << 16) | ((color >> 16) & 0xFF)
 }
@@ -3522,7 +3367,6 @@ fn sdf_stroke_round(
     let inner_rad = (rad - stroke).max(0.0);
     let (rxf, ryf) = (rect.x as f32, rect.y as f32);
     let (rwf, rhf) = (rect.width as f32, rect.height as f32);
-    // Skip interior pixels farther from every edge than the ring reaches.
     let band = (stroke + rad).ceil() as i32 + 1;
     for y in y0..y1 {
         let row = (y * w) as usize;
@@ -3551,12 +3395,10 @@ fn sdf_stroke_round(
     }
 }
 
-/// Whether the card is large enough for the title-bar/body split.
 fn card_is_titled(r: &Rect) -> bool {
     r.height >= TITLED_MIN_H && r.width >= TITLED_MIN_W
 }
 
-/// Corner radius for a card, clamped so tiny cards stay well-formed.
 fn card_radius(r: &Rect) -> f32 {
     (CARD_RADIUS as f32)
         .min(r.width as f32 / 2.0)
@@ -3659,8 +3501,6 @@ fn draw_card_chrome(
     sdf_stroke_round(pixels, alpha, w, h, r, radius, 1.0, CARD_BORDER, OPAQUE);
 }
 
-/// Rasterize every shape of the frame: panels (fill, label strip, frame,
-/// viewport marker), cards, and the keyboard selection's accent outline.
 fn draw_shapes(pixels: &mut [u32], alpha: &mut [u8], w: i32, h: i32, input: &FrameInput) {
     let model = input.model;
     let (hovered, selected) = (input.hovered, input.selected);
@@ -3680,8 +3520,6 @@ fn draw_shapes(pixels: &mut [u32], alpha: &mut [u8], w: i32, h: i32, input: &Fra
         sdf_fill_round(
             pixels, alpha, w, h, &row.panel, panel_rad, true, true, panel_bg, panel_a,
         );
-        // Label strip: darker band across the panel top, top corners
-        // following the panel rounding, bottom edge square.
         sdf_fill_round(
             pixels,
             alpha,
@@ -3868,8 +3706,8 @@ unsafe fn draw_text_in(hdc: HDC, text: &str, r: &Rect, color: u32, format: DRAW_
     let _ = DrawTextW(hdc, &mut wide, &mut win_rect, format);
 }
 
-/// GDI content pass: text and icons only — every shape is rasterized by
-/// [`draw_shapes`] before this runs.
+/// GDI content follows the shape pass; its pixels use the existing
+/// region-alpha plane when the frame is premultiplied.
 unsafe fn draw_content(hdc: HDC, model: &OverviewModel, thumb_wids: &HashSet<u64>) {
     SetBkMode(hdc, TRANSPARENT);
     let accent = model.accent_bgr;
@@ -3901,7 +3739,6 @@ unsafe fn draw_content(hdc: HDC, model: &OverviewModel, thumb_wids: &HashSet<u64
     let _ = DeleteObject(pill_font.into());
 }
 
-/// Label row: workspace number + name across the panel's top strip.
 unsafe fn draw_row_label(hdc: HDC, row: &OverviewRow, label_font: HFONT) {
     let old_font = SelectObject(hdc, label_font.into());
     let text_color = if row.is_active {
@@ -3925,7 +3762,6 @@ unsafe fn draw_row_label(hdc: HDC, row: &OverviewRow, label_font: HFONT) {
     SelectObject(hdc, old_font);
 }
 
-/// Tab-count pill (`n` windows behind the visible tab) inside `pill`.
 unsafe fn draw_tab_pill(hdc: HDC, pill: &Rect, n: usize, pill_font: HFONT, accent: u32) {
     fill(hdc, pill, accent);
     let old_font = SelectObject(hdc, pill_font.into());
@@ -3939,8 +3775,6 @@ unsafe fn draw_tab_pill(hdc: HDC, pill: &Rect, n: usize, pill_font: HFONT, accen
     SelectObject(hdc, old_font);
 }
 
-/// Card title bar: 16px app icon + left-aligned window title, with the
-/// tab-count pill on the right when the column is tabbed.
 unsafe fn draw_card_title_strip(
     hdc: HDC,
     card: &OverviewCard,
@@ -4070,8 +3904,8 @@ unsafe fn draw_card_body_icon(hdc: HDC, card: &OverviewCard) {
     );
 }
 
-/// Compact rendering for cards too small for the title-bar split: one
-/// vertically centered icon + title row (the pre-split layout).
+/// Compact cards share one vertically centered icon/title row because
+/// they cannot fit separate title and body regions.
 unsafe fn draw_card_compact(
     hdc: HDC,
     card: &OverviewCard,
@@ -4084,7 +3918,6 @@ unsafe fn draw_card_compact(
     let inner_h = r.height - 2 * pad;
     let mut text_left = r.x + pad;
 
-    // Icon: only when the card is tall enough to show one legibly.
     if let Some(icon_raw) = card.icon {
         let icon_size = (inner_h * 3 / 5).clamp(0, 32);
         if icon_raw != 0 && icon_size >= 10 {
@@ -4097,7 +3930,6 @@ unsafe fn draw_card_compact(
         }
     }
 
-    // Title: skip on slivers where even a couple of characters won't fit.
     let text_w = r.x + r.width - pad - text_left;
     if text_w > 24 && r.height >= 18 {
         let old_font = SelectObject(hdc, font.into());
@@ -4112,7 +3944,6 @@ unsafe fn draw_card_compact(
         SelectObject(hdc, old_font);
     }
 
-    // Tabbed column: small count pill in the top-right corner.
     if let Some(n) = card.tab_count {
         let pill_w = if n >= 10 { 24 } else { 18 };
         let pill_h = 14;
@@ -4636,7 +4467,6 @@ mod tests {
 
     #[test]
     fn test_thumb_body_compact_card_gets_none() {
-        // Below TITLED_MIN_H / TITLED_MIN_W: compact rendering, no thumbnail.
         assert!(thumb_body(&Rect::new(0, 0, 200, 40)).is_none());
         assert!(thumb_body(&Rect::new(0, 0, 60, 200)).is_none());
     }
@@ -4780,7 +4610,6 @@ mod tests {
         let anim = s.anim.expect("closing anim installed");
         assert_eq!(anim.phase, AnimPhase::Closing);
         assert!(anim.notify, "overlay-initiated close must report Dismissed");
-        // Second close while one is in flight: no-op, state untouched.
         assert!(matches!(
             start_close(&mut s, None, false),
             CloseStart::AlreadyClosing
@@ -4827,11 +4656,9 @@ mod tests {
 
     #[test]
     fn test_inactive_row_opacity_rides_k() {
-        // Un-ticked open registers at k=0 -> invisible; settle at 255.
         assert_eq!(inactive_row_opacity(0.0), 0);
         assert_eq!(inactive_row_opacity(1.0), 255);
         assert_eq!(inactive_row_opacity(0.5), 128);
-        // Out-of-range k clamps instead of wrapping the u8.
         assert_eq!(inactive_row_opacity(-0.2), 0);
         assert_eq!(inactive_row_opacity(1.7), 255);
     }
@@ -4868,7 +4695,6 @@ mod tests {
 
     #[test]
     fn test_apply_model_update_carries_opening_anim() {
-        // Refresh mid-open must still apply and keep the glide running.
         let mut s = overlay_state(glide_model(150));
         s.anim = Some(AnimState {
             phase: AnimPhase::Opening,
@@ -4891,9 +4717,8 @@ mod tests {
 
     #[test]
     fn test_apply_model_update_identical_model_is_noop() {
-        // The daemon re-pushes on every window event: a model identical
-        // to the displayed one must not trigger a repaint (it reset the
-        // hover and re-pushed the mask — the hover-flicker storm).
+        // Repeated window events must not repaint identical models: resetting
+        // hover or re-pushing the mask causes stationary-cursor flicker.
         let mut s = overlay_state(glide_model(150));
         s.hovered = Some((0, 0));
         assert!(!apply_model_update(&mut s, glide_model(150)));
@@ -4962,7 +4787,6 @@ mod tests {
         assert_eq!(chrome_step_for_k(0.74), 2);
         assert_eq!(chrome_step_for_k(0.75), 3);
         assert_eq!(chrome_step_for_k(1.0), 3);
-        // Out-of-range k (defensive): pins to the end steps.
         assert_eq!(chrome_step_for_k(-0.5), 0);
         assert_eq!(chrome_step_for_k(1.5), 3);
         let ks = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0];
@@ -4978,7 +4802,6 @@ mod tests {
             (last - 1.0).abs() < f32::EPSILON,
             "settled frame must be full strength"
         );
-        // Every k the picker can produce maps inside the step table.
         assert!(chrome_step_for_k(f32::MAX) < CHROME_FADE_FACTORS.len());
     }
 
@@ -4989,7 +4812,6 @@ mod tests {
         assert_eq!(px[0], 0x7F_7F_7F_7F);
         assert_eq!(px[1], 0x40_20_10_08);
         assert_eq!(px[2], 0);
-        // fade >= 1.0 is a strict no-op (live frames).
         let mut noop = vec![0x80_40_20_10_u32];
         apply_frame_fade(&mut noop, 1.0);
         assert_eq!(noop[0], 0x80_40_20_10);
@@ -5064,10 +4886,9 @@ mod tests {
 
     #[test]
     fn test_eased_k_uses_configured_easing() {
-        // Linear: progress passes straight through.
         assert!((eased_k(AnimPhase::Opening, Easing::Linear, 0.5) - 0.5).abs() < 1e-6);
         assert!((eased_k(AnimPhase::Closing, Easing::Linear, 0.25) - 0.75).abs() < 1e-6);
-        // EaseOut (the old hardcoded cubic): 1 - (1-t)^3.
+        // EaseOut: 1 - (1-t)^3.
         assert!((eased_k(AnimPhase::Opening, Easing::EaseOut, 0.5) - 0.875).abs() < 1e-6);
         // EaseInOut differs from EaseOut mid-flight: the curve is wired
         // through, not hardcoded.
@@ -5111,10 +4932,8 @@ mod tests {
 
     #[test]
     fn test_hover_transition_repaints_only_on_change() {
-        // Same hover (or none at all): nothing to repaint.
         assert_eq!(hover_transition(None, None), None);
         assert_eq!(hover_transition(Some((0, 1)), Some((0, 1))), None);
-        // Changes repaint exactly the old and new cards.
         assert_eq!(
             hover_transition(None, Some((1, 2))),
             Some((None, Some((1, 2))))
@@ -5136,7 +4955,6 @@ mod tests {
         // One SDF band per corner: radius + 1px AA.
         assert_eq!(bl, Rect::new(100, 241, 9, 9));
         assert_eq!(br, Rect::new(291, 241, 9, 9));
-        // Both hug the rect's bottom edge.
         assert_eq!(bl.y + bl.height, rect.y + rect.height);
         assert_eq!(br.x + br.width, rect.x + rect.width);
         // Tiny rects clamp the span instead of escaping the rect.
@@ -5148,7 +4966,6 @@ mod tests {
     #[test]
     fn test_bottom_round_cov_masks_outside_bottom_corners_only() {
         let rect = Rect::new(0, 0, 100, 100);
-        // Deep inside: full coverage.
         assert!((bottom_round_cov(50, 50, &rect, 8.0) - 1.0).abs() < f32::EPSILON);
         // Outermost bottom-corner pixels: outside the rounding.
         assert!(bottom_round_cov(0, 99, &rect, 8.0) < 0.01);
@@ -5161,7 +4978,6 @@ mod tests {
     #[test]
     fn test_corner_caps_only_for_thumbnail_carrying_cards() {
         let model = glide_model(150);
-        // No registered thumbnail: nothing to cap.
         assert!(corner_caps(&model, &HashSet::new(), None).is_empty());
         // Registered: two caps (bottom-left + bottom-right), panel-bg
         // colored for the active row, squares at the THUMBNAIL body's
@@ -5203,7 +5019,6 @@ mod tests {
                 Some((model.accent_bgr, model.accent_width.max(1)))
             );
         }
-        // Off-model selection index: no card matches, no ring.
         let stale = corner_caps(&model, &wids, Some((5, 5)));
         assert_eq!(stale, plain);
     }
@@ -5237,13 +5052,11 @@ mod tests {
         // Body corner pixel (1, 98): outside the card rounding entirely —
         // opaque panel bg, channels in DIB (RGB) order.
         assert_eq!(pixels[98 * 100 + 1], 0xFF33_2211);
-        // Deep inside the inner rounding: the preview keeps showing.
         assert_eq!(
             pixels[92 * 100 + 7],
             0,
             "cap must not cover the preview interior"
         );
-        // Outside the cap square: untouched.
         assert_eq!(pixels[98 * 100 + 20], 0);
         // Frame arc pixel (3, 97): distance ~7.1 from the corner center,
         // i.e. between the inner (7) and card (8) roundings — the cap
@@ -5313,7 +5126,6 @@ mod tests {
 
     #[test]
     fn test_take_faded_steps_noop_without_full_set() {
-        // Pre-render failed (empty) or already demoted: nothing to free.
         let mut s = overlay_state(glide_model(150));
         assert!(take_faded_steps(&mut s).is_empty());
         assert!(s.chrome_full.is_none());
@@ -5325,7 +5137,6 @@ mod tests {
 
     #[test]
     fn test_start_close_from_settled_retained_full_frame_starts_at_top_step() {
-        // Post-settle state: faded steps freed, only chrome_full alive.
         let mut s = overlay_state(glide_model(150));
         s.thumbnails.insert(7, ThumbnailHandle::fake());
         s.chrome_full = Some(fake_step());
@@ -5376,7 +5187,6 @@ mod tests {
         assert!(!pending_matches_state(&p, &s));
         s.window_rect.height = 1080;
 
-        // Mid-open refresh changed the model.
         let mut model_drift = overlay_state(glide_model(150));
         model_drift.model.rows[0].label = "renamed".into();
         model_drift.thumbnails.insert(7, ThumbnailHandle::fake());
@@ -5388,7 +5198,6 @@ mod tests {
         thumb_drift.selected = Some((0, 0));
         assert!(!pending_matches_state(&p, &thumb_drift));
 
-        // Selection drifted.
         let mut sel_drift = overlay_state(glide_model(150));
         sel_drift.thumbnails.insert(7, ThumbnailHandle::fake());
         sel_drift.selected = None;
@@ -5413,16 +5222,12 @@ mod tests {
             ring: None,
         };
         assert_eq!(caps_bounds(&[], 1920, 1080), None);
-        // Single cap: its square padded by 1px.
         let b = caps_bounds(&[cap(100, 200)], 1920, 1080).expect("bounds");
         assert_eq!(b, Rect::new(99, 199, 11, 11));
-        // Two caps: bounding union of both squares (+pad).
         let b = caps_bounds(&[cap(100, 200), cap(400, 200)], 1920, 1080).expect("bounds");
         assert_eq!(b, Rect::new(99, 199, 311, 11));
-        // Clip to the overlay client area.
         let b = caps_bounds(&[cap(0, 0)], 1920, 1080).expect("bounds");
         assert_eq!(b, Rect::new(0, 0, 10, 10), "pad must clip at the origin");
-        // Entirely outside: nothing survives.
         assert_eq!(caps_bounds(&[cap(-50, -50)], 30, 30), None);
     }
 
