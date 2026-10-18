@@ -715,6 +715,46 @@ pub fn restore_maximizebox_all(window_ids: &[WindowId]) {
     }
 }
 
+fn recover_maximizebox(
+    window_id: WindowId,
+    hwnd: HWND,
+    deadline: Option<std::time::Instant>,
+    async_unmarked: bool,
+) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SET_WINDOW_POS_FLAGS,
+        SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        const MAXIMIZEBOX: i32 = 0x0001_0000;
+        if style & MAXIMIZEBOX != 0
+            || !crate::placement::can_recover_placement_owner(window_id, hwnd, deadline)
+        {
+            return;
+        }
+        SetWindowLongW(hwnd, GWL_STYLE, style | MAXIMIZEBOX);
+        let responsive = crate::placement::can_recover_placement_owner(window_id, hwnd, deadline);
+        // Queue the frame refresh if the owner stopped answering after the style changed.
+        let dispatch = if !responsive
+            || (async_unmarked && !crate::placement::is_marked_placement_owner(window_id))
+        {
+            SWP_ASYNCWINDOWPOS
+        } else {
+            SET_WINDOW_POS_FLAGS(0)
+        };
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | dispatch | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 // SetWindowLongW can block on a hung owner; call only inside the exit controller's budget.
 pub(crate) fn emergency_restore_maximizebox(window_ids: &[WindowId], deadline: std::time::Instant) {
     let entries = {
@@ -744,10 +784,6 @@ pub(crate) fn emergency_restore_maximizebox(window_ids: &[WindowId], deadline: s
         entries.retain(|entry| Some(*entry) != *in_flight && window_ids.contains(&entry.0));
         entries
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_ASYNCWINDOWPOS,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    };
     let mut entries = entries;
     entries.sort_by_key(|&(id, _)| crate::placement::is_marked_placement_owner(id));
     for (id, identity) in entries {
@@ -760,37 +796,7 @@ pub(crate) fn emergency_restore_maximizebox(window_ids: &[WindowId], deadline: s
         if !window_identity_matches(hwnd, identity) {
             continue;
         }
-        unsafe {
-            let style = GetWindowLongW(hwnd, GWL_STYLE);
-            const MAXIMIZEBOX: i32 = 0x0001_0000;
-            if style & MAXIMIZEBOX == 0 {
-                if !crate::placement::can_recover_placement_owner(id, hwnd, Some(deadline)) {
-                    continue;
-                }
-                SetWindowLongW(hwnd, GWL_STYLE, style | MAXIMIZEBOX);
-                if !crate::placement::can_recover_placement_owner(id, hwnd, Some(deadline)) {
-                    continue;
-                }
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_FRAMECHANGED
-                        | if crate::placement::is_marked_placement_owner(id) {
-                            windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS(0)
-                        } else {
-                            SWP_ASYNCWINDOWPOS
-                        }
-                        | SWP_NOMOVE
-                        | SWP_NOSIZE
-                        | SWP_NOZORDER
-                        | SWP_NOACTIVATE,
-                );
-            }
-        }
+        recover_maximizebox(id, hwnd, Some(deadline), true);
     }
 }
 
@@ -835,42 +841,16 @@ pub fn restore_maximizebox_panic_recovery() {
             recovered_unmarked = true;
         }
         // Direct Win32 call — don't use restore_maximizebox since tracking set is already drained
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        };
         let Ok(hwnd) = window_id_to_hwnd(wid) else {
             continue;
         };
         if !window_identity_matches(hwnd, identity) {
             continue;
         }
-        unsafe {
-            if !IsWindow(Some(hwnd)).as_bool() {
-                continue;
-            }
-            let style = GetWindowLongW(hwnd, GWL_STYLE);
-            const WS_MAXIMIZEBOX_VAL: i32 = 0x0001_0000;
-            if (style & WS_MAXIMIZEBOX_VAL) == 0 {
-                let new_style = style | WS_MAXIMIZEBOX_VAL;
-                if !crate::placement::can_recover_placement_owner(wid, hwnd, None) {
-                    continue;
-                }
-                SetWindowLongW(hwnd, GWL_STYLE, new_style);
-                if !crate::placement::can_recover_placement_owner(wid, hwnd, None) {
-                    continue;
-                }
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
+        if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
+            continue;
         }
+        recover_maximizebox(wid, hwnd, None, false);
     }
 
     eprintln!(
