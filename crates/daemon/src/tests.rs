@@ -3148,14 +3148,6 @@ fn test_app_state_skips_border_frame_under_cfg_test() {
 }
 
 #[test]
-fn test_app_state_skips_thumbnail_host_under_cfg_test() {
-    // ThumbnailHost::new() panics under cfg(test). If AppState construction
-    // ever triggers it, this test will panic during setup — implicit proof
-    // that we don't accidentally call thumbnail::host() during initialization.
-    let _state = AppState::new_with_config(test_config(), test_monitors());
-}
-
-#[test]
 fn test_partition_for_animation_routes_ghosted_wids_to_ghost_stream() {
     use crate::state::{GhostEntry, LayoutTransition};
     use leopardwm_core_layout::{Visibility, WindowPlacement};
@@ -8575,12 +8567,15 @@ fn test_find_window_workspace_not_found() {
 #[test]
 fn test_app_state_apply_config() {
     let mut state = AppState::new_with_config(test_config(), test_monitors());
+    assert_eq!(state.workspaces[&1][0].outer_gaps(), (10, 10, 10, 10));
     let mut new_config = test_config();
     new_config.layout.gap = 20;
     new_config.layout.outer_gap_left = 15;
     state.apply_config(new_config.clone());
     assert_eq!(state.config.layout.gap, 20);
     assert_eq!(state.config.layout.outer_gap_left, 15);
+    assert_eq!(state.workspaces[&1][0].gap(), 20);
+    assert_eq!(state.workspaces[&1][0].outer_gaps(), (15, 10, 10, 10));
 }
 
 fn rule_reload_state(action: Option<crate::config::WindowAction>) -> AppState {
@@ -8821,7 +8816,7 @@ fn test_spawn_forwarding_thread_forwards_events() {
         .build()
         .unwrap();
     let event = rt.block_on(async { async_rx.recv().await });
-    assert!(event.is_some());
+    assert!(matches!(event, Some(DaemonEvent::HideSnapHint)));
 }
 
 #[test]
@@ -8963,22 +8958,6 @@ fn test_gesture_forwarder_cancels_with_full_daemon_channel() {
         Ok(DaemonEvent::Gesture(GestureEvent::ScrollUp))
     ));
     assert!(event_rx.try_recv().is_err());
-}
-
-#[test]
-fn test_gesture_command_classification_distinguishes_no_action_and_unknown() {
-    assert!(matches!(
-        classify_gesture_command(""),
-        GestureCommand::NoAction
-    ));
-    assert!(matches!(
-        classify_gesture_command("focus_left"),
-        GestureCommand::Known(IpcCommand::FocusLeft)
-    ));
-    assert!(matches!(
-        classify_gesture_command("custom_command"),
-        GestureCommand::Unknown("custom_command")
-    ));
 }
 
 #[test]
@@ -9696,6 +9675,7 @@ fn test_structural_command_exits_fullscreen() {
 #[test]
 fn test_scroll_and_resize_are_suppressed_while_fullscreen() {
     let mut state = fullscreen_state_two_columns();
+    assert_eq!(state.focused_workspace().unwrap().scroll_offset(), 0.0);
     assert_eq!(
         state.handle_command(IpcCommand::Scroll { delta: 120.0 }),
         IpcResponse::Ok
@@ -9704,6 +9684,15 @@ fn test_scroll_and_resize_are_suppressed_while_fullscreen() {
         state.focused_workspace().unwrap().is_fullscreen(),
         "scroll must not drop fullscreen"
     );
+    let ws = state.focused_workspace().unwrap();
+    assert_eq!(ws.scroll_offset(), 0.0);
+    assert_eq!(
+        ws.columns()
+            .iter()
+            .map(|col| col.width())
+            .collect::<Vec<_>>(),
+        [800, 800]
+    );
     assert_eq!(
         state.handle_command(IpcCommand::Resize { delta: 50 }),
         IpcResponse::Ok
@@ -9711,6 +9700,15 @@ fn test_scroll_and_resize_are_suppressed_while_fullscreen() {
     assert!(
         state.focused_workspace().unwrap().is_fullscreen(),
         "resize must not drop fullscreen"
+    );
+    let ws = state.focused_workspace().unwrap();
+    assert_eq!(ws.scroll_offset(), 0.0);
+    assert_eq!(
+        ws.columns()
+            .iter()
+            .map(|col| col.width())
+            .collect::<Vec<_>>(),
+        [800, 800]
     );
 }
 
@@ -10826,14 +10824,6 @@ fn test_reconcile_remove_focused_monitor() {
 }
 
 #[test]
-fn test_reconcile_primary_always_exists() {
-    let mut state = AppState::new_with_config(test_config(), two_monitors());
-    // Remove secondary, keep primary
-    state.reconcile_monitors(test_monitors());
-    assert!(state.workspaces.contains_key(&1));
-}
-
-#[test]
 fn test_reconcile_empty_to_multi() {
     let mut state = AppState::new_with_config(test_config(), vec![]);
     assert_eq!(state.workspaces.len(), 0);
@@ -11397,29 +11387,18 @@ fn test_minimize_focus_moves_to_next() {
     // Focus is on window 200 (last inserted)
     assert_eq!(ws.focused_window(), Some(200));
 
-    // Minimize window 200 -- focus should move
-    ws.mark_minimized(200);
-    // Simulate the daemon's focus adjustment for minimized focused window
-    if ws.focused_window() == Some(200) {
-        ws.focus_down();
-        if ws.focused_window() == Some(200) {
-            ws.focus_up();
-        }
-        if ws.focused_window() == Some(200) {
-            ws.focus_right();
-            if ws.focused_window() == Some(200) {
-                ws.focus_left();
-            }
-        }
-    }
-
-    // Focus should now be on window 100
+    assert_eq!(state.mark_minimized_and_reflow(200), Some(true));
+    let ws = state.focused_workspace().unwrap();
+    assert!(ws.is_minimized(200));
     assert_eq!(ws.focused_window(), Some(100));
+    assert!(ws.contains_window(100));
+    assert!(ws.contains_window(200));
+    assert_eq!(ws.window_count(), 2);
 }
 
 #[test]
 fn test_find_window_workspace_tiled() {
-    let mut state = AppState::new_with_config(test_config(), test_monitors());
+    let mut state = AppState::new_with_config(test_config(), two_monitors());
     let ws = &mut state.workspaces.get_mut(&1).unwrap()[0];
     ws.insert_window(100, Some(800)).unwrap();
 
@@ -11428,6 +11407,10 @@ fn test_find_window_workspace_tiled() {
     // Not floating
     let ws = &state.workspaces.get(&1).unwrap()[0];
     assert!(!ws.is_floating(100));
+    state.workspaces.get_mut(&2).unwrap()[0]
+        .insert_window(200, Some(800))
+        .unwrap();
+    assert_eq!(state.find_window_workspace(200), Some((2, 0)));
 }
 
 #[test]
@@ -11449,37 +11432,11 @@ fn test_find_window_workspace_floating_not_snapped() {
 // =========================================================================
 
 #[test]
-fn test_args_default_all_false() {
-    let args = Args {
-        no_hotkeys: false,
-        safe_mode: false,
-    };
-    assert!(!args.skip_hotkeys());
-}
-
-#[test]
-fn test_args_no_hotkeys() {
-    let args = Args {
-        no_hotkeys: true,
-        safe_mode: false,
-    };
-    assert!(args.skip_hotkeys());
-}
-
-#[test]
-fn test_args_safe_mode_implies_no_hotkeys() {
-    let args = Args {
-        no_hotkeys: false,
-        safe_mode: true,
-    };
-    assert!(args.skip_hotkeys());
-}
-
-#[test]
 fn test_args_parse_no_flags() {
     let args = Args::try_parse_from(["leopardwm"]).unwrap();
     assert!(!args.no_hotkeys);
     assert!(!args.safe_mode);
+    assert!(!args.skip_hotkeys());
 }
 
 #[test]
@@ -11487,6 +11444,7 @@ fn test_args_parse_safe_mode() {
     let args = Args::try_parse_from(["leopardwm", "--safe-mode"]).unwrap();
     assert!(args.safe_mode);
     assert!(args.skip_hotkeys());
+    assert!(!args.no_hotkeys);
 }
 
 #[test]
@@ -11494,6 +11452,7 @@ fn test_args_parse_no_hotkeys() {
     let args = Args::try_parse_from(["leopardwm", "--no-hotkeys"]).unwrap();
     assert!(args.no_hotkeys);
     assert!(!args.safe_mode);
+    assert!(args.skip_hotkeys());
 }
 
 // =========================================================================
@@ -11530,6 +11489,8 @@ fn test_startup_banner_typical_values() {
     assert!(banner.contains("Windows:  14 managed"));
     assert!(banner.contains("Hotkeys:  24 registered"));
     assert!(banner.contains("Status:   Active"));
+    assert!(!banner.contains("Warning:"));
+    assert!(!banner.contains("high contrast"));
 }
 
 #[test]
@@ -11573,14 +11534,6 @@ fn test_startup_banner_with_config_warnings() {
 }
 
 #[test]
-fn test_startup_banner_without_config_warnings() {
-    let info = make_banner_info();
-    assert!(info.config_warnings.is_empty());
-    let banner = format_startup_banner(&info);
-    assert!(!banner.contains("Warning:"));
-}
-
-#[test]
 fn test_startup_banner_hotkey_mismatch() {
     let mut info = make_banner_info();
     info.hotkeys_registered = 7;
@@ -11605,13 +11558,6 @@ fn test_startup_banner_high_contrast() {
     info.high_contrast = true;
     let banner = format_startup_banner(&info);
     assert!(banner.contains("Display:  high contrast"));
-}
-
-#[test]
-fn test_startup_banner_no_high_contrast() {
-    let info = make_banner_info();
-    let banner = format_startup_banner(&info);
-    assert!(!banner.contains("high contrast"));
 }
 
 // =========================================================================
@@ -11676,23 +11622,6 @@ fn test_destroy_unknown_window_noop() {
 }
 
 #[test]
-fn test_focus_changes_monitor() {
-    let mut state = AppState::new_with_config(test_config(), two_monitors());
-    // Add window to monitor 2
-    state.workspaces.get_mut(&2).unwrap()[0]
-        .insert_window(200, Some(800))
-        .unwrap();
-
-    // Find which workspace contains window 200
-    let monitor = state.find_window_workspace(200);
-    assert_eq!(monitor, Some((2, 0)));
-
-    // Simulate focus change: update focused_monitor
-    state.focused_monitor = 2;
-    assert_eq!(state.focused_monitor, 2);
-}
-
-#[test]
 fn test_minimized_only_window_no_crash() {
     let mut state = AppState::new_with_config(test_config(), test_monitors());
     let ws = state.focused_workspace_mut().unwrap();
@@ -11736,40 +11665,8 @@ fn test_paused_state_skips_events() {
 }
 
 #[test]
-fn test_multiple_monitors_focus_cross_monitor() {
-    let mut state = AppState::new_with_config(test_config(), two_monitors());
-    // Add windows to both monitors
-    state.workspaces.get_mut(&1).unwrap()[0]
-        .insert_window(100, Some(800))
-        .unwrap();
-    state.workspaces.get_mut(&2).unwrap()[0]
-        .insert_window(200, Some(800))
-        .unwrap();
-
-    // Start focused on monitor 1
-    assert_eq!(state.focused_monitor, 1);
-
-    // Simulate focus switch to monitor 2
-    state.focused_monitor = 2;
-    assert_eq!(state.focused_monitor, 2);
-
-    // Verify the focused workspace is on monitor 2
-    let ws = &state.workspaces.get(&state.focused_monitor).unwrap()[0];
-    assert!(ws.contains_window(200));
-}
-
-#[test]
-fn test_pipe_busy_error_code_is_231() {
-    // ERROR_PIPE_BUSY is Windows error code 231. This test documents the
-    // constant used in check_already_running() to detect a busy pipe.
-    assert_eq!(ERROR_PIPE_BUSY, 231);
-    // Verify the constant matches what std::io::Error would report
-    let err = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY);
-    assert_eq!(err.raw_os_error(), Some(231));
-}
-
-#[test]
 fn test_pipe_probe_error_hardening_logic() {
+    assert_eq!(ERROR_PIPE_BUSY, 231);
     let busy = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY);
     assert!(pipe_probe_error_indicates_running(&busy));
 
@@ -11941,30 +11838,6 @@ fn test_shutdown_recovery_retry_budget_is_reasonable() {
 // MovedOrResized suppression during apply_layout
 // =========================================================================
 
-#[test]
-fn test_applying_layout_flag_default_false() {
-    let state = AppState::new_with_config(test_config(), test_monitors());
-    assert!(
-        !state.applying_layout,
-        "applying_layout should be false by default"
-    );
-}
-
-#[test]
-fn test_applying_layout_flag_set_during_apply() {
-    let mut state = AppState::new_with_config(test_config(), test_monitors());
-    // Before apply_layout, flag is false
-    assert!(!state.applying_layout);
-    // apply_layout on an empty workspace succeeds (paused path)
-    state.paused = true;
-    let _ = state.apply_layout();
-    // After apply_layout returns, flag should be false (cleared on exit)
-    assert!(
-        !state.applying_layout,
-        "applying_layout should be cleared after apply_layout returns"
-    );
-}
-
 // =========================================================================
 // Fullscreen-minimize daemon-level regression test
 // =========================================================================
@@ -12008,37 +11881,6 @@ fn test_fullscreen_minimize_clears_fullscreen_in_daemon() {
 // =========================================================================
 // HotkeyState registered_count is distinct from mapping.len()
 // =========================================================================
-
-#[test]
-fn test_hotkey_state_registered_count_default() {
-    // Construct HotkeyState manually -- registered_count should hold its value
-    // and be independent of mapping.len().
-    let mut mapping = HashMap::new();
-    mapping.insert(1 as HotkeyId, IpcCommand::FocusDown);
-    mapping.insert(2 as HotkeyId, IpcCommand::FocusUp);
-
-    let hs = HotkeyState {
-        handle: None,
-        hook: None,
-        mapping,
-        requested_count: 2,
-        registered_count: 1, // Simulate: only 1 of 2 installed in the hook
-        failed_binds: vec!["Win+Left".to_string()],
-        recording: false,
-    };
-
-    assert_eq!(hs.mapping.len(), 2, "mapping has 2 parsed hotkeys");
-    assert_eq!(
-        hs.registered_count, 1,
-        "registered_count reflects OS result"
-    );
-    assert_eq!(hs.requested_count, 2, "requested_count matches attempted");
-    assert_ne!(
-        hs.mapping.len(),
-        hs.registered_count,
-        "registered_count should differ from mapping.len() when partial"
-    );
-}
 
 #[test]
 fn test_protected_binds_flags_os_reserved_combos() {
@@ -14540,17 +14382,6 @@ fn test_size_rules_reapply_keeps_managed_small_floating_window() {
 }
 
 #[test]
-fn test_lookup_window_info_returns_injected() {
-    let mut state = AppState::new_with_config(test_config(), test_monitors());
-    let info = make_test_window_info(42);
-    state.injected_window_info.insert(42, info.clone());
-
-    let result = state.lookup_window_info(42);
-    assert!(result.is_some(), "should return injected info");
-    assert_eq!(result.unwrap().hwnd, 42);
-}
-
-#[test]
 fn test_lookup_window_info_missing_returns_none() {
     let state = AppState::new_with_config(test_config(), test_monitors());
     // No injected info, and enumerate_windows won't find hwnd 99999
@@ -14760,29 +14591,6 @@ fn test_frameless_fixed_size_admission_preserves_rules_and_fullscreen() {
             }
         }
     }
-}
-
-#[test]
-fn test_created_event_with_injected_window_info() {
-    let mut state = AppState::new_with_config(test_config(), test_monitors());
-
-    // Inject window info so Created handler doesn't need real Win32 calls
-    let info = make_test_window_info(100);
-    state.injected_window_info.insert(100, info);
-
-    // Before: workspace is empty
-    assert_eq!(state.focused_workspace().unwrap().window_count(), 0);
-
-    // Fire Created event -- handler should use injected info
-    state.handle_window_event(WindowEvent::Created(100, 0));
-
-    // After: window should be tiled in the workspace
-    let ws = state.focused_workspace().unwrap();
-    assert!(
-        ws.contains_window(100),
-        "window should be managed after Created event"
-    );
-    assert_eq!(ws.window_count(), 1);
 }
 
 fn new_window_monitor_state(mut config: Config) -> AppState {
@@ -17460,18 +17268,6 @@ fn test_cmd_health_check_elevation_records_sorted_with_daemon_integrity() {
     }
 }
 
-#[test]
-fn test_format_crash_report_contains_version() {
-    // We can't easily create a PanicHookInfo, but we can test the function
-    // by catching a panic. Use std::panic::catch_unwind.
-    let result = std::panic::catch_unwind(|| {
-        panic!("test crash");
-    });
-    assert!(result.is_err(), "should have panicked");
-    // The format_crash_report function is tested indirectly via the panic hook.
-    // Here we just verify it exists and the function signature is correct.
-}
-
 // =========================================================================
 // DPI-aware gap/border scaling tests
 // =========================================================================
@@ -17944,20 +17740,6 @@ fn test_snap_restore_on_float() {
 }
 
 #[test]
-fn test_snap_restore_on_destroy() {
-    let mut config = test_config();
-    config.behavior.disable_snap_layouts = true;
-    let mut state = AppState::new_with_config(config, test_monitors());
-
-    let hwnd = 44u64;
-    state.snap_disabled_hwnds.insert(hwnd);
-
-    // Restoring a tracked window should clear it
-    state.restore_snap_for_window(hwnd);
-    assert!(!state.snap_disabled_hwnds.contains(&hwnd));
-}
-
-#[test]
 fn test_snap_restore_all_on_pause() {
     let mut config = test_config();
     config.behavior.disable_snap_layouts = true;
@@ -18267,10 +18049,10 @@ fn test_scratchpad_capture_uses_verified_dwm_fallback() {
             || true,
             || {
                 dwm_queries += 1;
-                Some(Rect::new(100, 100, 900, 600))
+                Some(Rect::new(107, 101, 886, 591))
             },
         ),
-        Some(Rect::new(100, 100, 900, 600))
+        Some(Rect::new(107, 101, 886, 591))
     );
     assert_eq!(dwm_queries, 1);
 }
@@ -18778,22 +18560,25 @@ fn test_scratchpad_release_rejoins_original_column() {
 
 #[test]
 fn test_scratchpad_solo_window_releases_to_new_column() {
-    // A window that was alone in its column has no sibling, so on release it
-    // returns as its own column at the original index (failsafe path).
     let mut state = AppState::new_with_config(test_config(), test_monitors());
-    state
-        .focused_workspace_mut()
-        .unwrap()
-        .insert_window(100, Some(400))
-        .unwrap();
-    state.scratchpad_stash(); // solo: origin_sibling = None
+    let ws = state.focused_workspace_mut().unwrap();
+    for hwnd in [10, 100, 200] {
+        ws.insert_window(hwnd, Some(400)).unwrap();
+    }
+    ws.focus_window(100).unwrap();
+    state.scratchpad_stash();
+    assert_eq!(state.scratchpad.unwrap().origin_column, 1);
     assert!(state.scratchpad.unwrap().origin_sibling.is_none());
-    state.scratchpad_toggle(); // summon
+    state.scratchpad_toggle();
     state.previous_focused_hwnd = Some(100);
-    state.scratchpad_stash(); // release
+    state.scratchpad_stash();
 
+    assert!(state.scratchpad.is_none());
     let ws = state.focused_workspace().unwrap();
-    assert!(ws.contains_window(100));
+    assert_eq!(ws.column_count(), 3);
+    assert_eq!(ws.columns()[0].windows(), &[10]);
+    assert_eq!(ws.columns()[1].windows(), &[100]);
+    assert_eq!(ws.columns()[2].windows(), &[200]);
     assert!(!ws.is_floating(100), "released as a tiled window");
 }
 
@@ -18970,6 +18755,8 @@ fn test_tiled_sticky_follows_switch_as_end_column() {
     );
     assert!(!dest.is_floating(100), "and it stayed tiled, not floated");
     assert_eq!(dest.column_count(), 2, "destination now has both columns");
+    assert_eq!(dest.columns()[0].windows(), &[200]);
+    assert_eq!(dest.columns()[1].windows(), &[100]);
     assert!(
         !state.workspaces.get(&mon).unwrap()[0].contains_window(100),
         "left the old workspace"
@@ -19421,6 +19208,11 @@ fn test_matched_rule_returns_first_match_extras() {
         match_max_width: None,
         match_max_height: None,
     }];
+    config.window_rules.push(crate::config::WindowRule {
+        open_on_workspace: Some(5),
+        column_width: Some(0.75),
+        ..config.window_rules[0].clone()
+    });
     let state = AppState::new_with_config(config, test_monitors());
     let rule = state
         .matched_rule("SomeClass", "Editor", "code.exe", None)
@@ -21083,13 +20875,7 @@ fn test_layout_viewport_side_by_side_monitors_use_full_work_area() {
 #[test]
 fn test_layout_viewport_unknown_monitor_falls_back() {
     let state = AppState::new_with_config(test_config(), test_monitors());
-    let vp = state.layout_viewport(99999);
-    assert_eq!(vp.x, 0);
-    assert_eq!(vp.y, 0);
-    assert!(
-        vp.width > 0 && vp.height > 0,
-        "fallback viewport is non-empty"
-    );
+    assert_eq!(state.layout_viewport(99999), Rect::new(0, 0, 1920, 1080));
 }
 
 #[test]
