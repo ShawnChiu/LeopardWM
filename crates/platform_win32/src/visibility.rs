@@ -7,7 +7,10 @@ use crate::window_style::reset_window_border_color;
 use crate::MOVE_OFFSCREEN_SENTINEL_COORD;
 use crate::{combine_operation_failures, is_benign_side_effect_error, window_id_to_hwnd};
 use leopardwm_core_layout::{Rect, Visibility, WindowId, WindowPlacement};
+use std::collections::HashSet;
 use std::ffi::c_void;
+use std::sync::{mpsc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
@@ -263,6 +266,73 @@ impl Drop for RecoveryDpiContext {
     }
 }
 
+// A timed-out native move stays in flight across recovery passes until its owner returns.
+static RECOVERY_MOVES: LazyLock<Mutex<HashSet<WindowId>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+struct RecoveryMove(WindowId);
+
+impl Drop for RecoveryMove {
+    fn drop(&mut self) {
+        RECOVERY_MOVES
+            .lock()
+            .unwrap_or_else(crate::recover_poisoned_mutex)
+            .remove(&self.0);
+    }
+}
+
+fn emergency_marked_move(
+    id: WindowId,
+    restored: Rect,
+    origin: Option<(i32, i32)>,
+    deadline: Instant,
+) {
+    if Instant::now() >= deadline
+        || !RECOVERY_MOVES
+            .lock()
+            .unwrap_or_else(crate::recover_poisoned_mutex)
+            .insert(id)
+    {
+        return;
+    }
+    let in_flight = RecoveryMove(id);
+    let (done_tx, done_rx) = mpsc::channel();
+    let helper = std::thread::Builder::new()
+        .name("window-recovery-move".into())
+        .spawn(move || {
+            let _in_flight = in_flight;
+            let Ok(_dpi) = RecoveryDpiContext::enter() else {
+                return;
+            };
+            let Ok(hwnd) = window_id_to_hwnd(id) else {
+                return;
+            };
+            if Instant::now() < deadline
+                && unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        restored.x,
+                        restored.y,
+                        restored.width,
+                        restored.height,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                }
+                .is_ok()
+                && origin.is_some()
+            {
+                crate::placement::record_queued_owner_rect(id, &restored, origin);
+            }
+            let _ = done_tx.send(());
+        });
+    if helper.is_ok() {
+        let budget =
+            Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now()));
+        let _ = done_rx.recv_timeout(budget);
+    }
+}
+
 fn emergency_sentinel_pass(
     window_ids: &[WindowId],
     work_area: &Rect,
@@ -298,7 +368,24 @@ fn emergency_sentinel_pass(
                 continue;
             }
             let restored = compute_restore_rect_from_offscreen(&current, work_area);
+            if crate::placement::is_marked_placement_owner(id)
+                && RECOVERY_MOVES
+                    .lock()
+                    .unwrap_or_else(crate::recover_poisoned_mutex)
+                    .contains(&id)
+            {
+                continue;
+            }
             if !crate::placement::can_recover_placement_owner(id, hwnd, Some(deadline)) {
+                continue;
+            }
+            if crate::placement::is_marked_placement_owner(id) {
+                emergency_marked_move(
+                    id,
+                    restored,
+                    owner_wait.then_some((current.x, current.y)),
+                    deadline,
+                );
                 continue;
             }
             if SetWindowPos(
@@ -308,13 +395,7 @@ fn emergency_sentinel_pass(
                 restored.y,
                 restored.width,
                 restored.height,
-                SWP_NOZORDER
-                    | SWP_NOACTIVATE
-                    | if crate::placement::is_marked_placement_owner(id) {
-                        SET_WINDOW_POS_FLAGS(0)
-                    } else {
-                        SWP_ASYNCWINDOWPOS
-                    },
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
             )
             .is_ok()
                 && owner_wait
@@ -354,7 +435,7 @@ fn emergency_primary_work_area() -> Option<Rect> {
 }
 
 /// Best-effort tray Quit recovery. The caller must independently enforce `deadline`:
-/// shell, DWM, tracing, style calls, and marked moves after a successful probe can block.
+/// shell, DWM, tracing, and style calls can block.
 pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::Instant) {
     crate::placement::stop_placement_mover();
     let Ok(_dpi) = RecoveryDpiContext::enter() else {
@@ -383,6 +464,26 @@ pub fn emergency_restore_windows(window_ids: &[WindowId], deadline: std::time::I
     emergency_sentinel_pass(&marked, &work_area, work_areas.as_deref(), deadline);
     crate::window_style::emergency_restore_maximizebox(&marked, deadline);
     emergency_sentinel_pass(&marked, &work_area, work_areas.as_deref(), deadline);
+    while Instant::now() < deadline {
+        let (ready, moving) = {
+            let moves = RECOVERY_MOVES
+                .lock()
+                .unwrap_or_else(crate::recover_poisoned_mutex);
+            let ready: Vec<_> = marked
+                .iter()
+                .copied()
+                .filter(|id| !moves.contains(id))
+                .collect();
+            (ready, !moves.is_empty())
+        };
+        crate::window_style::emergency_restore_maximizebox(&ready, deadline);
+        if !moving {
+            break;
+        }
+        std::thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
 }
 
 pub(crate) fn recover_after_placement_mover(

@@ -9,6 +9,7 @@ All notable changes to LeopardWM will be documented in this file.
 - **Alt shortcuts no longer count as an extra key press when LeopardWM decides whether to undo an app's startup maximize.** The unused key LeopardWM taps to keep the menu bar inactive is now ignored; key presses sent by other programs, such as AutoHotkey or on-screen keyboards, still count.
 - **Windows that ignore queued moves are now detected even after LeopardWM has been moving them for more than ten seconds.** They now slide with the other windows instead of jumping into place when the scroll ends.
 - **An app's maximize button now returns when the app responds again after stalling during LeopardWM shutdown.** If the app stops answering after its window style is restored, LeopardWM queues the frame refresh instead of leaving it unfinished.
+- **Quitting LeopardWM now brings other windows back on screen even if one app stalls during its recovery move.** Emergency recovery waits briefly for each move instead of letting one blocked app leave the remaining windows off screen.
 
 ## 0.3.2
 
