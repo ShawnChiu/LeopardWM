@@ -282,18 +282,6 @@ unsafe extern "system" fn inspect_windows_callback(hwnd: HWND, lparam: LPARAM) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_THICKFRAME,
-    };
-
-    #[test]
-    fn tool_window_exception_preserved() {
-        let thick = WS_THICKFRAME.0;
-        let tool = WS_EX_TOOLWINDOW.0;
-        let app = WS_EX_APPWINDOW.0;
-        assert!(!is_excluded_tool_window(thick, tool | app));
-        assert!(is_excluded_tool_window(0, tool));
-    }
 
     #[test]
     fn skip_class_and_title_leaf_predicates() {

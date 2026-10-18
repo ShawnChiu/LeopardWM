@@ -825,6 +825,7 @@ mod tests {
         assert!(is_excluded_tool_window(0, tool | app));
         // Plain tool window (no appwindow) — excluded regardless of resizability.
         assert!(is_excluded_tool_window(thickframe, tool));
+        assert!(is_excluded_tool_window(0, tool));
         // Tool + appwindow + resizable — a genuine primary window, kept.
         assert!(!is_excluded_tool_window(thickframe, tool | app));
         // Not a tool window — never excluded here (resizable or not).
@@ -1048,27 +1049,25 @@ mod tests {
 
     #[test]
     fn test_should_filter_window_event_by_manageability_covers_hooked_events() {
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_OBJECT_CREATE
-        ));
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_OBJECT_LOCATIONCHANGE
-        ));
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_SYSTEM_FOREGROUND
-        ));
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_OBJECT_FOCUS
-        ));
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_OBJECT_DESTROY
-        ));
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_SYSTEM_MINIMIZESTART
-        ));
-        assert!(should_filter_window_event_by_manageability(
-            EVENT_SYSTEM_MINIMIZEEND
-        ));
+        for event in [
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_HIDE,
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MINIMIZEEND,
+            EVENT_SYSTEM_MOVESIZESTART,
+            EVENT_SYSTEM_MOVESIZEEND,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_FOCUS,
+        ] {
+            assert!(
+                should_filter_window_event_by_manageability(event),
+                "event {event}"
+            );
+        }
+        assert!(!should_filter_window_event_by_manageability(0));
     }
 
     #[test]

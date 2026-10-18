@@ -759,11 +759,4 @@ mod tests {
         assert!(!is_ghost_animation_class_str("CASCADIA")); // partial match avoided
         assert!(!is_ghost_animation_class_str("WindowsForms")); // needs the version + dot
     }
-
-    #[test]
-    fn test_register_balance_starts_at_zero() {
-        // Process-global; may have non-zero state from other tests in the
-        // same binary, but we can at least observe the read API.
-        let _initial = current_register_balance();
-    }
 }

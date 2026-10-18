@@ -4837,15 +4837,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_model_update_applies_while_open() {
-        let mut s = overlay_state(glide_model(150));
-        let mut refreshed = glide_model(150);
-        refreshed.rows[0].label = "renamed".into();
-        assert!(apply_model_update(&mut s, refreshed));
-        assert_eq!(s.model.rows[0].label, "renamed");
-    }
-
-    #[test]
     fn test_apply_model_update_noop_while_closing() {
         let mut s = overlay_state(glide_model(150));
         s.thumbnails.insert(7, ThumbnailHandle::fake());
@@ -4915,16 +4906,21 @@ mod tests {
         // to the hovered window's card in the new model — the repaint it
         // triggers rebuilds the frame from `hovered`.
         let mut s = overlay_state(glide_model(150));
+        let mut other = glide_card(true);
+        other.window_id = 8;
+        s.model.rows[0].cards.push(other);
         s.hovered = Some((0, 0)); // card window_id 7
-        let mut refreshed = glide_model(150);
+        let mut refreshed = s.model.clone();
+        refreshed.rows[0].cards.swap(0, 1);
         refreshed.rows[0].label = "renamed".into();
         assert!(apply_model_update(&mut s, refreshed));
-        assert_eq!(s.hovered, Some((0, 0)), "hover relocated by window id");
+        assert_eq!(s.model.rows[0].label, "renamed");
+        assert_eq!(s.hovered, Some((0, 1)), "hover relocated by window id");
         // Hovered window gone: hover clears instead of pointing at a
         // different window's card.
-        let mut gone = glide_model(150);
+        let mut gone = s.model.clone();
         gone.rows[0].label = "renamed twice".into();
-        gone.rows[0].cards[0].window_id = 99;
+        gone.rows[0].cards.remove(1);
         assert!(apply_model_update(&mut s, gone));
         assert_eq!(s.hovered, None, "hover dropped with its window");
     }
@@ -4969,16 +4965,9 @@ mod tests {
         // Out-of-range k (defensive): pins to the end steps.
         assert_eq!(chrome_step_for_k(-0.5), 0);
         assert_eq!(chrome_step_for_k(1.5), 3);
-    }
-
-    #[test]
-    fn test_chrome_steps_reverse_on_close() {
-        // Close runs k 1 -> 0 through the SAME picker: the steps walk
-        // back down monotonically — the reverse fade comes for free.
         let ks = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0];
         let steps: Vec<usize> = ks.iter().map(|&k| chrome_step_for_k(k)).collect();
         assert_eq!(steps, vec![3, 3, 2, 1, 0, 0]);
-        assert!(steps.windows(2).all(|w| w[0] >= w[1]));
     }
 
     #[test]
@@ -5306,11 +5295,20 @@ mod tests {
     #[test]
     fn test_take_faded_steps_keeps_only_the_full_frame() {
         let mut s = overlay_state(glide_model(150));
-        s.chrome_steps = fake_chrome_steps();
+        s.chrome_steps = [11, 22, 33, 44]
+            .into_iter()
+            .map(|hbitmap| ChromeStep {
+                hbitmap,
+                ..fake_step()
+            })
+            .collect();
         let faded = take_faded_steps(&mut s);
-        assert_eq!(faded.len(), CHROME_FADE_FACTORS.len() - 1);
+        assert_eq!(
+            faded.iter().map(|step| step.hbitmap).collect::<Vec<_>>(),
+            [11, 22, 33]
+        );
         assert!(s.chrome_steps.is_empty(), "faded steps leave the live set");
-        assert!(s.chrome_full.is_some(), "full frame retained for the close");
+        assert_eq!(s.chrome_full.as_ref().unwrap().hbitmap, 44);
     }
 
     #[test]
@@ -5367,6 +5365,16 @@ mod tests {
         s.thumbnails.insert(7, ThumbnailHandle::fake());
         s.selected = Some((0, 0));
         let p = pending_for(&s);
+
+        s.hovered = Some((0, 0));
+        assert!(!pending_matches_state(&p, &s));
+        s.hovered = None;
+        s.window_rect.width = 1921;
+        assert!(!pending_matches_state(&p, &s));
+        s.window_rect.width = 1920;
+        s.window_rect.height = 1081;
+        assert!(!pending_matches_state(&p, &s));
+        s.window_rect.height = 1080;
 
         // Mid-open refresh changed the model.
         let mut model_drift = overlay_state(glide_model(150));

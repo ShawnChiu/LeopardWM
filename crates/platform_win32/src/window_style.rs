@@ -991,18 +991,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_restore_maximizebox_all_empty_is_noop() {
-        restore_maximizebox_all(&[]);
-    }
-
-    #[test]
-    fn test_restore_maximizebox_panic_recovery_no_panic() {
-        let _guard = lock_snap_tracking_fixture();
-        // Should not panic even with empty tracking set
-        restore_maximizebox_panic_recovery();
-    }
-
     const WS_MAXIMIZEBOX_BIT: i32 = 0x0001_0000;
 
     static SNAP_TRACKING_FIXTURE_LOCK: Mutex<()> = Mutex::new(());

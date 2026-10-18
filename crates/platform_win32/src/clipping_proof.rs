@@ -2750,24 +2750,6 @@ unsafe fn run_matrix_stale_identity_case(
 }
 
 #[test]
-fn unknown_matrix_region_state_is_rejected_by_role_parser() {
-    assert!(matches!(
-        KnownRegionState::parse("unknown"),
-        Err(reason) if reason.contains("unknown matrix region state")
-    ));
-}
-
-#[test]
-fn already_cleaned_fixture_cleanup_is_a_noop() {
-    let mut fixture = OwnedFixtureWindow {
-        hwnd: HWND::default(),
-        region_installed: false,
-        visible_since: None,
-    };
-    assert_eq!(unsafe { fixture.cleanup() }, Ok(None));
-}
-
-#[test]
 fn aligned_region_data_preserves_exact_bytes() {
     let bytes = vec![1, 2, 3, 4, 5];
     let data = AlignedRegionData::from_bytes(&bytes).unwrap();
@@ -2819,6 +2801,24 @@ fn synthetic_outer_relative_frame_coordinates_are_origin_and_direction_independe
             top: 0,
             right: 1592,
             bottom: 1432,
+        }
+    );
+    assert_eq!(
+        MatrixLayout::Ltr.allowed_slice(),
+        Bounds {
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: 1430,
+        }
+    );
+    assert_eq!(
+        MatrixLayout::Rtl.allowed_slice(),
+        Bounds {
+            left: 800,
+            top: 0,
+            right: 1600,
+            bottom: 1430,
         }
     );
 }

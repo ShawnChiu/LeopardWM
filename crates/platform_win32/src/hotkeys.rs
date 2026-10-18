@@ -950,11 +950,9 @@ mod tests {
             alt: true,
             ..Default::default()
         };
-        // Same combo -> same id across calls (reload stability).
-        assert_eq!(
-            Hotkey::stable_id(ctrl_alt, 0xBC),
-            Hotkey::stable_id(ctrl_alt, 0xBC)
-        );
+        assert_eq!(Hotkey::stable_id(ctrl_alt, 0xBC), 0x03BC);
+        assert_eq!(Hotkey::stable_id(ctrl_alt, 0xBE), 0x03BE);
+        assert_eq!(Hotkey::stable_id(ctrl_alt, 0x1B), 0x031B);
         // Different vk, same mods -> different id.
         assert_ne!(
             Hotkey::stable_id(ctrl_alt, 0xBC),
@@ -962,12 +960,11 @@ mod tests {
         );
         // Same vk, different mods -> different id.
         let win = Modifiers::win();
+        assert_eq!(Hotkey::stable_id(win, 0x1B), 0x081B);
         assert_ne!(
             Hotkey::stable_id(ctrl_alt, 0x1B),
             Hotkey::stable_id(win, 0x1B)
         );
-        // Standard-modifier ids stay within the legacy app hotkey range
-        // (0x0000-0xBFFF).
         let all_mods = Modifiers {
             ctrl: true,
             alt: true,
@@ -975,8 +972,7 @@ mod tests {
             win: true,
             ..Default::default()
         };
-        assert!(Hotkey::stable_id(all_mods, 0xFF) <= 0xBFFF);
-        assert!(Hotkey::stable_id(all_mods, 0xFF) > 0);
+        assert_eq!(Hotkey::stable_id(all_mods, 0xFF), 0x0FFF);
 
         // F13–F24 modifiers occupy a disjoint bit range, so they stay unique
         // per combo (and may exceed the legacy range, which is now fine).
@@ -988,6 +984,8 @@ mod tests {
             fn_mods: fn_mod_bit(0x7D).unwrap(),
             ..Default::default()
         };
+        assert_eq!(Hotkey::stable_id(f13, 0x48), 0x1048);
+        assert_eq!(Hotkey::stable_id(f14, 0x48), 0x2048);
         assert_ne!(Hotkey::stable_id(f13, 0x48), Hotkey::stable_id(f14, 0x48));
         assert_ne!(
             Hotkey::stable_id(f13, 0x48),
@@ -1277,22 +1275,19 @@ mod tests {
 
         // F13–F24 as modifiers.
         let (mods, vk) = parse_hotkey_string("F13+H").unwrap();
-        assert_eq!(mods.fn_mods, fn_mod_bit(0x7C).unwrap());
+        assert_eq!(mods.fn_mods, 1);
         assert!(!mods.ctrl && !mods.alt && !mods.shift && !mods.win);
         assert_eq!(vk, super::vk::H);
 
         // Multiple F-key modifiers combine.
         let (mods, vk) = parse_hotkey_string("F13+F14+H").unwrap();
-        assert_eq!(
-            mods.fn_mods,
-            fn_mod_bit(0x7C).unwrap() | fn_mod_bit(0x7D).unwrap()
-        );
+        assert_eq!(mods.fn_mods, 3);
         assert_eq!(vk, super::vk::H);
 
         // F-key modifier mixes with standard modifiers.
         let (mods, _) = parse_hotkey_string("Ctrl+F13+H").unwrap();
         assert!(mods.ctrl);
-        assert_eq!(mods.fn_mods, fn_mod_bit(0x7C).unwrap());
+        assert_eq!(mods.fn_mods, 1);
 
         // F1–F12 are not valid modifiers.
         assert!(parse_hotkey_string("F12+H").is_none());

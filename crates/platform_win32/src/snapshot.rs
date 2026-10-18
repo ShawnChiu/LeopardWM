@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_capture_invalid_window_returns_false() {
-        assert!(!snapshot_capture(0xDEAD_BEEF));
-        assert!(snapshot_get(0xDEAD_BEEF).is_none());
+        assert!(!snapshot_capture(0));
+        assert!(snapshot_get(0).is_none());
     }
 }

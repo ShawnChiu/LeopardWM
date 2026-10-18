@@ -1105,6 +1105,8 @@ mod tests {
         assert!(message.contains("20"));
         assert!(message.contains("50"));
         assert!(!message.contains("destroyed during restore"));
+        assert!(!message.contains("window 30"));
+        assert!(!message.contains("window 40"));
     }
 
     #[test]
@@ -1162,14 +1164,15 @@ mod tests {
     }
 
     #[test]
-    fn cascade_empty_input_is_a_successful_no_op() {
+    fn cascade_empty_input_applies_empty_placements() {
         let mut applied = false;
         assert!(cascade_windows_with(
             &[],
             Rect::new(0, 0, 1920, 1080),
             || Ok(()),
             |_| unreachable!("no windows should be restored"),
-            |_| {
+            |placements| {
+                assert!(placements.is_empty());
                 applied = true;
                 Ok(Default::default())
             },
@@ -1366,8 +1369,7 @@ mod tests {
             );
 
             let primary = get_primary_monitor().unwrap();
-            let expected =
-                compute_restore_rect_from_offscreen(&Rect::new(0, 0, 640, 480), &primary.work_area);
+            let work = primary.work_area;
             let restore_functions: [fn(WindowId) -> Result<bool, Win32Error>; 2] =
                 [restore_window_moved_offscreen, |id| {
                     restore_windows_moved_offscreen(&[id]).map(|count| count == 1)
@@ -1387,10 +1389,10 @@ mod tests {
                 assert_eq!(
                     (restored.left, restored.top, restored.right, restored.bottom),
                     (
-                        expected.x,
-                        expected.y,
-                        expected.x + expected.width,
-                        expected.y + expected.height,
+                        work.x,
+                        work.y,
+                        work.x + 640.min(work.width.max(1)),
+                        work.y + 480.min(work.height.max(1)),
                     )
                 );
                 assert!(!IsWindowVisible(window.0).as_bool());
@@ -1422,13 +1424,6 @@ mod tests {
     fn test_restore_windows_moved_offscreen_empty_list() {
         let result = restore_windows_moved_offscreen(&[]);
         assert_eq!(result.unwrap(), 0);
-    }
-
-    #[test]
-    fn test_uncloak_all_managed_empty_list() {
-        let _serialize = crate::placement::lock_cloak_set_tests();
-        // Should not panic with an empty list
-        uncloak_all_managed_windows(&[]);
     }
 
     #[test]

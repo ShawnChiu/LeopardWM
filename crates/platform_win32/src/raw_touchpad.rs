@@ -668,8 +668,10 @@ mod tests {
             frame
                 .push(10, 0, contacts(0.2, 0.2)[2..].to_vec())
                 .unwrap()
-                .len(),
-            3
+                .iter()
+                .map(|contact| (contact.id, contact.x, contact.y))
+                .collect::<Vec<_>>(),
+            [(0, 0.2, 0.2), (1, 0.2, 0.2), (2, 0.2, 0.2)]
         );
         assert!(frame.push(11, 0, Vec::new()).unwrap().is_empty());
 
@@ -680,8 +682,10 @@ mod tests {
             frame
                 .push(12, 3, contacts(0.2, 0.2)[2..].to_vec())
                 .unwrap()
-                .len(),
-            3
+                .iter()
+                .map(|contact| (contact.id, contact.x, contact.y))
+                .collect::<Vec<_>>(),
+            [(0, 0.2, 0.2), (1, 0.2, 0.2), (2, 0.2, 0.2)]
         );
     }
 

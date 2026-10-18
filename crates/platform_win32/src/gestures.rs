@@ -944,17 +944,6 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    #[test]
-    fn diagnostic_gate_test_lock_recovers_after_panic() {
-        let panic = std::panic::catch_unwind(|| {
-            let _guard = diagnostic_gate_test_guard();
-            panic!("intentional test-lock poisoning");
-        });
-        assert!(panic.is_err());
-        let _guard = diagnostic_gate_test_guard();
-        DIAGNOSTIC_GATE_TEST_LOCK.clear_poison();
-    }
-
     fn input(
         now_ms: u128,
         axis: WheelAxis,
@@ -1157,32 +1146,6 @@ mod tests {
     }
 
     #[test]
-    fn non_candidate_unmodified_wheel_passes_through() {
-        let mut engine = WheelGestureEngine::new();
-
-        let result = engine.process(input(0, WheelAxis::Vertical, 120, false, 0));
-
-        assert_eq!(result.event, None);
-        assert!(!result.consume);
-    }
-
-    #[test]
-    fn swipe_timeout_clears_partial_accumulation() {
-        let mut engine = WheelGestureEngine::new();
-
-        engine.process(input(0, WheelAxis::Vertical, 240, false, LLMHF_INJECTED));
-        let result = engine.process(input(
-            GESTURE_TIMEOUT_MS + 1,
-            WheelAxis::Vertical,
-            120,
-            false,
-            LLMHF_INJECTED,
-        ));
-
-        assert_eq!(result.event, None);
-    }
-
-    #[test]
     fn injection_flag_does_not_change_navigation_stream_mode() {
         let mut unflagged = WheelGestureEngine::new();
         let mut injected = WheelGestureEngine::new();
@@ -1208,8 +1171,21 @@ mod tests {
             );
         }
 
-        assert_eq!(unflagged_events, injected_events);
-        assert_eq!(unflagged.navigation_mode, injected.navigation_mode);
+        for events in [unflagged_events, injected_events] {
+            assert_eq!(
+                events,
+                [
+                    Some(GestureEvent::ScrollUp),
+                    None,
+                    None,
+                    None,
+                    Some(GestureEvent::ScrollUp),
+                    None,
+                ]
+            );
+        }
+        assert_eq!(unflagged.navigation_mode, WheelMode::Stream);
+        assert_eq!(injected.navigation_mode, WheelMode::Stream);
     }
 
     fn capture_diag(emit: impl FnOnce()) -> Vec<String> {

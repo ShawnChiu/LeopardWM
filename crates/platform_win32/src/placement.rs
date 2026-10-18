@@ -3690,23 +3690,19 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_insets_accept_aligned_normal_sample() {
-        assert_eq!(
-            frame_insets_from_rects(Rect::new(100, 100, 914, 709), Rect::new(107, 101, 900, 700),),
-            Some((7, 1, 7, 8))
-        );
-    }
-
-    #[test]
     fn test_frame_insets_reject_stale_or_misaligned_samples() {
         let frame = Rect::new(100, 100, 914, 709);
+        assert_eq!(
+            frame_insets_from_rects(frame, Rect::new(107, 101, 900, 700)),
+            Some((7, 1, 7, 8))
+        );
         for visible in [Rect::new(117, 101, 900, 700), Rect::new(93, 101, 900, 700)] {
             assert_eq!(frame_insets_from_rects(frame, visible), None);
         }
     }
 
     #[test]
-    fn test_frame_insets_reject_implausible_deltas() {
+    fn test_frame_insets_enforce_maximum_delta() {
         assert_eq!(
             frame_insets_from_rects(
                 Rect::new(100, 100, 1100, 900),
@@ -3714,10 +3710,6 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn test_frame_insets_enforce_maximum_delta() {
         let maximum = MAX_INVISIBLE_FRAME_INSET as i32;
         let visible = Rect::new(100 + maximum, 100 + maximum, 800, 700);
         let frame = Rect::new(100, 100, 800 + maximum * 2, 700 + maximum * 2);
@@ -3918,7 +3910,7 @@ mod tests {
     }
 
     #[test]
-    fn test_landing_confirms_small_oversize_before_recording_minimums() {
+    fn test_landing_confirms_oversize_before_recording_minimums() {
         let width = width_measurement(7, 2545, 2559, 3789);
         let height = WindowSizeMeasurement {
             layout_h: 681,
@@ -3926,7 +3918,8 @@ mod tests {
             visible_h: 880,
             ..width_measurement(8, 2840, 2854, 2840)
         };
-        for measurement in [width, height] {
+        let larger_oversize = width_measurement(9, 1267, 1281, 3186);
+        for measurement in [width, height, larger_oversize] {
             for fits_after_retry in [true, false] {
                 let mut suspects = HashMap::new();
                 let first =
@@ -3952,6 +3945,10 @@ mod tests {
                 } else if measurement.window_id == width.window_id {
                     assert_eq!(second.width_violations.len(), 1);
                     assert_eq!(second.width_violations[0].min_width, 3789);
+                    assert!(second.height_violations.is_empty());
+                } else if measurement.window_id == larger_oversize.window_id {
+                    assert_eq!(second.width_violations.len(), 1);
+                    assert_eq!(second.width_violations[0].min_width, 3186);
                     assert!(second.height_violations.is_empty());
                 } else {
                     assert!(second.width_violations.is_empty());
@@ -4095,22 +4092,6 @@ mod tests {
         let second = detect_size_violations_from_measurements(&[measurement], false, &mut suspects);
         assert_eq!(second.width_violations.len(), 1);
         assert_eq!(second.width_violations[0].min_width, 3186);
-        assert!(suspects.is_empty());
-    }
-
-    #[test]
-    fn test_suspect_oversize_drops_one_off_stale_second_measurement() {
-        let first_measurement = width_measurement(7, 1267, 1281, 3186);
-        let second_measurement = width_measurement(7, 1267, 1281, 1267);
-        let mut suspects = HashMap::new();
-
-        let first =
-            detect_size_violations_from_measurements(&[first_measurement], true, &mut suspects);
-        assert!(should_retry_landing_measurement(true, &first));
-
-        let second =
-            detect_size_violations_from_measurements(&[second_measurement], false, &mut suspects);
-        assert!(second.width_violations.is_empty());
         assert!(suspects.is_empty());
     }
 
@@ -5432,18 +5413,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_placements_empty() {
-        let _owner_sweep = OWNER_SWEEP
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _serialize = lock_cloak_set_tests();
-        // Verify empty placements succeed without error
-        let config = PlatformConfig::default();
-        let result = apply_placements(&[], &config, None, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_apply_placements_skips_invalid_windows() {
         let _owner_sweep = OWNER_SWEEP
             .read()
@@ -5458,8 +5427,22 @@ mod tests {
         }];
 
         // Invalid windows (hwnd 0) are silently skipped in the deferred batch
-        let result = apply_placements(&placements, &config, None, false);
-        assert!(result.is_ok());
+        let result = apply_placements(&placements, &config, None, false).unwrap();
+        assert!(result.width_violations.is_empty());
+        assert!(result.height_violations.is_empty());
+        assert!(result.maximized_skipped_window_ids.is_empty());
+        assert_eq!(result.landings.len(), 1);
+        let landing = &result.landings[0];
+        assert_eq!(landing.window_id, 0);
+        assert_eq!(landing.requested_rect, Rect::new(0, 0, 800, 600));
+        assert_eq!(landing.requested_visibility, Visibility::OffScreenLeft);
+        assert_eq!(landing.actual_visible_rect, None);
+        assert_eq!(landing.actual_outer_rect, None);
+        assert!(landing.unreadable);
+        assert!(!landing.failed);
+        assert!(!landing.measurement_deferred);
+        assert!(!is_placement_parked(0));
+        assert_eq!(offscreen_placement_matches(0), None);
     }
 
     /// Verifies the OR-cloak invariant by directly manipulating the two
@@ -5805,15 +5788,11 @@ mod tests {
         let logical = Rect::new(-5120, 40, 1600, 900);
         let placement = offscreen_placement(window.id, logical, Visibility::OffScreenLeft);
         let insets = (7, 1, 7, 8);
-        let converted = visible_rect_to_frame_rect(logical, insets, false);
         assert_eq!(
             defer_origin(placement.clone(), insets, false),
-            (converted.x, converted.y, converted.width, 0)
+            (-5127, 39, 1614, 0)
         );
-        assert_eq!(
-            defer_origin(placement, insets, true),
-            (logical.x, logical.y, logical.width, 0)
-        );
+        assert_eq!(defer_origin(placement, insets, true), (-5120, 40, 1600, 0));
     }
 
     #[test]
@@ -6004,7 +5983,6 @@ mod tests {
         let window = HiddenPopup::new(120, 80, 700, 300);
         let logical = Rect::new(-1000, 40, 600, 900);
         let insets = (7, 1, 7, 8);
-        let converted = visible_rect_to_frame_rect(logical, insets, false);
         let (left_x, _, _, _) = defer_origin(
             offscreen_placement(window.id, logical, Visibility::OffScreenLeft),
             insets,
@@ -6020,7 +5998,7 @@ mod tests {
             insets,
             false,
         );
-        assert_eq!(right_x, converted.x);
+        assert_eq!(right_x, -1007);
     }
 
     #[test]

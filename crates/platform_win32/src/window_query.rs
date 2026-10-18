@@ -523,7 +523,6 @@ mod tests {
 
     #[test]
     fn test_window_id_to_hwnd_nonzero_succeeds() {
-        let result = window_id_to_hwnd(12345);
-        assert!(result.is_ok());
+        assert_eq!(window_id_to_hwnd(12345).unwrap().0 as usize, 12345);
     }
 }

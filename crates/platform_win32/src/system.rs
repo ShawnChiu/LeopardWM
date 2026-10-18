@@ -133,35 +133,16 @@ mod tests {
     }
 
     #[test]
-    fn test_scale_px_identity_at_100_percent() {
+    fn test_scale_px_rounds_at_common_scales() {
         assert_eq!(scale_px(10, 1.0), 10);
         assert_eq!(scale_px(0, 1.0), 0);
         assert_eq!(scale_px(-5, 1.0), -5);
-    }
-
-    #[test]
-    fn test_scale_px_200_percent() {
         assert_eq!(scale_px(10, 2.0), 20);
         assert_eq!(scale_px(3, 2.0), 6);
-    }
-
-    #[test]
-    fn test_scale_px_150_percent_rounds() {
+        assert_eq!(scale_px(10, 1.25), 13);
+        assert_eq!(scale_px(8, 1.25), 10);
         assert_eq!(scale_px(3, 1.5), 5); // 4.5 rounds to 5
         assert_eq!(scale_px(10, 1.5), 15);
         assert_eq!(scale_px(1, 1.5), 2); // 1.5 rounds to 2
-    }
-
-    #[test]
-    fn test_scale_px_125_percent() {
-        assert_eq!(scale_px(10, 1.25), 13); // 12.5 rounds to 13
-        assert_eq!(scale_px(8, 1.25), 10);
-    }
-
-    #[test]
-    #[ignore = "Requires display hardware - run with: cargo test -- --ignored"]
-    fn test_set_dpi_awareness_no_panic() {
-        // On CI/test environments this may return false (already set), but must not panic
-        let _result = set_dpi_awareness();
     }
 }

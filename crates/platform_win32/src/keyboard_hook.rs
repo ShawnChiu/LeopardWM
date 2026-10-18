@@ -1324,8 +1324,8 @@ mod tests {
     #[test]
     fn recording_chords_mask_start_and_alt_menus() {
         for (held, vk, mask) in [
-            (Modifiers::win(), 0x24, Some(VK_CONTROL as u16)),
-            (Modifiers::alt(), 0x4A, Some(VK_MENU_MASK)),
+            (Modifiers::win(), 0x24, Some(0x11)),
+            (Modifiers::alt(), 0x4A, Some(0xE8)),
         ] {
             assert_eq!(
                 decide(KeyMsg::Down, vk, held, true, &[], 0, 0, 0, true, true, None,),
@@ -1341,27 +1341,27 @@ mod tests {
     #[test]
     fn hotkeys_mask_menus_only_on_new_presses_without_ctrl() {
         for (modifiers, mask) in [
-            (Modifiers::alt(), Some(VK_MENU_MASK)),
+            (Modifiers::alt(), Some(0xE8)),
             (
                 Modifiers {
                     shift: true,
                     ..Modifiers::alt()
                 },
-                Some(VK_MENU_MASK),
+                Some(0xE8),
             ),
             (
                 Modifiers {
                     win: true,
                     ..Modifiers::alt()
                 },
-                Some(VK_MENU_MASK),
+                Some(0xE8),
             ),
             (
                 Modifiers {
                     fn_mods: fn_mod_bit(0x7C).unwrap(),
                     ..Modifiers::alt()
                 },
-                Some(VK_MENU_MASK),
+                Some(0xE8),
             ),
             (
                 Modifiers {
@@ -1370,7 +1370,7 @@ mod tests {
                 },
                 None,
             ),
-            (Modifiers::win(), Some(VK_CONTROL as u16)),
+            (Modifiers::win(), Some(0x11)),
             (win_ctrl(), None),
             (
                 Modifiers {

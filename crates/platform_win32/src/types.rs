@@ -90,11 +90,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_platform_config_default() {
-        let _config = PlatformConfig::default();
-    }
-
-    #[test]
     fn test_monitor_contains_point() {
         let monitor = MonitorInfo {
             id: 1,
