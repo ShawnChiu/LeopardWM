@@ -78,11 +78,7 @@ fn global_cloaked_contains(wid: WindowId) -> bool {
     guard.as_ref().is_some_and(|set| set.contains(&wid))
 }
 
-// ---------------------------------------------------------------------
-// GHOST_CLOAKED — distinct cloak set populated only by the ghost-animation
-// path. Logical-OR'd with GLOBAL_CLOAKED to determine the effective cloak
-// state (see `apply_cloak_state`).
-// ---------------------------------------------------------------------
+// Ghost-animation cloaks combine with placement cloaks via `apply_cloak_state`.
 
 static GHOST_CLOAKED: Mutex<Option<HashSet<WindowId>>> = Mutex::new(None);
 
@@ -128,14 +124,8 @@ pub fn drain_ghost_cloaked() -> Vec<WindowId> {
     }
 }
 
-// ---------------------------------------------------------------------
-// DIRECT_CLOAKED — windows cloaked outside the placement system (e.g. a
-// stashed scratchpad window removed from all workspaces). NOT consulted by
-// `apply_cloak_state` or `uncloak_all_tracked`, so normal placement never
-// touches them — but `dwm_uncloak_all` drains it, so shutdown / panic /
-// emergency-uncloak recovery always restores them. Without this set such a
-// window would be cloaked with no recovery path = permanently invisible.
-// ---------------------------------------------------------------------
+// Direct cloaks are outside layout management and must survive normal placement.
+// Recovery drains this set so stashed scratchpad windows cannot remain invisible.
 
 static DIRECT_CLOAKED: Mutex<Option<HashSet<WindowId>>> = Mutex::new(None);
 
@@ -172,11 +162,9 @@ fn lock_cloaked() -> std::sync::MutexGuard<'static, Option<HashSet<WindowId>>> {
         .unwrap_or_else(crate::recover_poisoned_mutex)
 }
 
-/// Force-cloak a single window directly, without touching either tracking
-/// set. For windows held OUTSIDE normal layout management (e.g. a stashed
-/// scratchpad window that has been removed from its workspace) — nothing
-/// in the placement path will reposition or uncloak it, so a direct cloak
-/// is safe and stays put until the owner uncloaks it.
+/// Force-cloak a window outside normal layout management (e.g. a stashed
+/// scratchpad). Track it in `DIRECT_CLOAKED` for shutdown/panic recovery,
+/// without changing placement or ghost-cloak membership.
 pub fn dwm_cloak_window(window_id: WindowId) {
     {
         let mut guard = lock_direct_cloaked();
@@ -187,12 +175,9 @@ pub fn dwm_cloak_window(window_id: WindowId) {
     }
 }
 
-/// Force-uncloak a window by its WindowId regardless of either tracking
-/// set's membership. Removes from both `GLOBAL_CLOAKED` and
-/// `GHOST_CLOAKED`. Used by shutdown / panic cleanup.
-///
-/// Bypasses `apply_cloak_state`'s OR-check: the intent here is "force
-/// visible" regardless of why the window was originally cloaked.
+/// Force-uncloak a window regardless of placement, ghost, or direct-cloak
+/// membership. Removes it from all three sets for shutdown/panic cleanup,
+/// bypassing `apply_cloak_state`'s OR-check.
 pub fn dwm_uncloak_window(window_id: WindowId) {
     forget_offscreen_placement(window_id);
     {
@@ -256,8 +241,8 @@ pub fn stop_placement_mover() {
     mover::cancel(None);
 }
 
-/// Force-uncloak every tracked window from both sets. Called during
-/// shutdown and panic recovery. Bypasses `apply_cloak_state`.
+/// Force-uncloak every window tracked by placement, ghost animation, or direct
+/// cloaking during shutdown/panic recovery. Bypasses `apply_cloak_state`.
 pub fn dwm_uncloak_all() {
     stop_placement_mover();
     if let Ok(mut records) = OFFSCREEN_PLACEMENTS.lock() {
@@ -414,7 +399,6 @@ fn uncloak_all_tracked() {
     }
 }
 
-/// Global set of window IDs currently cloaked by the placement system.
 static GLOBAL_CLOAKED: Mutex<Option<HashSet<WindowId>>> = Mutex::new(None);
 
 /// Tests that insert into or drain `GLOBAL_CLOAKED`, `GHOST_CLOAKED`, or
@@ -535,9 +519,6 @@ pub struct ApplyPlacementsResult {
     pub landings: Vec<PlacementLanding>,
 }
 
-// Collect all (hwnd, adjusted_rect, flags) entries for deferred positioning.
-// Pre-compute border insets and cache checks before the batch to minimize
-// time between BeginDeferWindowPos and EndDeferWindowPos.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InsetSource {
     LocalCache,
@@ -545,8 +526,6 @@ enum InsetSource {
     Fresh,
 }
 
-/// Border insets resolved for one placement, tagged with their provenance and
-/// with the global-inset-cache generation they were resolved under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ResolvedInsets {
     insets: (i32, i32, i32, i32),
@@ -566,9 +545,7 @@ struct DeferEntry {
     /// Used for size-violation detection, which compares DWM visible bounds
     /// directly and is immune to stale cached border insets.
     layout_w: i32,
-    /// Layout-coordinate height requested by the layout engine (pre-insets).
     layout_h: i32,
-    /// Frame insets used to turn the layout request into this SetWindowPos request.
     insets: (i32, i32, i32, i32),
     inset_source: InsetSource,
     /// Global-inset-cache generation `insets` was resolved under; publication
@@ -684,8 +661,6 @@ fn apply_placements_inner(
         if let Some(cache) = cache.as_deref_mut() {
             cache.clear();
         }
-        // Uncloak all tracked windows — no placements means all previous
-        // windows have left this layout (e.g., workspace switch to empty workspace).
         if let Ok(mut records) = OFFSCREEN_PLACEMENTS.lock() {
             records.clear();
         }
@@ -701,10 +676,8 @@ fn apply_placements_inner(
         SET_WINDOW_POS_FLAGS(0)
     };
 
-    // Prepare all window entries — visible and off-screen alike.
-    // All windows get full position + size with border inset adjustment.
-    // Off-screen windows are kept at their layout-flow position; DWM cloaking
-    // makes them invisible.
+    // Off-screen placement uses position-only parking, since DWM cloaking
+    // cannot hide windows owned by other processes.
     let offscreen_count = placements
         .iter()
         .filter(|p| p.visibility != Visibility::Visible)
@@ -810,12 +783,9 @@ fn apply_placements_inner(
     finalize_cached_border_insets(&entries, &detection.inset_artifact_windows, cache);
     evict_cached_border_insets(&detection.violating_windows, cache);
 
-    // Update cache: remove stale entries (windows no longer in placements),
-    // update positioned entries, and keep skipped-unchanged entries intact.
     if let Some(cache) = cache.as_deref_mut() {
         let current_ids: std::collections::HashSet<u64> =
             placements.iter().map(|p| p.window_id).collect();
-        // Remove windows that are no longer in the layout
         cache.positions.retain(|id, _| {
             if !current_ids.contains(id) {
                 forget_offscreen_placement(*id);
@@ -824,7 +794,6 @@ fn apply_placements_inner(
             true
         });
         cache.insets.retain(|id, _| current_ids.contains(id));
-        // Update entries for windows that were actually positioned
         let positioned: std::collections::HashSet<u64> = entries
             .iter()
             .filter(|e| !failed_window_ids.contains(&e.window_id))
@@ -837,14 +806,10 @@ fn apply_placements_inner(
         }
     }
 
-    // Cloak off-screen windows AFTER positioning. DWM cloaking keeps the
-    // composition surface alive (preventing content shift on return) while
-    // hiding the window from view (preventing peeking through outer gaps).
-    // Events from cloaking are filtered by is_placement_cloaked() in event_hooks.
-    //
-    // Routed through `apply_cloak_state` so a window that's also in
-    // `GHOST_CLOAKED` stays cloaked even if we remove it from
-    // `GLOBAL_CLOAKED` during pruning.
+    // Cloak after positioning to keep DWM composition surfaces alive without
+    // peeking through outer gaps where same-process cloaking is supported.
+    // Event hooks filter cloak events through is_placement_cloaked().
+    // Preserve the OR with GHOST_CLOAKED when pruning placement membership.
     sync_cloak_state(&entries, placements, &failed_window_ids);
 
     // DirectComposition swap-chain repair.
@@ -1179,7 +1144,6 @@ fn offscreen_frame_origin(
     }
 }
 
-/// Build the defer-entry list for all placements, skipping cache-unchanged windows.
 fn build_defer_entries(
     placements: &[WindowPlacement],
     cache: &mut Option<&mut PlacementCache>,
@@ -1285,13 +1249,10 @@ fn build_defer_entries(
                 offscreen_rect: None,
             });
         } else {
-            // Off-screen: SWP_NOSIZE keeps current size (no resize side-effects).
-            // w stores estimated frame width for clamping only — SetWindowPos
-            // ignores it due to SWP_NOSIZE.
-            //
-            // Zero-size hidden-tab placeholders are not a visible-rect request.
-            // Converting them through frame insets makes the parked origin
-            // depend on whether the inset cache is warm or cold after restart.
+            // SWP_NOSIZE avoids resize side-effects; SetWindowPos ignores w/h.
+            // Zero-size hidden-tab placeholders are outer-frame origins, not
+            // visible-rect requests: applying insets would make the parked
+            // position depend on whether the inset cache is warm after restart.
             let zero_size_hidden_tab = placement.rect.width == 0 && placement.rect.height == 0;
             let actual_rect = crate::get_window_chrome_rect(placement.window_id);
             let actual_size = actual_rect
@@ -1332,7 +1293,6 @@ fn build_defer_entries(
     )
 }
 
-/// Uncloak entries becoming visible and drop them from the tracking set.
 fn uncloak_becoming_visible(entries: &[DeferEntry]) {
     let to_consider: Vec<WindowId> = {
         let mut cloaked = lock_cloaked();
@@ -1576,7 +1536,6 @@ fn probe_placement_owners(
     deferrals
 }
 
-/// Position all entries in one DeferWindowPos batch; returns (applied, failed ids).
 #[cfg(test)]
 fn position_entries(entries: &[DeferEntry], post_animation_landing: bool) -> (u32, HashSet<u64>) {
     let pending = pending_async_entries(
@@ -2057,15 +2016,12 @@ fn clear_queued_recovery(window_id: WindowId) {
 }
 
 fn position_entries_batch(entries: &[DeferEntry]) -> HashSet<u64> {
-    // Track windows that failed positioning (excluded from cache).
     let mut failed_window_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
-    // Batch all SetWindowPos calls via DeferWindowPos for atomic repositioning.
     if !entries.is_empty() {
         unsafe {
             match BeginDeferWindowPos(entries.len() as i32) {
                 Err(_) => {
-                    // Fallback: apply individually if batching fails
                     for entry in entries {
                         if SetWindowPos(
                             entry.hwnd,
@@ -2105,7 +2061,6 @@ fn position_entries_batch(entries: &[DeferEntry]) -> HashSet<u64> {
                     }
                     if batch_ok {
                         if EndDeferWindowPos(hdwp).is_err() {
-                            // EndDeferWindowPos failed — fall back to individual calls
                             for entry in entries {
                                 if SetWindowPos(
                                     entry.hwnd,
@@ -2224,7 +2179,6 @@ fn record_queued_recovery(window_id: WindowId, x: i32, y: i32) {
         .insert(window_id, submission);
 }
 
-/// Drops drained or expired recovery records.
 fn retain_pending_queued_recovery(
     submissions: &mut HashMap<WindowId, AsyncPositionSubmission>,
     window_id: WindowId,
@@ -2431,7 +2385,6 @@ fn classify_measurements_and_update_suspects(
         .collect()
 }
 
-/// Detect min-size violations on the landing pass via DWM visible bounds.
 fn detect_size_violations(
     entries: &[DeferEntry],
     failed_window_ids: &HashSet<u64>,
@@ -2605,7 +2558,6 @@ fn report_axis_size_outcome(
     }
 }
 
-/// Cloak newly off-screen entries and prune cloaks for windows no longer in the layout.
 fn sync_cloak_state(
     entries: &[DeferEntry],
     placements: &[WindowPlacement],
@@ -2625,7 +2577,6 @@ fn sync_cloak_state(
             .map(|e| e.window_id)
             .collect();
 
-        // Prune windows no longer in the layout (e.g., workspace switch).
         let current_ids: HashSet<u64> = placements.iter().map(|p| p.window_id).collect();
         let uncloak: Vec<WindowId> = set
             .iter()
@@ -2658,7 +2609,6 @@ fn is_sticky_compositor_class(class: &str) -> bool {
     STICKY_COMPOSITOR_CLASSES.contains(&class)
 }
 
-/// Read the class name of a window. Returns empty string on failure.
 fn window_class_name(hwnd: HWND) -> String {
     let mut buf: [u16; 256] = [0; 256];
     let len = unsafe { GetClassNameW(hwnd, &mut buf) };
@@ -2669,7 +2619,6 @@ fn window_class_name(hwnd: HWND) -> String {
     }
 }
 
-/// Position data passed to the nudge helper.
 struct NudgeTarget {
     hwnd: HWND,
     x: i32,
@@ -5328,8 +5277,7 @@ mod tests {
             .unwrap_or_else(crate::recover_poisoned_mutex);
         let wid: WindowId = 0x7FFF_FF12;
         forget_global_insets(wid);
-        // Resolve first, invalidate second — the ordering the deferred
-        // publication widened the window on.
+        // Invalidate between resolution and publication to exercise the generation fence.
         let entry = fresh_inset_entry(wid, inset_cache_generation());
         clear_inset_cache();
         assert_ne!(entry.inset_generation, inset_cache_generation());
@@ -5483,7 +5431,6 @@ mod tests {
             column_index: 0,
         }];
 
-        // Invalid windows (hwnd 0) are silently skipped in the deferred batch
         let result = apply_placements(&placements, &config, None, false).unwrap();
         assert!(result.width_violations.is_empty());
         assert!(result.height_violations.is_empty());
@@ -5502,22 +5449,16 @@ mod tests {
         assert_eq!(offscreen_placement_matches(0), None);
     }
 
-    /// Verifies the OR-cloak invariant by directly manipulating the two
-    /// global sets and asserting `is_placement_cloaked` returns the OR.
-    ///
-    /// Uses a synthetic high-bit WindowId that won't collide with any
-    /// real HWND on the test machine, since the tracking sets are
-    /// process-global.
+    /// Synthetic high-bit WindowId avoids collisions with live HWNDs in the
+    /// process-global cloak sets.
     #[test]
     fn test_or_cloak_invariant() {
         let _serialize = lock_cloak_set_tests();
         let wid: WindowId = 0xFFFF_FFFF_FFFF_FF00;
         let _membership = CloakMembershipGuard::claim(wid);
 
-        // Case 1: neither set → false.
         assert!(!is_placement_cloaked(wid), "neither set should give false");
 
-        // Case 2: global only → true.
         {
             let mut g = lock_cloaked();
             let s = g.get_or_insert_with(HashSet::new);
@@ -5525,11 +5466,9 @@ mod tests {
         }
         assert!(is_placement_cloaked(wid), "global only should give true");
 
-        // Case 3: both sets → true.
         mark_ghost_cloaked(wid);
         assert!(is_placement_cloaked(wid), "both sets should give true");
 
-        // Case 4: ghost only → true.
         {
             let mut g = lock_cloaked();
             if let Some(ref mut s) = *g {
@@ -5538,7 +5477,6 @@ mod tests {
         }
         assert!(is_placement_cloaked(wid), "ghost only should give true");
 
-        // Case 5: neither → false again.
         unmark_ghost_cloaked(wid);
         assert!(
             !is_placement_cloaked(wid),

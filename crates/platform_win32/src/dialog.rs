@@ -74,7 +74,6 @@ const FADE_TIMER_ID: usize = 0xB1;
 const FADE_DURATION_MS: u64 = 80;
 const FADE_INTERVAL_MS: u32 = 16;
 
-/// Helpers for converting BGR u32 colors into a `COLORREF`.
 fn bgr_to_colorref(bgr: u32) -> COLORREF {
     COLORREF(bgr)
 }
@@ -89,23 +88,16 @@ fn lighten_bgr(bgr: u32, delta: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// Context stored via `GWLP_USERDATA` so the WndProc can write the
-/// final result + reach the subclassed EDIT control.
 struct PopupContext {
     edit_hwnd: HWND,
     bg_brush: HBRUSH,
     bg_color: u32,
     text_color: u32,
-    /// Brush used to paint the check-button hover pill — lighter than
-    /// the bg by a small step so the pill reads as an interactive
-    /// surface without being garish.
     hover_brush: HBRUSH,
     hover_color: u32,
     check_rect: RECT,
     initial: Vec<u16>,
     result: Option<String>,
-    /// Original EDIT proc, saved during subclassing so the proc can
-    /// forward unhandled messages back to the default handler.
     original_edit_proc: WNDPROC,
     /// Whether the popup has received its first WM_ACTIVATE with
     /// WA_ACTIVE. Guards against false-cancel on the initial creation
@@ -116,20 +108,14 @@ struct PopupContext {
     /// (commit or cancel). Suppresses WM_ACTIVATE-driven cancel so the
     /// destroy isn't reentered.
     finishing: bool,
-    /// Mouse is currently over the check button. Drives the hover-pill
-    /// background so the check reads as a clickable button. Same idea
-    /// as the strip's close-X hover state.
     check_hovered: bool,
     /// Whether `TrackMouseEvent` is armed (so we'll receive
     /// `WM_MOUSELEAVE`). Re-armed on every entry since Windows clears
     /// the subscription on leave.
     mouse_tracking_armed: bool,
-    /// Wall-clock instant the fade-in animation started.
     fade_start: std::time::Instant,
-    /// Pre-rendered Segoe Fluent Icons "Accept" (E73E) glyph bitmap.
-    /// Same supersample + box-filter pipeline as the menu icons so the
-    /// check matches their visual style exactly. Generated once at
-    /// WM_CREATE, freed in WM_DESTROY.
+    /// Accept glyph rendered with the menu icons' supersampling pipeline.
+    /// Created at WM_CREATE; freed after the popup's message loop exits.
     check_bitmap: HBITMAP,
     /// HFONT applied to the EDIT control — Segoe UI sized to the
     /// strip's tab-title font so the rename text matches the rest of
@@ -146,10 +132,7 @@ struct PopupContext {
     /// `DestroyIcon` when the popup tears down. `None` → text-only
     /// popup, no icon area reserved.
     icon: Option<isize>,
-    /// Persistent tooltip popup HWND (raw, as `isize` for `Send` safety
-    /// even though we never cross threads). Created once at WM_CREATE,
-    /// re-positioned + re-rendered + ShowWindow'd on each check-button
-    /// hover entry, HideWindow'd on hover exit. `0` = not created.
+    /// Tooltip popup created at WM_CREATE and reused on hover; 0 means absent.
     check_tooltip_hwnd: isize,
     /// Tracks ShowWindow / HideWindow state so we don't redundantly
     /// re-render the tooltip bitmap on every WM_MOUSEMOVE while the
@@ -188,13 +171,9 @@ pub fn show_rename_inline_popup(
         let pw = (pw_outer - 2 * strip_h_inset).max(20);
         let ph = (ph_outer - 2 * v_inset).max(12);
         let class_name: Vec<u16> = "LeopardWMInlineRename\0".encode_utf16().collect();
-        // I-beam cursor reads as "editable text" — keeps the popup
-        // feeling like an inline edit rather than a button.
         let cursor = LoadCursorW(None, IDC_IBEAM).unwrap_or_default();
         let bg_brush = CreateSolidBrush(bgr_to_colorref(bg_color));
-        // Hover-pill bg is the tab bg lifted ~12% toward white
-        // (clamped per channel). Same recipe the close-X uses for its
-        // pill background so the two read as one visual system.
+        // Match the strip close-X hover color by adding 28 to each channel.
         let hover_color = lighten_bgr(bg_color, 28);
         let hover_brush = CreateSolidBrush(bgr_to_colorref(hover_color));
         let wc = WNDCLASSW {
@@ -209,11 +188,7 @@ pub fn show_rename_inline_popup(
         // surface from CreateWindowExW below.
         let _ = RegisterClassW(&wc);
 
-        // Pre-compute the check-button rect in popup-local coords —
-        // identical math to the strip's close-X pill (see
-        // `tab_strip::show`) so the rename check sits at the same
-        // pixel position and has the same dimensions as the X button
-        // it visually replaces.
+        // Match the strip close-X geometry so the check button replaces it in place.
         let h_inset = (ph / 6).max(4);
         let pill_size_target = (ph * 2 / 3).max(16).min(ph - 4);
         let pill_size = if (pill_size_target & 1) == (ph & 1) {
@@ -314,10 +289,8 @@ pub fn show_rename_inline_popup(
             &pref as *const _ as *const c_void,
             std::mem::size_of_val(&pref) as u32,
         );
-        // Subtle DWM border. Default Win11 popup border is near-white
-        // and reads too prominently against the tab pill; a mid-grey
-        // (~30% lift toward white from the strip bg) gives definition
-        // without standing out. COLORREF = 0x00BBGGRR.
+        // The default Win11 popup border is near-white and too prominent against
+        // the tab pill. Use a subdued grey border (COLORREF = 0x00BBGGRR).
         let border: u32 = 0x0050_5050;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -326,7 +299,6 @@ pub fn show_rename_inline_popup(
             std::mem::size_of_val(&border) as u32,
         );
 
-        // Start invisible, then ramp via WM_TIMER.
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
         let _ = SetTimer(Some(hwnd), FADE_TIMER_ID, FADE_INTERVAL_MS, None);
         // Force activation so the EDIT receives keyboard input. The
@@ -342,7 +314,6 @@ pub fn show_rename_inline_popup(
             DispatchMessageW(&msg);
         }
 
-        // Reclaim ownership; clean up the brushes we allocated up front.
         let ctx_owned: Box<PopupContext> = Box::from_raw(ctx_ptr);
         let _ = DeleteObject(ctx_owned.bg_brush.into());
         let _ = DeleteObject(ctx_owned.hover_brush.into());
@@ -355,7 +326,6 @@ pub fn show_rename_inline_popup(
         if ctx_owned.check_tooltip_hwnd != 0 {
             let _ = DestroyWindow(HWND(ctx_owned.check_tooltip_hwnd as *mut c_void));
         }
-        // Release our owned HICON copy.
         if let Some(h) = ctx_owned.icon {
             if h != 0 {
                 let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(
@@ -367,7 +337,6 @@ pub fn show_rename_inline_popup(
     }
 }
 
-/// Read the current EDIT text as a `String` (UTF-16 → UTF-8).
 unsafe fn read_edit_text(edit: HWND) -> String {
     use windows::Win32::UI::WindowsAndMessaging::{WM_GETTEXT, WM_GETTEXTLENGTH};
     let len = SendMessageW(edit, WM_GETTEXTLENGTH, None, None).0 as usize;
@@ -410,9 +379,6 @@ unsafe extern "system" fn inline_rename_proc(
         return LRESULT(1);
     }
 
-    // Show the arrow cursor (not I-beam) when the mouse is over the
-    // check button. Default IDC_IBEAM was set on the popup class for
-    // the text-edit area, so we override only when over the check.
     if msg == WM_SETCURSOR {
         if let Some(handled) = on_set_cursor(hwnd) {
             return handled;
@@ -443,9 +409,6 @@ unsafe extern "system" fn inline_rename_proc(
         return on_activate(hwnd, msg, wparam, lparam);
     }
 
-    // EDIT control bg + text color routing. WM_CTLCOLOREDIT lets the
-    // parent override the default white-on-system colors so the EDIT
-    // blends with the tab.
     if msg == windows::Win32::UI::WindowsAndMessaging::WM_CTLCOLOREDIT {
         if let Some(ctx) = ctx_from_hwnd(hwnd) {
             let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut c_void);
@@ -483,7 +446,6 @@ unsafe extern "system" fn inline_rename_proc(
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-/// Handles `WM_CREATE`: builds the EDIT control, check glyph, and tooltip.
 unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
 
@@ -557,10 +519,6 @@ unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
             >(original));
         }
         let _ = SetWindowTextW(edit, windows::core::PCWSTR(ctx.initial.as_ptr()));
-        // Match the strip's tab title font: Segoe UI, char height
-        // = `0.43 * strip_h` (≈ 12 px at default DPI) floor 8 —
-        // identical to `render_strip_inner`. Pixel-for-pixel match
-        // with a live tab title.
         let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
         let height = -(((ctx.strip_h as f32 * 0.43).round() as i32).max(8));
         let font = windows::Win32::Graphics::Gdi::CreateFontW(
@@ -601,15 +559,11 @@ unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
             Some(LPARAM(0)),
         );
         let _ = SetFocus(Some(edit));
-        // Select-all so typing replaces the seeded text immediately.
         SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
     }
 
-    // Pre-render the check glyph using Segoe Fluent Icons "Accept"
-    // (E73E) at the check rect's exact pixel size — avoids the
-    // double-rescale (render-at-16-then-stretch) that produced a
-    // visibly fuzzy result. Same supersample pipeline as the menu
-    // icons, just sized for *this* tab's check button.
+    // Render at the check rect size to avoid fuzzy double-rescaling; use the
+    // menu icons' supersampling pipeline for consistent visual treatment.
     let check_size = (ctx.check_rect.right - ctx.check_rect.left)
         .min(ctx.check_rect.bottom - ctx.check_rect.top);
     ctx.check_bitmap =
@@ -626,7 +580,6 @@ unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Returns `Some` (cursor set to arrow) when the mouse is over the check button.
 unsafe fn on_set_cursor(hwnd: HWND) -> Option<LRESULT> {
     let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
     let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
@@ -643,7 +596,6 @@ unsafe fn on_set_cursor(hwnd: HWND) -> Option<LRESULT> {
     None
 }
 
-/// Handles `WM_PAINT`: bg fill, tab icon, hover pill + check glyph.
 unsafe fn on_paint(hwnd: HWND) -> LRESULT {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -692,7 +644,6 @@ unsafe fn on_paint(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_MOUSEMOVE`: check-button hover state + tooltip show/hide.
 unsafe fn on_mouse_move(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if let Some(ctx) = ctx_from_hwnd(hwnd) {
         if !ctx.mouse_tracking_armed {
@@ -713,9 +664,6 @@ unsafe fn on_mouse_move(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
         if over != ctx.check_hovered {
             ctx.check_hovered = over;
             let _ = InvalidateRect(Some(hwnd), Some(&cr), false);
-            // Show tooltip on hover-in, hide on hover-out. Same
-            // visual style as the close-X tooltip (rendered via
-            // the strip's shared tooltip pipeline).
             if ctx.check_tooltip_hwnd != 0 {
                 let tt = HWND(ctx.check_tooltip_hwnd as *mut c_void);
                 if over && !ctx.check_tooltip_visible {
@@ -731,7 +679,6 @@ unsafe fn on_mouse_move(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-/// Handles `WM_MOUSELEAVE`: clears hover state and hides the tooltip.
 unsafe fn on_mouse_leave(hwnd: HWND) -> LRESULT {
     if let Some(ctx) = ctx_from_hwnd(hwnd) {
         ctx.mouse_tracking_armed = false;
@@ -748,7 +695,6 @@ unsafe fn on_mouse_leave(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles the fade-in `WM_TIMER` tick: eased alpha ramp, kills timer at end.
 unsafe fn on_fade_timer(hwnd: HWND) -> LRESULT {
     if let Some(ctx) = ctx_from_hwnd(hwnd) {
         let elapsed = ctx.fade_start.elapsed().as_millis() as u64;
@@ -766,7 +712,6 @@ unsafe fn on_fade_timer(hwnd: HWND) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_LBUTTONDOWN`: commit when the click lands on the check button.
 unsafe fn on_lbutton_down(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let raw = lparam.0 as u32;
     let cx = (raw & 0xFFFF) as i16 as i32;
@@ -781,7 +726,6 @@ unsafe fn on_lbutton_down(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-/// Handles `WM_ACTIVATE`: refocus EDIT on activate, cancel on click-away.
 unsafe fn on_activate(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // WA_INACTIVE = 0; any non-zero state means we're activating.
     let activation = (wparam.0 & 0xFFFF) as u32;
@@ -806,12 +750,10 @@ unsafe fn on_activate(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> L
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-/// Handles commit: validates length, stores the result, destroys the popup.
 unsafe fn on_commit(hwnd: HWND) -> LRESULT {
     if let Some(ctx) = ctx_from_hwnd(hwnd) {
         let text = read_edit_text(ctx.edit_hwnd);
         if text.len() > TAB_TITLE_MAX_BYTES {
-            // Reject and re-select so the user can edit down.
             SendMessageW(ctx.edit_hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
             let _ = SetFocus(Some(ctx.edit_hwnd));
             return LRESULT(0);
@@ -851,9 +793,6 @@ unsafe extern "system" fn edit_subclass_proc(
         }
     }
 
-    // Fall through to the original EDIT proc. The parent stashes the
-    // original handler on the popup context; we look it up via the
-    // parent's GWLP_USERDATA.
     let parent = match windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) {
         Ok(p) => p,
         Err(_) => return DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -955,15 +894,8 @@ unsafe fn paint_check_glyph(hdc: windows::Win32::Graphics::Gdi::HDC, ctx: &Popup
     }
 }
 
-/// Tooltip text shown on hover of the rename popup's check button.
-/// Matches the close-X tooltip's terse style.
 const CHECK_TOOLTIP_TEXT: &str = "Save";
 
-/// Create the tooltip popup window (one per rename popup, kept alive
-/// for the popup's lifetime so we don't pay create/destroy cost on
-/// every hover). Uses `DefWindowProcW` for its WndProc — the tooltip
-/// has no behavior of its own, it's just a layered surface we draw
-/// into and show/hide.
 unsafe extern "system" fn check_tooltip_proc(
     hwnd: HWND,
     msg: u32,
@@ -1025,18 +957,12 @@ unsafe fn create_check_tooltip_popup() -> HWND {
     hwnd
 }
 
-/// Measure the tooltip text + position the tooltip popup centered
-/// horizontally under the check button, then render via the strip's
-/// shared tooltip pipeline and `ShowWindow` it. The render function
-/// drives `UpdateLayeredWindow` with the popup's screen coords.
 unsafe fn show_check_tooltip(tt_hwnd: HWND, parent_hwnd: HWND, check_rect: RECT, text: &str) {
     use windows::Win32::Graphics::Gdi::{
         DrawTextW, GetDC, ReleaseDC, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
 
-    // Compute the check button's screen-space anchor rect — popup +
-    // check_rect (local) → screen coords.
     let mut win_rect = RECT::default();
     let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(parent_hwnd, &mut win_rect);
     let anchor = RECT {
@@ -1046,7 +972,6 @@ unsafe fn show_check_tooltip(tt_hwnd: HWND, parent_hwnd: HWND, check_rect: RECT,
         bottom: win_rect.top + check_rect.bottom,
     };
 
-    // Measure text with the strip's tooltip font so popup width is exact.
     let hdc_screen = GetDC(None);
     let font = crate::tab_strip::create_tooltip_font();
     let old_font = SelectObject(hdc_screen, font.into());

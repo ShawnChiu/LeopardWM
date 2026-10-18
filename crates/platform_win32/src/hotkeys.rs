@@ -87,9 +87,8 @@ impl Modifiers {
         }
     }
 
-    /// Pack the modifier flags into a bitfield. Bits 0–3 are Ctrl/Alt/Shift/Win
-    /// (0–15, unchanged); bits 4–15 carry the F13–F24 modifier mask. Used to
-    /// derive stable hotkey IDs that don't depend on config iteration order.
+    /// Pack Ctrl/Alt/Shift/Win into bits 0–3 and F13–F24 into bits 4–15
+    /// to derive hotkey IDs independent of config iteration order.
     pub fn bits(&self) -> i32 {
         (self.ctrl as i32)
             | (self.alt as i32) << 1
@@ -104,7 +103,7 @@ impl Modifiers {
 pub struct Hotkey {
     /// The unique ID for this hotkey.
     pub id: HotkeyId,
-    /// Modifier keys (Ctrl, Alt, Shift, Win).
+    /// Standard and F13–F24 modifier keys.
     pub modifiers: Modifiers,
     /// Virtual key code (e.g., 'H' = 0x48).
     pub vk: u32,
@@ -117,20 +116,10 @@ impl Hotkey {
     }
 
     /// Stable ID intrinsic to the `(modifiers, vk)` combo, independent of
-    /// config iteration order. Packs the modifier bits above the 8-bit vk:
-    /// `(mods << 8) | vk`. The `vk` (bits 0–7) and `mods` (bits 8+) partitions
-    /// are disjoint, so IDs stay unique per combo. Standard-modifier IDs are
-    /// unchanged; combos using F13–F24 as modifiers exceed the legacy
-    /// 0x0000–0xBFFF range, which is now harmless: since the move to a
-    /// keyboard hook (away from `RegisterHotKey`) these IDs are only internal
-    /// `HashMap` keys, never Win32 atoms, and are never serialized.
-    ///
-    /// Why: IDs were previously assigned sequentially while iterating a
-    /// `HashMap`, so a config reload could remap an ID to a different
-    /// command. A `WM_HOTKEY` message already queued under the old ID then
-    /// executed the new command — e.g. an innocent keypress firing
-    /// `panic_revert`. An intrinsic ID always denotes the same physical
-    /// key, so a stale message can only ever run that key's current action.
+    /// config iteration order. Packs modifier bits above the low 8 bits of `vk`.
+    /// These IDs are internal map keys, not Win32 atoms or serialized values,
+    /// so F13–F24 modifiers may exceed the RegisterHotKey ID range.
+    /// A queued event must retain the same key identity across config reloads.
     pub fn stable_id(modifiers: Modifiers, vk: u32) -> HotkeyId {
         (modifiers.bits() << 8) | (vk as i32 & 0xFF)
     }
@@ -143,13 +132,9 @@ pub struct HotkeyEvent {
     pub id: HotkeyId,
 }
 
-/// Global sender for display change events forwarded to the window event
-/// channel. Registered once at startup (`set_display_change_sender`) and
-/// deliberately NOT cleared when the system-event window is dropped: the window
-/// is recreated on every config reload, but the daemon's forwarding channel
-/// lives for the whole session. Clearing it on window drop silently stopped
-/// display-change (and power) events from reaching the daemon after the first
-/// reload, so resolution/work-area changes no longer reconciled.
+/// Display-change forwarding sender, owned by the daemon for the session.
+/// System-event windows are recreated on config reload; clearing the sender
+/// on window drop would disconnect display and power notifications.
 static DISPLAY_CHANGE_SENDER: std::sync::Mutex<Option<mpsc::Sender<WindowEvent>>> =
     std::sync::Mutex::new(None);
 
@@ -216,7 +201,6 @@ pub struct SystemEventHandle {
 
 impl Drop for SystemEventHandle {
     fn drop(&mut self) {
-        // Signal the message loop to quit
         let shutdown_signal_sent = request_sysevent_thread_shutdown(self.hwnd, self.thread_id);
 
         // Join if finished; otherwise detach to avoid hanging shutdown.
@@ -250,8 +234,8 @@ impl Drop for SystemEventHandle {
 
 /// Register a sender for display change events.
 ///
-/// This allows the hotkey window to forward WM_DISPLAYCHANGE messages
-/// to the window event channel. Call this before `register_system_events`.
+/// The system-event window forwards WM_DISPLAYCHANGE messages through this
+/// sender. Call this before `register_system_events`.
 pub fn set_display_change_sender(sender: mpsc::Sender<WindowEvent>) -> Result<(), Win32Error> {
     let mut guard = DISPLAY_CHANGE_SENDER.lock().map_err(|_| {
         Win32Error::HookInstallFailed("Display change sender mutex poisoned".to_string())
@@ -262,8 +246,8 @@ pub fn set_display_change_sender(sender: mpsc::Sender<WindowEvent>) -> Result<()
 
 /// Register a sender for power state change events.
 ///
-/// This allows the hotkey window to forward `WM_POWERBROADCAST` notifications
-/// to the daemon event loop. Call this before `register_system_events`.
+/// The system-event window forwards `WM_POWERBROADCAST` notifications through
+/// this sender. Call this before `register_system_events`.
 pub fn set_power_state_sender(sender: mpsc::Sender<bool>) -> Result<(), Win32Error> {
     let mut guard = POWER_STATE_SENDER.lock().map_err(|_| {
         Win32Error::HookInstallFailed("Power state sender mutex poisoned".to_string())
@@ -330,7 +314,6 @@ pub fn register_system_events() -> Result<SystemEventHandle, Win32Error> {
         unsafe {
             let thread_id = GetCurrentThreadId();
 
-            // Register window class
             let class_name: Vec<u16> = "LeopardWMSysEventClass\0".encode_utf16().collect();
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(sysevent_window_proc),
@@ -382,7 +365,6 @@ pub fn register_system_events() -> Result<SystemEventHandle, Win32Error> {
                 }
             };
 
-            // Register for power state notifications on this window
             {
                 use windows::Win32::System::Power::RegisterPowerSettingNotification;
                 use windows::Win32::UI::WindowsAndMessaging::REGISTER_NOTIFICATION_FLAGS;
@@ -422,7 +404,6 @@ pub fn register_system_events() -> Result<SystemEventHandle, Win32Error> {
             let hwnd_raw = hwnd.0 as isize;
             let _ = init_tx.send(Ok((hwnd_raw, thread_id)));
 
-            // Message loop
             let mut msg = MSG::default();
             loop {
                 let get_message_result = GetMessageW(&mut msg, None, 0, 0).0;
@@ -446,7 +427,6 @@ pub fn register_system_events() -> Result<SystemEventHandle, Win32Error> {
         }
     });
 
-    // Wait for initialization
     let init_result = init_rx.recv().map_err(|_| {
         Win32Error::HotkeyRegistrationFailed("Thread initialization failed".to_string())
     })?;
@@ -460,7 +440,6 @@ pub fn register_system_events() -> Result<SystemEventHandle, Win32Error> {
         }
     };
 
-    // Reconstruct HWND from raw pointer
     let hwnd = HWND(hwnd_raw as *mut c_void);
 
     Ok(SystemEventHandle {
@@ -479,7 +458,6 @@ unsafe extern "system" fn sysevent_window_proc(
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    // Wrap in catch_unwind to prevent panics from crashing
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         sysevent_window_proc_inner(hwnd, msg, wparam, lparam)
     }));
@@ -493,7 +471,6 @@ unsafe extern "system" fn sysevent_window_proc(
     }
 }
 
-/// Inner implementation of the system-event window procedure.
 fn sysevent_window_proc_inner(
     hwnd: HWND,
     msg: u32,
@@ -521,7 +498,6 @@ fn sysevent_window_proc_inner(
         WM_DISPLAYCHANGE => {
             tracing::info!("Display configuration changed (WM_DISPLAYCHANGE)");
 
-            // Send display change event through window event channel (recover from mutex poisoning)
             let sender_guard = DISPLAY_CHANGE_SENDER
                 .lock()
                 .unwrap_or_else(recover_poisoned_mutex);
@@ -587,7 +563,6 @@ fn sysevent_window_proc_inner(
 
 /// Common virtual key codes for hotkey registration.
 pub mod vk {
-    // Letters
     pub const A: u32 = 0x41;
     pub const B: u32 = 0x42;
     pub const C: u32 = 0x43;
@@ -615,7 +590,6 @@ pub mod vk {
     pub const Y: u32 = 0x59;
     pub const Z: u32 = 0x5A;
 
-    // Numbers
     pub const N0: u32 = 0x30;
     pub const N1: u32 = 0x31;
     pub const N2: u32 = 0x32;
@@ -627,7 +601,6 @@ pub mod vk {
     pub const N8: u32 = 0x38;
     pub const N9: u32 = 0x39;
 
-    // Function keys
     pub const F1: u32 = 0x70;
     pub const F2: u32 = 0x71;
     pub const F3: u32 = 0x72;
@@ -641,7 +614,6 @@ pub mod vk {
     pub const F11: u32 = 0x7A;
     pub const F12: u32 = 0x7B;
 
-    // Navigation
     pub const LEFT: u32 = 0x25;
     pub const UP: u32 = 0x26;
     pub const RIGHT: u32 = 0x27;
@@ -659,13 +631,11 @@ pub mod vk {
     pub const NUMPAD_DECIMAL: u32 = 0x6E;
     pub const NUMPAD_DIVIDE: u32 = 0x6F;
 
-    // Other
     pub const TAB: u32 = 0x09;
     pub const SPACE: u32 = 0x20;
     pub const ENTER: u32 = 0x0D;
     pub const ESCAPE: u32 = 0x1B;
 
-    // Punctuation (for common shortcuts)
     pub const MINUS: u32 = 0xBD; // '-'
     pub const EQUALS: u32 = 0xBB; // '='
     pub const BRACKET_LEFT: u32 = 0xDB; // '['
@@ -683,7 +653,6 @@ pub mod vk {
 pub fn parse_vk(key: &str) -> Option<u32> {
     let key = key.trim().to_uppercase();
 
-    // Single letter
     if key.len() == 1 {
         let c = key.chars().next()?;
         if c.is_ascii_uppercase() {
@@ -694,7 +663,6 @@ pub fn parse_vk(key: &str) -> Option<u32> {
         }
     }
 
-    // Function keys
     if key.starts_with('F') && key.len() <= 3 {
         if let Ok(n) = key[1..].parse::<u32>() {
             if (1..=24).contains(&n) {
@@ -721,7 +689,6 @@ pub fn parse_vk(key: &str) -> Option<u32> {
         };
     }
 
-    // Named keys
     match key.as_str() {
         "LEFT" => Some(vk::LEFT),
         "RIGHT" => Some(vk::RIGHT),
@@ -759,20 +726,16 @@ pub fn parse_hotkey_string(s: &str) -> Option<(Modifiers, u32)> {
 
     let mut modifiers = Modifiers::default();
 
-    // Last part is the key, rest are modifiers
     for part in &parts[..parts.len() - 1] {
         match part.to_uppercase().as_str() {
             "CTRL" | "CONTROL" => modifiers.ctrl = true,
             "ALT" => modifiers.alt = true,
             "SHIFT" => modifiers.shift = true,
             "WIN" | "SUPER" | "META" => modifiers.win = true,
-            // F13–F24 may act as modifiers; F1–F12 may not. Anything else is
-            // an unknown modifier and rejects the whole hotkey string.
             other => modifiers.fn_mods |= parse_vk(other).and_then(fn_mod_bit)?,
         }
     }
 
-    // Parse the key
     let key = parts.last()?;
     let vk = parse_vk(key)?;
 
@@ -937,12 +900,10 @@ mod tests {
         assert_eq!(Hotkey::stable_id(ctrl_alt, 0xBC), 0x03BC);
         assert_eq!(Hotkey::stable_id(ctrl_alt, 0xBE), 0x03BE);
         assert_eq!(Hotkey::stable_id(ctrl_alt, 0x1B), 0x031B);
-        // Different vk, same mods -> different id.
         assert_ne!(
             Hotkey::stable_id(ctrl_alt, 0xBC),
             Hotkey::stable_id(ctrl_alt, 0xBE)
         );
-        // Same vk, different mods -> different id.
         let win = Modifiers {
             win: true,
             ..Default::default()
@@ -961,8 +922,7 @@ mod tests {
         };
         assert_eq!(Hotkey::stable_id(all_mods, 0xFF), 0x0FFF);
 
-        // F13–F24 modifiers occupy a disjoint bit range, so they stay unique
-        // per combo (and may exceed the legacy range, which is now fine).
+        // F13–F24 modifier bits remain disjoint from the standard modifiers.
         let f13 = Modifiers {
             fn_mods: fn_mod_bit(0x7C).unwrap(),
             ..Default::default()
@@ -978,7 +938,6 @@ mod tests {
             Hotkey::stable_id(f13, 0x48),
             Hotkey::stable_id(ctrl_alt, 0x48)
         );
-        // F13+H and a bare standard combo can't collide: same vk, different mods.
         assert_ne!(Hotkey::stable_id(f13, 0x48), Hotkey::stable_id(win, 0x48));
     }
 
@@ -1045,7 +1004,6 @@ mod tests {
         );
         drop(session_end_handler);
 
-        // Cleanup for other tests.
         *DISPLAY_CHANGE_SENDER
             .lock()
             .unwrap_or_else(recover_poisoned_mutex) = None;
@@ -1168,41 +1126,34 @@ mod tests {
 
     #[test]
     fn test_parse_vk() {
-        // Letters
         assert_eq!(parse_vk("H"), Some(vk::H));
         assert_eq!(parse_vk("h"), Some(vk::H));
         assert_eq!(parse_vk("L"), Some(vk::L));
 
-        // Numbers
         assert_eq!(parse_vk("1"), Some(vk::N1));
         assert_eq!(parse_vk("0"), Some(vk::N0));
 
-        // Function keys
         assert_eq!(parse_vk("F1"), Some(vk::F1));
         assert_eq!(parse_vk("F12"), Some(vk::F12));
         assert_eq!(parse_vk("f5"), Some(vk::F5));
         assert_eq!(parse_vk("F13"), Some(0x7C));
         assert_eq!(parse_vk("F24"), Some(0x87));
 
-        // Navigation
         assert_eq!(parse_vk("Left"), Some(vk::LEFT));
         assert_eq!(parse_vk("RIGHT"), Some(vk::RIGHT));
         assert_eq!(parse_vk("Home"), Some(vk::HOME));
         assert_eq!(parse_vk("end"), Some(vk::END));
 
-        // Special keys
         assert_eq!(parse_vk("Tab"), Some(vk::TAB));
         assert_eq!(parse_vk("Space"), Some(vk::SPACE));
         assert_eq!(parse_vk("Enter"), Some(vk::ENTER));
         assert_eq!(parse_vk("Escape"), Some(vk::ESCAPE));
 
-        // Page keys
         assert_eq!(parse_vk("PageUp"), Some(vk::PAGE_UP));
         assert_eq!(parse_vk("pgup"), Some(vk::PAGE_UP));
         assert_eq!(parse_vk("PageDown"), Some(vk::PAGE_DOWN));
         assert_eq!(parse_vk("PGDN"), Some(vk::PAGE_DOWN));
 
-        // Numpad
         assert_eq!(parse_vk("Numpad0"), Some(vk::NUMPAD0));
         assert_eq!(parse_vk("numpad9"), Some(0x69));
         assert_eq!(parse_vk("NumpadAdd"), Some(vk::NUMPAD_ADD));
@@ -1212,14 +1163,12 @@ mod tests {
         assert_eq!(parse_vk("NumpadDecimal"), Some(vk::NUMPAD_DECIMAL));
         assert_eq!(parse_vk("Numpad10"), None);
 
-        // Invalid
         assert_eq!(parse_vk("Invalid"), None);
         assert_eq!(parse_vk("F25"), None);
     }
 
     #[test]
     fn test_parse_hotkey_string() {
-        // Win+H
         let (mods, vk) = parse_hotkey_string("Win+H").unwrap();
         assert!(mods.win);
         assert!(!mods.ctrl);
@@ -1227,25 +1176,21 @@ mod tests {
         assert!(!mods.shift);
         assert_eq!(vk, super::vk::H);
 
-        // Ctrl+Alt+Left
         let (mods, vk) = parse_hotkey_string("Ctrl+Alt+Left").unwrap();
         assert!(mods.ctrl);
         assert!(mods.alt);
         assert!(!mods.win);
         assert_eq!(vk, super::vk::LEFT);
 
-        // Win+Shift+L
         let (mods, vk) = parse_hotkey_string("Win+Shift+L").unwrap();
         assert!(mods.win);
         assert!(mods.shift);
         assert_eq!(vk, super::vk::L);
 
-        // Case insensitive
         let (mods, _) = parse_hotkey_string("win+shift+h").unwrap();
         assert!(mods.win);
         assert!(mods.shift);
 
-        // PageUp/PageDown and Numpad as the final key token
         let (mods, vk) = parse_hotkey_string("Ctrl+Alt+PageDown").unwrap();
         assert!(mods.ctrl && mods.alt);
         assert_eq!(vk, super::vk::PAGE_DOWN);
@@ -1254,32 +1199,25 @@ mod tests {
         let (_, vk) = parse_hotkey_string("Alt+Numpad5").unwrap();
         assert_eq!(vk, 0x65);
 
-        // Invalid modifier
         assert!(parse_hotkey_string("Foo+H").is_none());
 
-        // Invalid key
         assert!(parse_hotkey_string("Win+InvalidKey").is_none());
 
-        // F13–F24 as modifiers.
         let (mods, vk) = parse_hotkey_string("F13+H").unwrap();
         assert_eq!(mods.fn_mods, 1);
         assert!(!mods.ctrl && !mods.alt && !mods.shift && !mods.win);
         assert_eq!(vk, super::vk::H);
 
-        // Multiple F-key modifiers combine.
         let (mods, vk) = parse_hotkey_string("F13+F14+H").unwrap();
         assert_eq!(mods.fn_mods, 3);
         assert_eq!(vk, super::vk::H);
 
-        // F-key modifier mixes with standard modifiers.
         let (mods, _) = parse_hotkey_string("Ctrl+F13+H").unwrap();
         assert!(mods.ctrl);
         assert_eq!(mods.fn_mods, 1);
 
-        // F1–F12 are not valid modifiers.
         assert!(parse_hotkey_string("F12+H").is_none());
 
-        // A bare F13 is a trigger, not a modifier.
         let (mods, vk) = parse_hotkey_string("F13").unwrap();
         assert_eq!(mods.fn_mods, 0);
         assert_eq!(vk, 0x7C);
