@@ -45,6 +45,10 @@ Run commands from the repository root.
 Read `agent_docs/architecture.md` for crate relationships, the daemon module map, and data flow.
 </important>
 
+<important if="adding a timeout or bounded wait to a step of shutdown, quit, or emergency recovery">
+A step that can now give up early changes what every later step sees. Check each later step that assumes the earlier one finished, and add a regression with a slow but responsive owner that finishes just after the wait, alongside the hung one.
+</important>
+
 <important if="creating a release, tagging, or updating CHANGELOG.md">
 Read `agent_docs/release.md` for the release checklist and changelog format.
 </important>
