@@ -20,6 +20,38 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetPropW, IsWindow, SetPropW};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WindowIdentity {
+    pub(crate) process_id: u32,
+    pub(crate) thread_id: u32,
+    pub(crate) managed_lifetime_token: Option<u64>,
+}
+
+pub(crate) fn capture_window_identity(hwnd: HWND) -> Option<WindowIdentity> {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    (thread_id != 0).then_some(WindowIdentity {
+        process_id,
+        thread_id,
+        managed_lifetime_token: read_managed_lifetime_token(hwnd.0 as usize as u64)
+            .ok()
+            .flatten(),
+    })
+}
+
+pub(crate) fn window_identity_matches(hwnd: HWND, identity: WindowIdentity) -> bool {
+    (unsafe { IsWindow(Some(hwnd)).as_bool() })
+        && capture_window_identity(hwnd).is_some_and(|current| {
+            current.process_id == identity.process_id
+                && current.thread_id == identity.thread_id
+                && identity
+                    .managed_lifetime_token
+                    .is_none_or(|token| current.managed_lifetime_token == Some(token))
+        })
+}
+
 const IGNORE_TOKEN_PROPERTY: windows::core::PCWSTR = w!("LeopardWMIgnoreToken");
 const MANAGED_TOKEN_PROPERTY: windows::core::PCWSTR = w!("LeopardWMManagedToken");
 

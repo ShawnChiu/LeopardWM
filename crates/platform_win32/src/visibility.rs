@@ -3,6 +3,7 @@
 use crate::enumeration::{collect_all_top_level_window_ids, get_primary_monitor};
 use crate::placement::apply_placements;
 use crate::types::{PlatformConfig, Win32Error};
+use crate::window_identity::{capture_window_identity, window_identity_matches, WindowIdentity};
 use crate::window_style::reset_window_border_color;
 use crate::MOVE_OFFSCREEN_SENTINEL_COORD;
 use crate::{combine_operation_failures, is_benign_side_effect_error, window_id_to_hwnd};
@@ -269,6 +270,19 @@ fn emergency_marked_move(
     origin: Option<(i32, i32)>,
     deadline: Instant,
 ) {
+    let Some(identity) = window_id_to_hwnd(id).ok().and_then(capture_window_identity) else {
+        return;
+    };
+    emergency_marked_move_with_identity(id, restored, origin, deadline, identity);
+}
+
+fn emergency_marked_move_with_identity(
+    id: WindowId,
+    restored: Rect,
+    origin: Option<(i32, i32)>,
+    deadline: Instant,
+    identity: WindowIdentity,
+) {
     if Instant::now() >= deadline
         || !RECOVERY_MOVES
             .lock()
@@ -290,6 +304,7 @@ fn emergency_marked_move(
                 return;
             };
             if Instant::now() < deadline
+                && window_identity_matches(hwnd, identity)
                 && unsafe {
                     SetWindowPos(
                         hwnd,
@@ -1381,6 +1396,105 @@ mod tests {
                 );
                 assert!(!IsWindowVisible(window.0).as_bool());
                 assert_dpi_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+            }
+        }
+    }
+
+    #[test]
+    fn emergency_marked_move_rejects_changed_lifetime_and_moves_matching_identity() {
+        use crate::window_identity::stamp_managed_lifetime_token;
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+
+        struct OwnedWindow(HWND);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                crate::placement::cancel_window_placement_moves(&[self.0 .0 as usize as WindowId]);
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+
+        let _dpi = RecoveryDpiContext::enter().unwrap();
+        for changed_lifetime in [true, false] {
+            let window = OwnedWindow(unsafe {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    None,
+                    WS_POPUP,
+                    100,
+                    100,
+                    640,
+                    480,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            });
+            let id = window.0 .0 as usize as WindowId;
+            let token = stamp_managed_lifetime_token(id).unwrap();
+            let identity = capture_window_identity(window.0).unwrap();
+            let mut before = RECT::default();
+            unsafe { GetWindowRect(window.0, &mut before) }.unwrap();
+            let current = Rect::new(
+                before.left,
+                before.top,
+                before.right - before.left,
+                before.bottom - before.top,
+            );
+            let restored = Rect::new(200, 220, 320, 240);
+            assert_ne!(current, restored);
+            assert_eq!(crate::placement::owner_wait_target(id, &current), None);
+            if changed_lifetime {
+                assert_ne!(stamp_managed_lifetime_token(id).unwrap(), token);
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let caller = std::thread::spawn(move || {
+                if changed_lifetime {
+                    emergency_marked_move_with_identity(
+                        id,
+                        restored,
+                        Some((current.x, current.y)),
+                        deadline,
+                        identity,
+                    );
+                } else {
+                    emergency_marked_move(id, restored, Some((current.x, current.y)), deadline);
+                }
+            });
+            while !caller.is_finished() || RECOVERY_MOVES.lock().unwrap().contains(&id) {
+                assert!(Instant::now() < deadline, "recovery helper did not finish");
+                unsafe {
+                    let mut message = MSG::default();
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        DispatchMessageW(&message);
+                    }
+                }
+                std::thread::yield_now();
+            }
+            caller.join().unwrap();
+            let mut after = RECT::default();
+            unsafe { GetWindowRect(window.0, &mut after) }.unwrap();
+            let actual = Rect::new(
+                after.left,
+                after.top,
+                after.right - after.left,
+                after.bottom - after.top,
+            );
+            if changed_lifetime {
+                assert_eq!(actual, current, "stale identity must not move the window");
+                assert_eq!(crate::placement::owner_wait_target(id, &actual), None);
+            } else {
+                assert_eq!(actual, restored, "matching identity must move the window");
+                assert_eq!(
+                    crate::placement::owner_wait_target(id, &actual),
+                    Some(restored)
+                );
             }
         }
     }

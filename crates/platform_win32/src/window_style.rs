@@ -2,6 +2,7 @@
 
 use crate::types::Win32Error;
 use crate::window_id_to_hwnd;
+use crate::window_identity::{capture_window_identity, window_identity_matches, WindowIdentity};
 use leopardwm_core_layout::WindowId;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -69,40 +70,6 @@ fn is_border_color_unsupported_hresult(code: windows::core::HRESULT) -> bool {
     const E_INVALIDARG_HRESULT: i32 = 0x8007_0057u32 as i32;
     const E_NOTIMPL_HRESULT: i32 = 0x8000_4001u32 as i32;
     code.0 == E_INVALIDARG_HRESULT || code.0 == E_NOTIMPL_HRESULT
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct WindowIdentity {
-    process_id: u32,
-    thread_id: u32,
-    managed_lifetime_token: Option<u64>,
-}
-
-fn capture_window_identity(hwnd: HWND) -> Option<WindowIdentity> {
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
-
-    let mut process_id = 0;
-    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-    (thread_id != 0).then_some(WindowIdentity {
-        process_id,
-        thread_id,
-        managed_lifetime_token: crate::window_identity::read_managed_lifetime_token(
-            hwnd.0 as usize as u64,
-        )
-        .ok()
-        .flatten(),
-    })
-}
-
-fn window_identity_matches(hwnd: HWND, identity: WindowIdentity) -> bool {
-    (unsafe { IsWindow(Some(hwnd)).as_bool() })
-        && capture_window_identity(hwnd).is_some_and(|current| {
-            current.process_id == identity.process_id
-                && current.thread_id == identity.thread_id
-                && identity
-                    .managed_lifetime_token
-                    .is_none_or(|token| current.managed_lifetime_token == Some(token))
-        })
 }
 
 /// Tracks window identities queued for WS_MAXIMIZEBOX removal.
