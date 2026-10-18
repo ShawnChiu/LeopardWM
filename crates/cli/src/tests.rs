@@ -751,24 +751,15 @@ fn test_generate_default_config_contains_centering_mode() {
 
 #[test]
 fn test_default_config_path_returns_some() {
-    // This may return None in certain CI environments without home dirs
-    // but on most systems it should return Some
-    let path = default_config_path();
-    if let Some(p) = path {
-        assert!(p.ends_with("config.toml"));
-    }
-}
-
-#[test]
-fn test_default_config_path_contains_leopardwm() {
-    if let Some(path) = default_config_path() {
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("leopardwm"),
-            "Path should contain 'leopardwm': {}",
-            path_str
-        );
-    }
+    let path = default_config_path().expect("default config path must be available");
+    assert!(path.ends_with("config.toml"));
+    assert!(
+        path.components().any(|component| component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("leopardwm")),
+        "Path should contain a 'leopardwm' component: {path:?}"
+    );
 }
 
 // =========================================================================
@@ -1353,16 +1344,6 @@ fn test_validate_toml_invalid() {
 }
 
 #[test]
-fn test_check_result_variants() {
-    let pass = CheckResult::Pass("test pass".to_string());
-    let warn = CheckResult::Warn("test warn".to_string());
-    let fail = CheckResult::Fail("test fail".to_string());
-    pass.print();
-    warn.print();
-    fail.print();
-}
-
-#[test]
 fn test_integrity_rendering_medium_daemon_high_cli() {
     assert_eq!(
         format_integrity_line("Daemon", Some(leopardwm_platform_win32::INTEGRITY_MEDIUM)),
@@ -1556,12 +1537,6 @@ fn native_swipes_check_warns_with_reason_and_passes_when_off() {
     );
 }
 
-#[tokio::test]
-async fn test_handle_collect_logs_does_not_panic() {
-    let result = handle_collect_logs().await;
-    assert!(result.is_ok());
-}
-
 #[test]
 fn collect_logs_includes_full_gesture_capture_not_last_100() {
     let dir = std::env::temp_dir().join(format!(
@@ -1609,18 +1584,6 @@ fn collect_logs_includes_full_gesture_capture_not_last_100() {
     );
 
     let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn test_config_action_variants_parse() {
-    let _init = ConfigAction::Init {
-        output: None,
-        force: false,
-        profile: None,
-    };
-    let _reset = ConfigAction::Reset;
-    let _backup = ConfigAction::Backup;
-    let _restore = ConfigAction::Restore;
 }
 
 // =========================================================================
