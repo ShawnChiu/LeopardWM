@@ -53,6 +53,10 @@ A step that can now give up early changes what every later step sees. Check each
 Use a handle that can never be valid, such as window id 0. Windows can hand a destroyed window's handle to another window, so a test that probes with one can change a window it doesn't own.
 </important>
 
+<important if="writing a test that records queued-owner or async-position entries, or runs emergency recovery">
+Hold `placement::tests::OWNER_SWEEP.read()` for the whole test. Other tests sweep those process-global maps in parallel and can clear your entry before you assert on it.
+</important>
+
 <important if="creating a release, tagging, or updating CHANGELOG.md">
 Read `agent_docs/release.md` for the release checklist and changelog format.
 </important>
