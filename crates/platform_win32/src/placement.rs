@@ -2979,12 +2979,12 @@ pub(crate) fn invisible_border_insets(hwnd: HWND) -> (i32, i32, i32, i32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Owner probes sweep the process-global async-position map; the exclusive test
     // leaves a marked window whose owner thread does not pump messages.
-    static OWNER_SWEEP: std::sync::RwLock<()> = std::sync::RwLock::new(());
+    pub(crate) static OWNER_SWEEP: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
     #[test]
     fn test_uncloak_all_managed_with_invalid_ids() {

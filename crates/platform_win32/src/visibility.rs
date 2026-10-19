@@ -1402,6 +1402,9 @@ mod tests {
 
     #[test]
     fn emergency_marked_move_rejects_changed_lifetime_and_moves_matching_identity() {
+        let _owner_sweep = crate::placement::tests::OWNER_SWEEP
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use crate::window_identity::stamp_managed_lifetime_token;
         use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
