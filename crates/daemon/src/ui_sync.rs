@@ -92,13 +92,16 @@ impl AppState {
         }
     }
 
-    pub(crate) fn scaled_border_width(&self, hwnd: u64) -> u32 {
-        let scale = self
-            .find_window_workspace(hwnd)
+    fn window_scale_factor(&self, hwnd: u64) -> f64 {
+        self.find_window_workspace(hwnd)
             .and_then(|(mid, _)| self.monitors.get(&mid))
             .map(|m| m.scale_factor)
-            .unwrap_or(1.0);
-        (self.config.appearance.active_border_width as f64 * scale).round() as u32
+            .unwrap_or(1.0)
+    }
+
+    pub(crate) fn scaled_border_width(&self, hwnd: u64) -> u32 {
+        (self.config.appearance.active_border_width as f64 * self.window_scale_factor(hwnd)).round()
+            as u32
     }
 
     /// During a tiled drag, anchor the border to the layout slot rather than
@@ -270,7 +273,11 @@ impl AppState {
         }
     }
 
-    fn corner_radius_for_window(&self, hwnd: u64) -> f32 {
+    pub(crate) fn corner_radius_for_window(&self, hwnd: u64) -> f32 {
+        self.unscaled_corner_radius(hwnd) * self.window_scale_factor(hwnd) as f32
+    }
+
+    fn unscaled_corner_radius(&self, hwnd: u64) -> f32 {
         let info = leopardwm_platform_win32::get_window_info(hwnd);
 
         if let Some(ref info) = info {

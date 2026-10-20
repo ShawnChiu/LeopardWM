@@ -3038,6 +3038,25 @@ fn test_application_fullscreen_window_skips_ghost_registration() {
 }
 
 #[test]
+fn test_focus_border_corner_radius_scales_with_monitor_dpi() {
+    for (scale, radius, width) in [(1.0, 8.0, 4), (1.25, 10.0, 5), (1.5, 12.0, 6)] {
+        let mut config = test_config();
+        config.appearance.active_border_width = 4;
+        let mut monitors = test_monitors();
+        monitors[0].scale_factor = scale;
+        let mut state = AppState::new_with_config(config, monitors);
+        // Window id 0 is never a real window, so the radius is DWM's 8px default.
+        state
+            .focused_workspace_mut()
+            .unwrap()
+            .insert_window(0, None)
+            .unwrap();
+        assert_eq!(state.corner_radius_for_window(0), radius, "scale {scale}");
+        assert_eq!(state.scaled_border_width(0), width, "scale {scale}");
+    }
+}
+
+#[test]
 fn test_app_state_startup_reduce_motion_matches_all_workspaces() {
     let mut monitors = test_monitors();
     monitors.push(MonitorInfo {
