@@ -57,6 +57,10 @@ Use a handle that can never be valid, such as window id 0. Windows can hand a de
 Hold `placement::tests::OWNER_SWEEP.read()` for the whole test. Other tests sweep those process-global maps in parallel and can clear your entry before you assert on it.
 </important>
 
+<important if="writing a test that calls desktop-wide recovery, such as cascade_windows or restore_all_windows_moved_offscreen">
+Enter `FixtureDesktop::enter()` (`crates/daemon/src/display_change_regression.rs`) before spawning fixture windows, and keep them on that desktop. Otherwise the call also moves the user's real windows, including those a running daemon has parked.
+</important>
+
 <important if="creating a release, tagging, or updating CHANGELOG.md">
 Read `agent_docs/release.md` for the release checklist and changelog format.
 </important>
