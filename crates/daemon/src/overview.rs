@@ -23,7 +23,7 @@ const BODY_INSET: i32 = ROW_INNER_PAD + VIEWPORT_RING_PAD;
 
 /// MAXIMUM geometry for one overview row, all in overlay client
 /// coordinates. The final panel/label-strip rects wrap the actual scaled
-/// strip content (left-aligned), so these are upper bounds on width.
+/// strip content (horizontally centered), so these are upper bounds on width.
 struct OverviewRowGeometry {
     panel: Rect,
     label_strip: Rect,
@@ -274,7 +274,7 @@ impl AppState {
                 geom.strip.width,
                 (geom.strip.height - 1).max(1),
             );
-            let (mut cards, viewport, content_w) =
+            let (mut cards, mut viewport, content_w) =
                 self.overview_cards_for(ws, work_area, strip, selected_wid, is_active);
             if selection.is_none() && is_active && !cards.iter().any(|c| c.selected) {
                 if let Some(first) = cards.first_mut() {
@@ -289,7 +289,17 @@ impl AppState {
                 Some(cw) => (cw + 2 * BODY_INSET).min(geom.panel.width),
                 None => geom.panel.width, // no visible content: keep full width
             };
-            let panel = Rect::new(geom.panel.x, geom.panel.y, panel_w, geom.panel.height);
+            let shift = (geom.panel.width - panel_w) / 2;
+            let panel = Rect::new(
+                geom.panel.x + shift,
+                geom.panel.y,
+                panel_w,
+                geom.panel.height,
+            );
+            for card in &mut cards {
+                card.rect.x += shift;
+            }
+            viewport.x += shift;
             let label_strip = Rect::new(panel.x, panel.y, panel_w, geom.label_strip.height);
             rows.push(OverviewRow {
                 workspace_index: ws_idx,
@@ -1493,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_panels_wrap_content_left_aligned() {
+    fn test_panels_wrap_content_centered() {
         let mut state = test_state();
         add_windows(&mut state, 0, &[101]);
         add_windows(&mut state, 1, &[201, 202, 203, 204]);
@@ -1503,15 +1513,19 @@ mod tests {
             .unwrap()
             .get_mut(1)
             .unwrap()
-            .set_all_column_widths(1000);
+            .set_all_column_widths(3000);
 
         let (_, model) = state.build_overview_model().expect("model");
         let margin_x = (1920.0_f64 * OUTER_MARGIN_FRAC).round() as i32;
         let max_panel_w = 1920 - 2 * margin_x;
         let narrow = &model.rows[0];
         let wide = &model.rows[1];
-        assert_eq!(narrow.panel.x, margin_x, "panels sit at the left margin");
-        assert_eq!(wide.panel.x, margin_x, "panels sit at the left margin");
+        assert!(
+            (narrow.panel.x + narrow.panel.width / 2 - 1920 / 2).abs() <= 1,
+            "narrow panel must be centered on the work area"
+        );
+        assert_eq!(wide.panel.x, margin_x, "full rows keep the left margin");
+        assert_eq!(wide.panel.width, max_panel_w, "wide content fills the row");
         assert!(
             narrow.panel.width < max_panel_w,
             "panel must wrap content, not span the full row: {} vs {}",
@@ -1525,7 +1539,19 @@ mod tests {
             wide.panel.width
         );
         for row in &model.rows {
+            assert_eq!(row.label_strip.x, row.panel.x, "strip follows panel");
             assert_eq!(row.label_strip.width, row.panel.width, "strip wraps too");
+            let content_left = row
+                .cards
+                .iter()
+                .map(|c| c.rect.x - CARD_INSET)
+                .chain((row.viewport.width > 0).then_some(row.viewport.x + VIEWPORT_RING_PAD))
+                .min()
+                .unwrap();
+            assert!(
+                (content_left - row.panel.x - BODY_INSET).abs() <= 2,
+                "panel left must hug content left with a body inset"
+            );
             // The panel hugs its content: the widest element (card edges
             // un-inset, or the raw viewport region — the model's viewport
             // is the ring rect, inflated by VIEWPORT_RING_PAD) ends one
@@ -1541,11 +1567,75 @@ mod tests {
                 .unwrap();
             let panel_right = row.panel.x + row.panel.width;
             assert!(
+                ((content_left - row.panel.x) - (panel_right - content_right)).abs() <= 2,
+                "left and right body insets must be symmetric"
+            );
+            assert!(
                 (panel_right - content_right - BODY_INSET).abs() <= 2,
                 "panel right {} must hug content right {} + body inset",
                 panel_right,
                 content_right
             );
+        }
+    }
+
+    #[test]
+    fn test_centered_rows_keep_cards_and_viewport_inside_panel_body() {
+        for overflow in [false, true] {
+            let mut state = test_state();
+            add_windows(&mut state, 0, &[101]);
+            if overflow {
+                add_windows(&mut state, 0, &[102, 103, 104]);
+                let ws = &mut state.workspaces.get_mut(&1).unwrap()[0];
+                ws.set_all_column_widths(1000);
+                ws.set_scroll_offset(1100.0);
+            }
+
+            let (_, model) = state.build_overview_model().expect("model");
+            let row = &model.rows[0];
+            let margin_x = (1920.0_f64 * OUTER_MARGIN_FRAC).round() as i32;
+            assert!(
+                row.panel.x > margin_x,
+                "fixture must exercise a shifted row"
+            );
+            assert!(
+                (row.panel.x + row.panel.width / 2 - 1920 / 2).abs() <= 1,
+                "row must be centered"
+            );
+            assert_eq!(row.viewport.width > 0, overflow);
+            if overflow {
+                assert!(row
+                    .cards
+                    .iter()
+                    .any(|c| c.rect.x + c.rect.width <= row.viewport.x));
+                assert!(row
+                    .cards
+                    .iter()
+                    .any(|c| c.rect.x >= row.viewport.x + row.viewport.width));
+            }
+            for rect in row
+                .cards
+                .iter()
+                .map(|c| c.rect)
+                .chain((row.viewport.width > 0).then_some(row.viewport))
+            {
+                assert!(
+                    rect.x >= row.panel.x + ROW_INNER_PAD
+                        && rect.x + rect.width <= row.panel.x + row.panel.width - ROW_INNER_PAD
+                        && rect.y >= row.label_strip.y + row.label_strip.height + ROW_INNER_PAD
+                        && rect.y + rect.height <= row.panel.y + row.panel.height - ROW_INNER_PAD,
+                    "content {rect:?} escapes panel body {:?}",
+                    row.panel
+                );
+            }
+            for card in &row.cards {
+                let x = card.rect.x + card.rect.width / 2;
+                let y = card.rect.y + card.rect.height / 2;
+                assert!(x >= card.rect.x && x < card.rect.x + card.rect.width);
+                assert!(y >= card.rect.y && y < card.rect.y + card.rect.height);
+                assert!(x >= row.panel.x && x < row.panel.x + row.panel.width);
+                assert!(y >= row.panel.y && y < row.panel.y + row.panel.height);
+            }
         }
     }
 

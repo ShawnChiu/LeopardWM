@@ -4,6 +4,10 @@ All notable changes to LeopardWM will be documented in this file.
 
 ## 0.3.4
 
+### Improvements
+
+- **The overview now centers each workspace row on the screen.** Rows with only a few windows no longer sit against the left edge.
+
 ### Fixes
 
 - **Moving a window to another monitor no longer leaves the monitor it left scrolled past its remaining windows.** That monitor now scrolls back so its remaining windows stay in view. (#160)
