@@ -98,13 +98,13 @@ This installs LeopardWM and puts `leopardwm`, `leopardwm-cli`, and `lwm` on your
 
 ### Via MSI installer
 
-Download `LeopardWM-x.y.z-x86_64.msi` from [GitHub Releases](https://github.com/jcardama/LeopardWM/releases) and run it. Re-running a newer MSI upgrades in place — no manual uninstall needed.
+Download `LeopardWM-x.y.z-x86_64.msi` (or `LeopardWM-x.y.z-arm64.msi` for ARM64) from [GitHub Releases](https://github.com/jcardama/LeopardWM/releases) and run it. Re-running a newer MSI upgrades in place — no manual uninstall needed.
 
 ### Via standalone zip
 
 For users who prefer not to install:
 
-1. Download `LeopardWM-x.y.z-x86_64-windows.zip` from [GitHub Releases](https://github.com/jcardama/LeopardWM/releases)
+1. Download `LeopardWM-x.y.z-x86_64-windows.zip` (or `LeopardWM-x.y.z-arm64-windows.zip` for ARM64) from [GitHub Releases](https://github.com/jcardama/LeopardWM/releases)
 2. Extract to a permanent location
 3. Run `leopardwm.exe`
 4. (Optional) Enable autostart: `lwm autostart enable`
@@ -113,19 +113,26 @@ Current releases are not code-signed, so Windows SmartScreen may show a warning 
 
 ## Quick Start (from source)
 
-Prerequisites: [Rust](https://rustup.rs) with the MSVC toolchain (`stable-x86_64-pc-windows-msvc`).
+Prerequisites: [Rust](https://rustup.rs) with the MSVC toolchain (`stable-x86_64-pc-windows-msvc` or `stable-aarch64-pc-windows-msvc`).
 See [Contributing](CONTRIBUTING.md#development-setup) for development checks and the optional Node.js Settings check.
 
 ```bash
 git clone https://github.com/jcardama/LeopardWM.git
 cd LeopardWM
+
+# For x86_64:
 cargo build --release
+# For ARM64:
+cargo build --release --target aarch64-pc-windows-msvc
 ```
 
 Start the daemon:
 
 ```bash
-./target/release/leopardwm.exe
+# x86_64:
+./target/x86_64-pc-windows-msvc/release/leopardwm.exe
+# ARM64:
+./target/aarch64-pc-windows-msvc/release/leopardwm.exe
 ```
 
 A default config is created automatically at `%APPDATA%\leopardwm\config\config.toml`. Customize via the tray icon → Settings, or edit the file directly.

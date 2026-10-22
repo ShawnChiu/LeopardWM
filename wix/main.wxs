@@ -25,11 +25,15 @@
         Codepage='1252'
         Version='$(var.Version)'>
 
+        <!--
+          InstallerVersion 500 (Windows Installer 5.0) is required by WiX 3 for ARM64
+          packages and is natively supported on Windows 10 and 11.
+        -->
         <Package Id='*'
             Keywords='Installer'
             Description='LeopardWM scrolling tiling window manager for Windows'
             Manufacturer='jcardama'
-            InstallerVersion='450'
+            InstallerVersion='500'
             Languages='1033'
             Compressed='yes'
             InstallScope='perMachine'
