@@ -106,10 +106,38 @@ For users who prefer not to install:
 
 1. Download `LeopardWM-x.y.z-x86_64-windows.zip` (or `LeopardWM-x.y.z-arm64-windows.zip` for ARM64) from [GitHub Releases](https://github.com/jcardama/LeopardWM/releases)
 2. Extract to a permanent location
-3. Run `leopardwm.exe`
-4. (Optional) Enable autostart: `lwm autostart enable`
+3. [Put `lwm` on the PATH](#put-lwm-on-the-path). The zip does not change the PATH.
+4. Run `leopardwm.exe`
+5. (Optional) Enable autostart: `lwm autostart enable`
 
 Current releases are not code-signed, so Windows SmartScreen may show a warning on first install.
+
+### Put lwm on the PATH
+
+Zip installs need this setup so status bars and other programs can run `lwm` by name. MSI installs also need it if you deselected **PATH Environment Variable** (on by default). winget and Scoop already handle the PATH.
+
+Use the folder that actually contains `lwm.exe`, not the executable itself. For a zip, this is the extracted `LeopardWM-x.y.z-<arch>-windows` folder, with no `bin` subfolder. Explorer's **Extract All** can create a nested folder of the same name. For a default MSI install, use `C:\Program Files\LeopardWM\bin` unless you chose another install folder.
+
+To add it to your **user** PATH without admin rights:
+
+1. Search Start for "environment variables" and open **Edit environment variables for your account**.
+2. Select **Path** under user variables, then choose **Edit**.
+3. Choose **New**, paste the folder that contains `lwm.exe`, and choose **OK** to close each dialog.
+
+Or run this in PowerShell, replacing the example folder with yours:
+
+```powershell
+$dir = 'C:\Tools\LeopardWM'   # the folder that contains lwm.exe
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$entries = @($userPath -split ';' | Where-Object { $_ })
+if ($entries -notcontains $dir) {
+    [Environment]::SetEnvironmentVariable('Path', (($entries + $dir) -join ';'), 'User')
+}
+```
+
+Open a new terminal and run `where.exe lwm` to see every `lwm` found on the PATH. Restart Yasb and any other bar, terminal, or launcher after a PATH change: running programs keep the PATH they had at startup. If one still cannot find `lwm`, sign out and back in.
+
+After extracting a newer zip into a different folder, update the PATH entry to that folder.
 
 ## Quick Start (from source)
 

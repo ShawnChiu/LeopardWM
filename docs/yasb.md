@@ -2,7 +2,7 @@
 
 [Yasb](https://github.com/amnweb/yasb) can show and switch LeopardWM workspaces with its built-in Custom widget. This recipe adds nine clickable buttons for **one explicitly selected monitor**, using the existing CLI. It does not install a plugin or change LeopardWM's IPC protocol.
 
-Use a matching LeopardWM CLI and daemon with `lwm query workspaces` support (introduced in 0.2.10), and put `lwm.exe` on the PATH inherited by Yasb. Yasb's GlazeWM and komorebi widgets speak those managers' own protocols; pointing them at LeopardWM will not work.
+Use a matching LeopardWM CLI and daemon with `lwm query workspaces` support (introduced in 0.2.10), and [put `lwm.exe` on the PATH inherited by Yasb](../README.md#put-lwm-on-the-path). Restart Yasb after a PATH change. Yasb's GlazeWM and komorebi widgets speak those managers' own protocols; pointing them at LeopardWM will not work.
 
 ## 1. Save the query adapter
 
@@ -191,6 +191,24 @@ Append to your Yasb `styles.css`:
 ```
 
 A strip might read `[1*] 2 3* 4 5 6 7 8 9`: brackets indicate the active workspace **on the selected monitor**, and `*` indicates at least one managed window. Hover shows the configured workspace name (or its number) and window count. Clicking a button selects that workspace on the explicit monitor, even if another monitor currently has focus. Command numbers are one-based; snapshot indices are zero-based. The click deliberately transfers focus to the target monitor.
+
+## If Yasb cannot find lwm
+
+If changing the PATH is not an option, use the full path to `lwm.exe` in both the adapter and callbacks. Find it with `where.exe lwm` in a terminal where `lwm` works. A default MSI install uses `C:\Program Files\LeopardWM\bin\lwm.exe`; for a zip, use `lwm.exe` in the extracted folder.
+
+Replace the adapter's query line with this, using your full path:
+
+```powershell
+$lines = @(& 'C:\Program Files\LeopardWM\bin\lwm.exe' query workspaces 2>$null)
+```
+
+Use the same path in all nine callbacks, keeping each workspace number and your target monitor. For example:
+
+```yaml
+on_left: 'exec "C:\Program Files\LeopardWM\bin\lwm.exe" workspace 1 --monitor \\.\DISPLAY1'
+```
+
+The double quotes around a path containing spaces are required. Backslashes are literal in YAML single-quoted strings.
 
 ## Trade-offs and troubleshooting
 
