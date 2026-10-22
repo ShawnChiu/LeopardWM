@@ -2013,6 +2013,8 @@ impl AppState {
         }
     }
 
+    /// Also release invisible unmanaged foregrounds, such as a switching CLI's hidden
+    /// console, so its exit cannot return focus to a parked window and switch back.
     pub(crate) fn release_parked_foreground(&mut self) {
         #[cfg(test)]
         let foreground = self.injected_foreground_hwnd.flatten();
@@ -2022,15 +2024,19 @@ impl AppState {
             debug!("Skipping parked-foreground release because there is no OS foreground window");
             return;
         };
-        let Some((monitor, workspace_idx)) = self.find_window_workspace(hwnd) else {
-            return;
-        };
-        if self.active_workspace_idx(monitor) == workspace_idx
-            || self
-                .workspaces
-                .get(&monitor)
-                .and_then(|workspaces| workspaces.get(workspace_idx))
-                .is_some_and(|workspace| workspace.is_floating(hwnd))
+        if let Some((monitor, workspace_idx)) = self.find_window_workspace(hwnd) {
+            if self.active_workspace_idx(monitor) == workspace_idx
+                || self
+                    .workspaces
+                    .get(&monitor)
+                    .and_then(|workspaces| workspaces.get(workspace_idx))
+                    .is_some_and(|workspace| workspace.is_floating(hwnd))
+            {
+                return;
+            }
+        } else if !self
+            .lookup_window_info(hwnd)
+            .is_some_and(|info| !info.visible)
         {
             return;
         }

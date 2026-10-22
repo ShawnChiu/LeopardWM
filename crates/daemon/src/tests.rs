@@ -15925,6 +15925,43 @@ fn test_focusing_monitor_with_empty_selection_releases_its_parked_foreground() {
 }
 
 #[test]
+fn test_empty_workspace_switch_releases_hidden_console_foreground() {
+    let mut state = AppState::new_with_config(test_config(), test_monitors());
+    state
+        .injected_window_info
+        .insert(100, make_test_window_info(100));
+    state.handle_window_event(WindowEvent::Created(100, 0));
+    let t = leopardwm_platform_win32::current_event_time_ms();
+    state.handle_window_event(WindowEvent::Focused(100, t));
+    assert_eq!(state.find_window_workspace(100), Some((1, 0)));
+    assert_eq!(state.previous_focused_hwnd, Some(100));
+
+    let mut console = make_test_window_info(999);
+    console.class_name = "ConsoleWindowClass".into();
+    console.title = r"C:\Windows\system32\cmd.exe".into();
+    console.visible = false;
+    state.injected_window_info.insert(999, console);
+    state.handle_window_event(WindowEvent::Focused(999, t));
+    assert_eq!(state.previous_focused_hwnd, None);
+    assert_eq!(state.find_window_workspace(999), None);
+    state.injected_foreground_hwnd = Some(Some(999));
+
+    assert!(matches!(
+        state.handle_command(IpcCommand::SwitchWorkspaceOnMonitor {
+            monitor_device_name: "DISPLAY1".into(),
+            index: 2,
+        }),
+        IpcResponse::Ok
+    ));
+
+    assert_eq!(state.active_workspace_idx(1), 1);
+    assert_eq!(
+        state.foreground_release_requests,
+        vec![(999, Rect::new(0, 0, 1920, 1040))]
+    );
+}
+
+#[test]
 fn test_empty_workspace_switch_does_not_release_other_foreground() {
     let mut floating = AppState::new_with_config(test_config(), test_monitors());
     floating
@@ -15949,6 +15986,14 @@ fn test_empty_workspace_switch_does_not_release_other_foreground() {
     unmanaged.previous_focused_hwnd = Some(100);
     unmanaged.injected_foreground_hwnd = Some(Some(999));
     unmanaged.handle_command(IpcCommand::SwitchWorkspace { index: 2 });
+    assert!(unmanaged.foreground_release_requests.is_empty());
+
+    let mut visible_unmanaged = make_test_window_info(999);
+    visible_unmanaged.visible = true;
+    unmanaged
+        .injected_window_info
+        .insert(999, visible_unmanaged);
+    unmanaged.handle_command(IpcCommand::SwitchWorkspace { index: 3 });
     assert!(unmanaged.foreground_release_requests.is_empty());
 
     let mut visible_elsewhere = AppState::new_with_config(test_config(), two_monitors());

@@ -12,6 +12,7 @@ All notable changes to LeopardWM will be documented in this file.
 
 - **Moving a window to another monitor no longer leaves the monitor it left scrolled past its remaining windows.** That monitor now scrolls back so its remaining windows stay in view. (#160)
 - **Shortcuts can now use the `;`, `'`, `/`, `\` and `` ` `` keys.** The Settings shortcut recorder now records these keys too. (#145)
+- **Clicking a status-bar workspace button, such as the Yasb recipe, now stays on an empty workspace instead of flashing back.** LeopardWM now moves focus away from the command's hidden console, so its exit cannot return focus to a window on the previous workspace.
 
 ## 0.3.3
 
