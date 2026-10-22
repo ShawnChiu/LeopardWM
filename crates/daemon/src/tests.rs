@@ -15926,39 +15926,77 @@ fn test_focusing_monitor_with_empty_selection_releases_its_parked_foreground() {
 
 #[test]
 fn test_empty_workspace_switch_releases_hidden_console_foreground() {
-    let mut state = AppState::new_with_config(test_config(), test_monitors());
-    state
-        .injected_window_info
-        .insert(100, make_test_window_info(100));
-    state.handle_window_event(WindowEvent::Created(100, 0));
-    let t = leopardwm_platform_win32::current_event_time_ms();
-    state.handle_window_event(WindowEvent::Focused(100, t));
-    assert_eq!(state.find_window_workspace(100), Some((1, 0)));
-    assert_eq!(state.previous_focused_hwnd, Some(100));
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    };
 
-    let mut console = make_test_window_info(999);
-    console.class_name = "ConsoleWindowClass".into();
-    console.title = r"C:\Windows\system32\cmd.exe".into();
-    console.visible = false;
-    state.injected_window_info.insert(999, console);
-    state.handle_window_event(WindowEvent::Focused(999, t));
-    assert_eq!(state.previous_focused_hwnd, None);
-    assert_eq!(state.find_window_workspace(999), None);
-    state.injected_foreground_hwnd = Some(Some(999));
+    struct TestWindow(HWND);
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
 
-    assert!(matches!(
-        state.handle_command(IpcCommand::SwitchWorkspaceOnMonitor {
-            monitor_device_name: "DISPLAY1".into(),
-            index: 2,
-        }),
-        IpcResponse::Ok
-    ));
+    let hidden = TestWindow(unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("STATIC"),
+            w!(""),
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            200,
+            100,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    });
+    let hidden_hwnd = hidden.0 .0 as u64;
+    assert!(leopardwm_platform_win32::is_valid_window(hidden_hwnd));
+    assert!(!leopardwm_platform_win32::is_window_visible(hidden_hwnd));
 
-    assert_eq!(state.active_workspace_idx(1), 1);
-    assert_eq!(
-        state.foreground_release_requests,
-        vec![(999, Rect::new(0, 0, 1920, 1040))]
-    );
+    for visible in [false, true] {
+        let mut state = AppState::new_with_config(test_config(), test_monitors());
+        state
+            .injected_window_info
+            .insert(100, make_test_window_info(100));
+        state.handle_window_event(WindowEvent::Created(100, 0));
+        let t = leopardwm_platform_win32::current_event_time_ms();
+        state.handle_window_event(WindowEvent::Focused(100, t));
+        assert_eq!(state.find_window_workspace(100), Some((1, 0)));
+        assert_eq!(state.previous_focused_hwnd, Some(100));
+
+        state.handle_window_event(WindowEvent::Focused(hidden_hwnd, t));
+        assert_eq!(state.previous_focused_hwnd, None);
+        assert_eq!(state.find_window_workspace(hidden_hwnd), None);
+        state.injected_foreground_hwnd = Some(Some(hidden_hwnd));
+        if visible {
+            state.injected_visible_hwnds.insert(hidden_hwnd);
+        }
+
+        assert!(matches!(
+            state.handle_command(IpcCommand::SwitchWorkspaceOnMonitor {
+                monitor_device_name: "DISPLAY1".into(),
+                index: 2,
+            }),
+            IpcResponse::Ok
+        ));
+
+        assert_eq!(state.active_workspace_idx(1), 1);
+        if visible {
+            assert!(state.foreground_release_requests.is_empty());
+        } else {
+            assert_eq!(
+                state.foreground_release_requests,
+                vec![(hidden_hwnd, Rect::new(0, 0, 1920, 1040))]
+            );
+        }
+    }
 }
 
 #[test]
@@ -15986,14 +16024,6 @@ fn test_empty_workspace_switch_does_not_release_other_foreground() {
     unmanaged.previous_focused_hwnd = Some(100);
     unmanaged.injected_foreground_hwnd = Some(Some(999));
     unmanaged.handle_command(IpcCommand::SwitchWorkspace { index: 2 });
-    assert!(unmanaged.foreground_release_requests.is_empty());
-
-    let mut visible_unmanaged = make_test_window_info(999);
-    visible_unmanaged.visible = true;
-    unmanaged
-        .injected_window_info
-        .insert(999, visible_unmanaged);
-    unmanaged.handle_command(IpcCommand::SwitchWorkspace { index: 3 });
     assert!(unmanaged.foreground_release_requests.is_empty());
 
     let mut visible_elsewhere = AppState::new_with_config(test_config(), two_monitors());

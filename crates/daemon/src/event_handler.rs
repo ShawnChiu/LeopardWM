@@ -1402,7 +1402,7 @@ impl AppState {
         if should_ignore_hidden_still_visible(
             is_hidden_event,
             is_managed,
-            self.is_hidden_event_still_visible(hwnd),
+            self.is_window_visible_now(hwnd),
         ) {
             debug!(
                 "Ignoring spurious Hidden event for still-visible window {}",
@@ -1627,7 +1627,7 @@ impl AppState {
         }
     }
 
-    fn is_hidden_event_still_visible(&self, hwnd: u64) -> bool {
+    fn is_window_visible_now(&self, hwnd: u64) -> bool {
         #[cfg(test)]
         if self.injected_visible_hwnds.contains(&hwnd) {
             return true;
@@ -2013,7 +2013,7 @@ impl AppState {
         }
     }
 
-    /// Also release invisible unmanaged foregrounds, such as a switching CLI's hidden
+    /// Also release live, invisible unmanaged foregrounds, such as a switching CLI's hidden
     /// console, so its exit cannot return focus to a parked window and switch back.
     pub(crate) fn release_parked_foreground(&mut self) {
         #[cfg(test)]
@@ -2034,9 +2034,8 @@ impl AppState {
             {
                 return;
             }
-        } else if !self
-            .lookup_window_info(hwnd)
-            .is_some_and(|info| !info.visible)
+        } else if !leopardwm_platform_win32::is_valid_window(hwnd)
+            || self.is_window_visible_now(hwnd)
         {
             return;
         }
