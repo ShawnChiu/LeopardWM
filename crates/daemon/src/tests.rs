@@ -10114,6 +10114,48 @@ fn test_cmd_move_to_monitor_right_rollback_on_insert_failure() {
 }
 
 #[test]
+fn test_move_to_monitor_restores_source_scroll_when_window_leaves() {
+    let mut state = AppState::new_with_config(test_config(), two_monitors());
+    state.focused_monitor = 1;
+    state.workspaces.get_mut(&1).unwrap()[0]
+        .insert_window(100, Some(800))
+        .unwrap();
+    let workspace = &mut state.workspaces.get_mut(&2).unwrap()[0];
+    workspace.insert_window(200, Some(800)).unwrap();
+    workspace.insert_window(300, Some(800)).unwrap();
+    assert!(workspace.total_width() <= 1920);
+    assert_eq!(workspace.scroll_offset(), 0.0);
+
+    assert_eq!(
+        state.handle_command(IpcCommand::MoveWindowToMonitorRight),
+        IpcResponse::Ok
+    );
+    assert_eq!(state.focused_monitor, 2);
+    let workspace = &state.workspaces.get(&2).unwrap()[0];
+    assert_eq!(workspace.focused_window(), Some(100));
+    assert!(
+        workspace.scroll_offset() > 0.0,
+        "moving the window in must scroll the overflowing target strip"
+    );
+
+    assert_eq!(
+        state.handle_command(IpcCommand::MoveWindowToMonitorLeft),
+        IpcResponse::Ok
+    );
+    assert_eq!(state.focused_monitor, 1);
+    let workspace = &state.workspaces.get(&2).unwrap()[0];
+    assert_eq!(workspace.window_count(), 2);
+    assert!(workspace.contains_window(200));
+    assert!(workspace.contains_window(300));
+    assert!(workspace.total_width() <= 1920);
+    assert_eq!(
+        workspace.scroll_offset(),
+        0.0,
+        "remaining columns fit the source monitor and must not stay scrolled off screen"
+    );
+}
+
+#[test]
 fn test_cmd_move_to_monitor_left_rollback_on_insert_failure() {
     let mut state = AppState::new_with_config(test_config(), two_monitors());
     state.focused_monitor = 2;
