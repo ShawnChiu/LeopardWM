@@ -74,7 +74,7 @@ Electron apps (Beeper, Slack) create/hide `Chrome_WidgetWin_1` popup windows eve
 - `Win+Ctrl+Escape` for panic revert (unchanged, uses Win)
 - `RegisterHotKey` API: all-or-nothing — if any hotkey fails, all are unregistered
 - Failure logging includes modifier names + `GetLastError` detail (os error 1409 = already registered)
-- `parse_vk` supports Comma, Period, Bracket_Left, Bracket_Right in addition to letters/numbers/arrows
+- `parse_vk` supports Minus, Equals, Comma, Period, Bracket_Left, Bracket_Right, Semicolon, Slash, Backtick, Backslash, Apostrophe and their symbol aliases in addition to letters/numbers/arrows
 - F13–F24 may be used as modifiers (e.g. `F13+H`), not just triggers; F1–F12 may not. The keyboard hook swallows an F-key configured as a modifier and tracks its held-state itself (`HOOK_FN_HELD`), so it never reaches the focused app. `Modifiers::fn_mods` is a 12-bit mask (bit i = F13+i); `fn_mod_bit(vk)` maps a vk to its bit
 
 **Conflict tables (do NOT use these as base modifiers):**

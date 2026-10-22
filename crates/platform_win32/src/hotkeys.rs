@@ -642,6 +642,11 @@ pub mod vk {
     pub const BRACKET_RIGHT: u32 = 0xDD; // ']'
     pub const COMMA: u32 = 0xBC; // ','
     pub const PERIOD: u32 = 0xBE; // '.'
+    pub const SEMICOLON: u32 = 0xBA;
+    pub const SLASH: u32 = 0xBF;
+    pub const BACKTICK: u32 = 0xC0;
+    pub const BACKSLASH: u32 = 0xDC;
+    pub const APOSTROPHE: u32 = 0xDE;
 }
 
 /// Parse a virtual key code from a key name string.
@@ -649,7 +654,9 @@ pub mod vk {
 /// Supports single letters (A-Z), numbers (0-9), function keys (F1-F24),
 /// numpad keys (Numpad0-Numpad9, NumpadAdd/Subtract/Multiply/Divide/Decimal),
 /// and special keys (Left, Right, Up, Down, Home, End, PageUp, PageDown, Tab,
-/// Space, Enter, Escape).
+/// Space, Enter, Escape), and punctuation (Minus, Equals, Comma, Period,
+/// Bracket_Left, Bracket_Right, Semicolon, Slash, Backtick, Backslash, Apostrophe)
+/// with their symbol aliases.
 pub fn parse_vk(key: &str) -> Option<u32> {
     let key = key.trim().to_uppercase();
 
@@ -708,6 +715,11 @@ pub fn parse_vk(key: &str) -> Option<u32> {
         "PERIOD" | "." => Some(vk::PERIOD),
         "BRACKET_LEFT" | "[" => Some(vk::BRACKET_LEFT),
         "BRACKET_RIGHT" | "]" => Some(vk::BRACKET_RIGHT),
+        "SEMICOLON" | ";" => Some(vk::SEMICOLON),
+        "SLASH" | "/" => Some(vk::SLASH),
+        "BACKTICK" | "`" => Some(vk::BACKTICK),
+        "BACKSLASH" | "\\" => Some(vk::BACKSLASH),
+        "APOSTROPHE" | "'" => Some(vk::APOSTROPHE),
         _ => None,
     }
 }
@@ -776,6 +788,11 @@ pub fn format_hotkey(modifiers: Modifiers, vk: u32) -> Option<String> {
         vk::PERIOD => ".".to_string(),
         vk::BRACKET_LEFT => "[".to_string(),
         vk::BRACKET_RIGHT => "]".to_string(),
+        vk::SEMICOLON => ";".to_string(),
+        vk::SLASH => "/".to_string(),
+        vk::BACKTICK => "`".to_string(),
+        vk::BACKSLASH => "\\".to_string(),
+        vk::APOSTROPHE => "'".to_string(),
         _ => return None,
     };
 
@@ -1199,6 +1216,29 @@ mod tests {
         let (_, vk) = parse_hotkey_string("Alt+Numpad5").unwrap();
         assert_eq!(vk, 0x65);
 
+        for (symbol, token, expected_vk) in [
+            ("Alt+;", "Alt+Semicolon", 0xBA),
+            ("Alt+/", "Alt+Slash", 0xBF),
+            ("Alt+`", "Alt+Backtick", 0xC0),
+            ("Alt+\\", "Alt+Backslash", 0xDC),
+            ("Alt+'", "Alt+Apostrophe", 0xDE),
+            ("Alt+Numpad/", "Alt+NumpadSlash", super::vk::NUMPAD_DIVIDE),
+        ] {
+            for chord in [symbol, token] {
+                assert_eq!(
+                    parse_hotkey_string(chord),
+                    Some((
+                        Modifiers {
+                            alt: true,
+                            ..Modifiers::default()
+                        },
+                        expected_vk
+                    )),
+                    "{chord}"
+                );
+            }
+        }
+
         assert!(parse_hotkey_string("Foo+H").is_none());
 
         assert!(parse_hotkey_string("Win+InvalidKey").is_none());
@@ -1252,6 +1292,11 @@ mod tests {
             vk::PERIOD,
             vk::BRACKET_LEFT,
             vk::BRACKET_RIGHT,
+            vk::SEMICOLON,
+            vk::SLASH,
+            vk::BACKTICK,
+            vk::BACKSLASH,
+            vk::APOSTROPHE,
         ]);
         let modifiers = [
             Modifiers::default(),

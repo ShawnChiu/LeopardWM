@@ -171,6 +171,8 @@ Set `new_window_monitor = "focused"` under `[behavior]` or choose Settings → B
 
 Most hotkeys use `Ctrl+Alt` as the base modifier. Layered pattern: base = focus, +Shift = move, +Win = monitor scope. Every hotkey is rebindable in `config.toml`. Combos Windows reserves (like `Win+Ctrl+Arrow`) can't be bound directly, but the opt-in **Reclaim Windows-reserved shortcuts** setting lets you use them anyway.
 
+Punctuation bindings accept `-`, `=`, `,`, `.`, `[`, `]`, `;`, `/`, `` ` ``, `\`, and `'`, or the word tokens `Minus`, `Equals`, `Comma`, `Period`, `Bracket_Left`, `Bracket_Right`, `Semicolon`, `Slash`, `Backtick`, `Backslash`, and `Apostrophe`. Punctuation keys refer to their position on a US keyboard.
+
 | Key | Action |
 |---|---|
 | `Ctrl+Alt+H/L/J/K` | Focus left / right / down / up |

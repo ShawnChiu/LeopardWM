@@ -11,6 +11,7 @@ All notable changes to LeopardWM will be documented in this file.
 ### Fixes
 
 - **Moving a window to another monitor no longer leaves the monitor it left scrolled past its remaining windows.** That monitor now scrolls back so its remaining windows stay in view. (#160)
+- **Shortcuts can now use the `;`, `'`, `/`, `\` and `` ` `` keys.** The Settings shortcut recorder now records these keys too. (#145)
 
 ## 0.3.3
 
