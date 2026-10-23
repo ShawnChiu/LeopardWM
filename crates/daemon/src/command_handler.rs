@@ -103,8 +103,16 @@ fn fullscreen_policy(cmd: &IpcCommand) -> FullscreenPolicy {
 fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
     use IpcCommand::*;
     match cmd {
-        CloseWindow | ToggleFloating | ToggleSticky | ToggleFullscreen | Resize { .. }
-        | QueryFocused | ScratchpadStash => FloatingPolicy::Target,
+        CloseWindow
+        | ToggleFloating
+        | ToggleSticky
+        | ToggleFullscreen
+        | Resize { .. }
+        | QueryFocused
+        | ScratchpadStash
+        | MoveToWorkspace { .. }
+        | MoveToWorkspacePrev
+        | MoveToWorkspaceNext => FloatingPolicy::Target,
         FocusLeft
         | FocusRight
         | FocusUp
@@ -137,10 +145,7 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         | ExpelToLeft
         | ExpelToRight => FloatingPolicy::Ignore,
         // These already resolve floating focus themselves.
-        MoveToWorkspace { .. }
-        | MoveToWorkspacePrev
-        | MoveToWorkspaceNext
-        | MoveWindowToMonitorLeft
+        MoveWindowToMonitorLeft
         | MoveWindowToMonitorRight
         | MoveWindowToMonitorUp
         | MoveWindowToMonitorDown => FloatingPolicy::Unchanged,
@@ -350,6 +355,17 @@ impl AppState {
             IpcCommand::ToggleSticky => {
                 self.toggle_sticky_window(hwnd);
                 Some(IpcResponse::Ok)
+            }
+            IpcCommand::MoveToWorkspace { index } => {
+                Some(self.move_window_from_active_workspace(hwnd, index))
+            }
+            IpcCommand::MoveToWorkspacePrev => {
+                let index = self.relative_workspace_index(false);
+                Some(self.move_window_from_active_workspace(hwnd, index))
+            }
+            IpcCommand::MoveToWorkspaceNext => {
+                let index = self.relative_workspace_index(true);
+                Some(self.move_window_from_active_workspace(hwnd, index))
             }
             IpcCommand::ScratchpadStash => {
                 self.scratchpad_stash();
@@ -888,15 +904,19 @@ impl AppState {
     }
 
     fn handle_move_to_workspace_relative(&mut self, forward: bool) -> IpcResponse {
+        self.handle_move_to_workspace(self.relative_workspace_index(forward))
+    }
+
+    /// The 1-based index of the workspace next to the active one, wrapping.
+    fn relative_workspace_index(&self, forward: bool) -> u8 {
         const COUNT: usize = 9;
-        let monitor = self.focused_monitor;
-        let current = self.active_workspace_idx(monitor);
+        let current = self.active_workspace_idx(self.focused_monitor);
         let target = if forward {
             (current + 1) % COUNT
         } else {
             (current + COUNT - 1) % COUNT
         };
-        self.handle_move_to_workspace((target + 1) as u8)
+        (target + 1) as u8
     }
 
     fn focus_vertical(&mut self, up: bool) -> IpcResponse {
@@ -1509,6 +1529,12 @@ impl AppState {
         self.move_window_to_workspace(monitor, current_idx, focused_hwnd, index, true)
     }
 
+    fn move_window_from_active_workspace(&mut self, hwnd: u64, index: u8) -> IpcResponse {
+        let monitor = self.focused_monitor;
+        let current_idx = self.active_workspace_idx(monitor);
+        self.move_window_to_workspace(monitor, current_idx, hwnd, index, true)
+    }
+
     pub(crate) fn move_window_to_workspace(
         &mut self,
         monitor: MonitorId,
@@ -2064,6 +2090,9 @@ mod floating_policy_tests {
             IpcCommand::Resize { delta: 100 },
             IpcCommand::QueryFocused,
             IpcCommand::ScratchpadStash,
+            IpcCommand::MoveToWorkspace { index: 2 },
+            IpcCommand::MoveToWorkspacePrev,
+            IpcCommand::MoveToWorkspaceNext,
         ] {
             assert!(
                 matches!(floating_policy(&cmd), FloatingPolicy::Target),
@@ -2077,9 +2106,6 @@ mod floating_policy_tests {
             );
         }
         for cmd in [
-            IpcCommand::MoveToWorkspace { index: 2 },
-            IpcCommand::MoveToWorkspacePrev,
-            IpcCommand::MoveToWorkspaceNext,
             IpcCommand::MoveWindowToMonitorLeft,
             IpcCommand::MoveWindowToMonitorRight,
             IpcCommand::MoveWindowToMonitorUp,
@@ -2175,6 +2201,25 @@ mod floating_policy_tests {
             IpcResponse::Ok
         );
         assert!(state.sticky_windows.is_empty());
+    }
+
+    #[test]
+    fn move_to_workspace_targets_the_focused_floating_window() {
+        for (cmd, target) in [
+            (IpcCommand::MoveToWorkspace { index: 3 }, 2),
+            (IpcCommand::MoveToWorkspacePrev, 8),
+            (IpcCommand::MoveToWorkspaceNext, 1),
+        ] {
+            let mut state = floating_focus_state();
+            let before = strip_snapshot(&state);
+            assert_eq!(state.handle_command(cmd.clone()), IpcResponse::Ok);
+            assert_eq!(strip_snapshot(&state), before, "{cmd:?}");
+            assert!(!state.focused_workspace().unwrap().contains_window(FLOATING));
+            assert!(
+                state.workspaces[&1][target].is_floating(FLOATING),
+                "{cmd:?}"
+            );
+        }
     }
 
     fn floating_rect(state: &AppState) -> Rect {
