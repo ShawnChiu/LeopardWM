@@ -102,7 +102,9 @@ fn fullscreen_policy(cmd: &IpcCommand) -> FullscreenPolicy {
 fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
     use IpcCommand::*;
     match cmd {
-        CloseWindow | ToggleFullscreen | Resize { .. } | QueryFocused => FloatingPolicy::Target,
+        CloseWindow | ToggleFullscreen | Resize { .. } | QueryFocused | ScratchpadStash => {
+            FloatingPolicy::Target
+        }
         SetColumnWidth { .. }
         | CycleWidth
         | CycleWidthUp
@@ -129,7 +131,6 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         // These already resolve floating focus themselves.
         ToggleFloating
         | ToggleSticky
-        | ScratchpadStash
         | MoveToWorkspace { .. }
         | MoveToWorkspacePrev
         | MoveToWorkspaceNext
@@ -339,6 +340,10 @@ impl AppState {
     fn handle_floating_target(&mut self, cmd: &IpcCommand, hwnd: u64) -> Option<IpcResponse> {
         match *cmd {
             IpcCommand::CloseWindow => Some(self.handle_close_window()),
+            IpcCommand::ScratchpadStash => {
+                self.scratchpad_stash();
+                Some(IpcResponse::Ok)
+            }
             IpcCommand::ToggleFullscreen => {
                 Some(self.toggle_fullscreen_with(|ws| ws.toggle_fullscreen_window(hwnd)))
             }
@@ -2027,6 +2032,7 @@ mod floating_policy_tests {
             IpcCommand::ToggleFullscreen,
             IpcCommand::Resize { delta: 100 },
             IpcCommand::QueryFocused,
+            IpcCommand::ScratchpadStash,
         ] {
             assert!(
                 matches!(floating_policy(&cmd), FloatingPolicy::Target),
@@ -2042,7 +2048,6 @@ mod floating_policy_tests {
         for cmd in [
             IpcCommand::ToggleFloating,
             IpcCommand::ToggleSticky,
-            IpcCommand::ScratchpadStash,
             IpcCommand::MoveToWorkspace { index: 2 },
             IpcCommand::MoveToWorkspacePrev,
             IpcCommand::MoveToWorkspaceNext,
@@ -2134,6 +2139,20 @@ mod floating_policy_tests {
 
         state.previous_focused_hwnd = Some(201);
         assert_eq!(state.close_window_target(), Some(201));
+    }
+
+    #[test]
+    fn scratchpad_stash_targets_the_focused_floating_window() {
+        let mut state = floating_focus_state();
+        let before = strip_snapshot(&state);
+        assert_eq!(
+            state.handle_command(IpcCommand::ScratchpadStash),
+            IpcResponse::Ok
+        );
+        assert_eq!(state.scratchpad.map(|sp| sp.window_id), Some(FLOATING));
+        let ws = state.focused_workspace().unwrap();
+        assert!(!ws.contains_window(FLOATING));
+        assert_eq!(strip_snapshot(&state), before);
     }
 
     #[test]
