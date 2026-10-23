@@ -103,9 +103,8 @@ fn fullscreen_policy(cmd: &IpcCommand) -> FullscreenPolicy {
 fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
     use IpcCommand::*;
     match cmd {
-        CloseWindow | ToggleFullscreen | Resize { .. } | QueryFocused | ScratchpadStash => {
-            FloatingPolicy::Target
-        }
+        CloseWindow | ToggleFloating | ToggleFullscreen | Resize { .. } | QueryFocused
+        | ScratchpadStash => FloatingPolicy::Target,
         FocusLeft
         | FocusRight
         | FocusUp
@@ -138,8 +137,7 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         | ExpelToLeft
         | ExpelToRight => FloatingPolicy::Ignore,
         // These already resolve floating focus themselves.
-        ToggleFloating
-        | ToggleSticky
+        ToggleSticky
         | MoveToWorkspace { .. }
         | MoveToWorkspacePrev
         | MoveToWorkspaceNext
@@ -349,6 +347,7 @@ impl AppState {
     fn handle_floating_target(&mut self, cmd: &IpcCommand, hwnd: u64) -> Option<IpcResponse> {
         match *cmd {
             IpcCommand::CloseWindow => Some(self.handle_close_window()),
+            IpcCommand::ToggleFloating => Some(self.handle_unfloat_window(hwnd)),
             IpcCommand::ScratchpadStash => {
                 self.scratchpad_stash();
                 Some(IpcResponse::Ok)
@@ -1133,18 +1132,28 @@ impl AppState {
 
     fn handle_toggle_floating(&mut self) -> IpcResponse {
         let viewport = self.focused_viewport();
-        let floating_focus = self.focused_floating_window();
-        if let Some(workspace) = self.focused_workspace_mut() {
-            if let Some(hwnd) = floating_focus {
-                if workspace.unfloat_window(hwnd) {
-                    self.disable_snap_for_window(hwnd);
-                    info!("Unfloated window {} back to tiling", hwnd);
-                }
-            } else if let Some(wid) = workspace.toggle_floating(viewport) {
-                self.restore_snap_for_window(wid);
-                info!("Toggled window {} to floating", wid);
-            }
+        if let Some(wid) = self
+            .focused_workspace_mut()
+            .and_then(|ws| ws.toggle_floating(viewport))
+        {
+            self.restore_snap_for_window(wid);
+            info!("Toggled window {} to floating", wid);
         }
+        self.apply_floating_toggle()
+    }
+
+    fn handle_unfloat_window(&mut self, hwnd: u64) -> IpcResponse {
+        if self
+            .focused_workspace_mut()
+            .is_some_and(|ws| ws.unfloat_window(hwnd))
+        {
+            self.disable_snap_for_window(hwnd);
+            info!("Unfloated window {} back to tiling", hwnd);
+        }
+        self.apply_floating_toggle()
+    }
+
+    fn apply_floating_toggle(&mut self) -> IpcResponse {
         if let Err(e) = self.apply_layout() {
             return IpcResponse::error(format!("Failed to apply layout: {}", e));
         }
@@ -2046,6 +2055,7 @@ mod floating_policy_tests {
     fn floating_policy_groups_commands() {
         for cmd in [
             IpcCommand::CloseWindow,
+            IpcCommand::ToggleFloating,
             IpcCommand::ToggleFullscreen,
             IpcCommand::Resize { delta: 100 },
             IpcCommand::QueryFocused,
@@ -2063,7 +2073,6 @@ mod floating_policy_tests {
             );
         }
         for cmd in [
-            IpcCommand::ToggleFloating,
             IpcCommand::ToggleSticky,
             IpcCommand::MoveToWorkspace { index: 2 },
             IpcCommand::MoveToWorkspacePrev,
@@ -2122,7 +2131,10 @@ mod floating_policy_tests {
             .map(|c| c.width())
             .collect();
         assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
+    }
 
+    #[test]
+    fn toggle_floating_unfloats_the_focused_floating_window() {
         let mut state = floating_focus_state();
         assert_eq!(
             state.handle_command(IpcCommand::ToggleFloating),
@@ -2131,6 +2143,16 @@ mod floating_policy_tests {
         let ws = state.focused_workspace().unwrap();
         assert!(!ws.is_floating(FLOATING));
         assert!(ws.columns().iter().any(|c| c.windows().contains(&FLOATING)));
+
+        let mut state = floating_focus_state();
+        state.previous_focused_hwnd = Some(201);
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleFloating),
+            IpcResponse::Ok
+        );
+        let ws = state.focused_workspace().unwrap();
+        assert!(ws.is_floating(201));
+        assert!(ws.is_floating(FLOATING));
     }
 
     fn floating_rect(state: &AppState) -> Rect {
