@@ -714,10 +714,15 @@ pub enum IpcResponse {
     FocusedWindow {
         /// Window ID of the focused window, if any.
         window_id: Option<u64>,
-        /// Column index of the focused window.
+        /// Column index of the focused tiled window. When `is_floating` is
+        /// true, this still refers to the tiled focus, not `window_id`.
         column_index: usize,
-        /// Window index within the column.
+        /// Window index within the column of the focused tiled window. When
+        /// `is_floating` is true, this still refers to the tiled focus.
         window_index: usize,
+        /// Whether `window_id` is a floating window.
+        #[serde(default)]
+        is_floating: bool,
     },
 
     /// Response containing information about all windows.
@@ -1070,11 +1075,19 @@ mod tests {
                 window_id: Some(12345),
                 column_index: 1,
                 window_index: 0,
+                is_floating: false,
+            },
+            IpcResponse::FocusedWindow {
+                window_id: Some(67890),
+                column_index: 1,
+                window_index: 0,
+                is_floating: true,
             },
             IpcResponse::FocusedWindow {
                 window_id: None,
                 column_index: 0,
                 window_index: 0,
+                is_floating: false,
             },
             IpcResponse::WindowList {
                 windows: vec![WindowInfo {
@@ -1541,6 +1554,25 @@ mod tests {
                 assert_eq!(daemon_log, None);
             }
             other => panic!("expected HealthInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn old_focused_window_parses_without_is_floating() {
+        let json = r#"{"status":"focused_window","window_id":7,"column_index":2,"window_index":1}"#;
+        match serde_json::from_str::<IpcResponse>(json).unwrap() {
+            IpcResponse::FocusedWindow {
+                window_id,
+                column_index,
+                window_index,
+                is_floating,
+            } => {
+                assert_eq!(window_id, Some(7));
+                assert_eq!(column_index, 2);
+                assert_eq!(window_index, 1);
+                assert!(!is_floating);
+            }
+            other => panic!("expected FocusedWindow, got {other:?}"),
         }
     }
 

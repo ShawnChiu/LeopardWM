@@ -37,6 +37,7 @@ pub(crate) fn print_response(response: &IpcResponse) {
             window_id,
             column_index,
             window_index,
+            ..
         } => {
             println!("Focused Window:");
             match window_id {

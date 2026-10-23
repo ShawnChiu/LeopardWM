@@ -588,6 +588,7 @@ impl AppState {
                 window_id: workspace.focused_window(),
                 column_index: workspace.focused_column_index(),
                 window_index: workspace.focused_window_index_in_column(),
+                is_floating: false,
             }
         } else {
             IpcResponse::error("No focused workspace")
