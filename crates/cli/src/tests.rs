@@ -26,6 +26,39 @@ fn test_wrap_cycle_verbs_map_to_ipc() {
 }
 
 #[test]
+fn test_cli_focus_commands_allow_daemon_foreground() {
+    let cases: &[(&[&str], bool)] = &[
+        (&["lwm", "workspace", "2"], true),
+        (
+            &["lwm", "workspace", "2", "--monitor", r"\\.\DISPLAY1"],
+            true,
+        ),
+        (&["lwm", "workspace-next"], true),
+        (&["lwm", "workspace-prev"], true),
+        (&["lwm", "focus", "left"], true),
+        (&["lwm", "focus", "right"], true),
+        (&["lwm", "focus", "up"], true),
+        (&["lwm", "focus", "down"], true),
+        (&["lwm", "focus", "start"], true),
+        (&["lwm", "focus", "end"], true),
+        (&["lwm", "focus-monitor", "left"], true),
+        (&["lwm", "focus-monitor", "right"], true),
+        (&["lwm", "focus-monitor", "up"], true),
+        (&["lwm", "focus-monitor", "down"], true),
+        (&["lwm", "move-to-workspace", "2"], false),
+        (&["lwm", "query", "focused"], false),
+    ];
+    for &(args, expected) in cases {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert_eq!(
+            command_may_move_focus(&to_ipc_command(&cli.command)),
+            expected,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
 fn test_to_ipc_command_focus_left() {
     let cmd = Commands::Focus {
         direction: FocusDirection::Left,
