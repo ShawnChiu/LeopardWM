@@ -299,7 +299,14 @@ impl AppState {
                 None
             }
             FullscreenPolicy::FollowFocus => {
-                if self.config.behavior.fullscreen_follows_focus {
+                // Following focus would hand a floating window's fullscreen to
+                // the tiled focus behind it, so leave fullscreen instead.
+                if self.config.behavior.fullscreen_follows_focus
+                    && !self.focused_workspace().is_some_and(|ws| {
+                        ws.fullscreen_window_id()
+                            .is_some_and(|wid| ws.is_floating(wid))
+                    })
+                {
                     Some(self.focus_in_fullscreen(cmd))
                 } else {
                     self.exit_fullscreen_if_active();
@@ -332,6 +339,9 @@ impl AppState {
     fn handle_floating_target(&mut self, cmd: &IpcCommand, hwnd: u64) -> Option<IpcResponse> {
         match *cmd {
             IpcCommand::CloseWindow => Some(self.handle_close_window()),
+            IpcCommand::ToggleFullscreen => {
+                Some(self.toggle_fullscreen_with(|ws| ws.toggle_fullscreen_window(hwnd)))
+            }
             IpcCommand::Resize { delta } => {
                 if self
                     .focused_workspace()
@@ -790,8 +800,15 @@ impl AppState {
     }
 
     fn handle_toggle_fullscreen(&mut self) -> IpcResponse {
+        self.toggle_fullscreen_with(Workspace::toggle_fullscreen)
+    }
+
+    fn toggle_fullscreen_with(
+        &mut self,
+        toggle: impl FnOnce(&mut Workspace) -> bool,
+    ) -> IpcResponse {
         let resp = self.execute_workspace_command(true, false, |ws, _vw| {
-            let entering = ws.toggle_fullscreen();
+            let entering = toggle(ws);
             info!("Fullscreen: {}", if entering { "on" } else { "off" });
         });
         if self
@@ -2143,6 +2160,43 @@ mod floating_policy_tests {
             IpcResponse::Ok
         );
         assert_eq!(floating_rect(&state), Rect::new(100, 100, 500, 400));
+    }
+
+    #[test]
+    fn toggle_fullscreen_targets_the_focused_floating_window() {
+        let mut state = floating_focus_state();
+        let before = strip_snapshot(&state);
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleFullscreen),
+            IpcResponse::Ok
+        );
+        assert_eq!(
+            state.focused_workspace().unwrap().fullscreen_window_id(),
+            Some(FLOATING)
+        );
+        assert_eq!(state.focused_floating_window(), Some(FLOATING));
+
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleFullscreen),
+            IpcResponse::Ok
+        );
+        assert_eq!(strip_snapshot(&state), before);
+        assert_eq!(floating_rect(&state), Rect::new(100, 100, 500, 400));
+        assert_eq!(state.focused_floating_window(), Some(FLOATING));
+    }
+
+    #[test]
+    fn focus_change_exits_floating_fullscreen() {
+        let mut state = floating_focus_state();
+        assert!(state.config.behavior.fullscreen_follows_focus);
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleFullscreen),
+            IpcResponse::Ok
+        );
+        assert_eq!(state.handle_command(IpcCommand::FocusLeft), IpcResponse::Ok);
+        let ws = state.focused_workspace().unwrap();
+        assert_eq!(ws.fullscreen_window_id(), None);
+        assert_eq!(ws.focused_column_index(), 0);
     }
 
     #[test]
