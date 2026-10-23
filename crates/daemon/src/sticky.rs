@@ -6,8 +6,6 @@ use tracing::{info, warn};
 use crate::state::AppState;
 
 impl AppState {
-    /// Pinning preserves tiled or floating mode; unpinning leaves the window
-    /// on its current workspace in that mode.
     pub(crate) fn toggle_sticky(&mut self) {
         // Prefer tracked foreground focus because Workspace::focused_window
         // does not report floating windows.
@@ -18,7 +16,12 @@ impl AppState {
             info!("Sticky: no focused window");
             return;
         };
+        self.toggle_sticky_window(wid);
+    }
 
+    /// Pinning preserves tiled or floating mode; unpinning leaves the window
+    /// on its current workspace in that mode.
+    pub(crate) fn toggle_sticky_window(&mut self, wid: u64) {
         if self.sticky_windows.remove(&wid) {
             if let Some((mon, ws_idx)) = self.find_window_workspace(wid) {
                 if let Some(ws) = self

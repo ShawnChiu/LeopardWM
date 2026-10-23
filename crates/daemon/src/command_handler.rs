@@ -103,8 +103,8 @@ fn fullscreen_policy(cmd: &IpcCommand) -> FullscreenPolicy {
 fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
     use IpcCommand::*;
     match cmd {
-        CloseWindow | ToggleFloating | ToggleFullscreen | Resize { .. } | QueryFocused
-        | ScratchpadStash => FloatingPolicy::Target,
+        CloseWindow | ToggleFloating | ToggleSticky | ToggleFullscreen | Resize { .. }
+        | QueryFocused | ScratchpadStash => FloatingPolicy::Target,
         FocusLeft
         | FocusRight
         | FocusUp
@@ -137,8 +137,7 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         | ExpelToLeft
         | ExpelToRight => FloatingPolicy::Ignore,
         // These already resolve floating focus themselves.
-        ToggleSticky
-        | MoveToWorkspace { .. }
+        MoveToWorkspace { .. }
         | MoveToWorkspacePrev
         | MoveToWorkspaceNext
         | MoveWindowToMonitorLeft
@@ -348,6 +347,10 @@ impl AppState {
         match *cmd {
             IpcCommand::CloseWindow => Some(self.handle_close_window()),
             IpcCommand::ToggleFloating => Some(self.handle_unfloat_window(hwnd)),
+            IpcCommand::ToggleSticky => {
+                self.toggle_sticky_window(hwnd);
+                Some(IpcResponse::Ok)
+            }
             IpcCommand::ScratchpadStash => {
                 self.scratchpad_stash();
                 Some(IpcResponse::Ok)
@@ -2056,6 +2059,7 @@ mod floating_policy_tests {
         for cmd in [
             IpcCommand::CloseWindow,
             IpcCommand::ToggleFloating,
+            IpcCommand::ToggleSticky,
             IpcCommand::ToggleFullscreen,
             IpcCommand::Resize { delta: 100 },
             IpcCommand::QueryFocused,
@@ -2073,7 +2077,6 @@ mod floating_policy_tests {
             );
         }
         for cmd in [
-            IpcCommand::ToggleSticky,
             IpcCommand::MoveToWorkspace { index: 2 },
             IpcCommand::MoveToWorkspacePrev,
             IpcCommand::MoveToWorkspaceNext,
@@ -2153,6 +2156,25 @@ mod floating_policy_tests {
         let ws = state.focused_workspace().unwrap();
         assert!(ws.is_floating(201));
         assert!(ws.is_floating(FLOATING));
+    }
+
+    #[test]
+    fn toggle_sticky_pins_the_focused_floating_window() {
+        let mut state = floating_focus_state();
+        let before = strip_snapshot(&state);
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleSticky),
+            IpcResponse::Ok
+        );
+        assert!(state.sticky_windows.contains(&FLOATING));
+        assert!(state.focused_workspace().unwrap().is_floating(FLOATING));
+        assert_eq!(strip_snapshot(&state), before);
+
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleSticky),
+            IpcResponse::Ok
+        );
+        assert!(state.sticky_windows.is_empty());
     }
 
     fn floating_rect(state: &AppState) -> Rect {
