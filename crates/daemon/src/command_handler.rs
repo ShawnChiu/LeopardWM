@@ -2168,6 +2168,19 @@ mod floating_policy_tests {
     }
 
     #[test]
+    fn resize_hint_follows_the_focused_floating_window() {
+        let mut state = floating_focus_state();
+        assert_eq!(
+            state.get_focused_column_rect(),
+            Some(Rect::new(100, 100, 500, 400))
+        );
+
+        state.previous_focused_hwnd = Some(201);
+        let tiled = state.get_focused_column_rect().unwrap();
+        assert_ne!(tiled, Rect::new(100, 100, 500, 400));
+    }
+
+    #[test]
     fn resize_is_ignored_while_the_floating_window_is_fullscreen() {
         let mut state = floating_focus_state();
         assert!(state
