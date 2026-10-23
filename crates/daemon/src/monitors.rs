@@ -438,22 +438,13 @@ impl AppState {
     }
 
     /// Move the focused window to another monitor using an all-or-nothing update.
-    ///
-    /// The source and target workspaces are mutated on cloned snapshots first and
-    /// committed only if both remove and insert operations succeed.
     pub(crate) fn move_focused_window_to_monitor_transactional(
         &mut self,
         target_monitor: MonitorId,
     ) -> std::result::Result<Option<u64>, String> {
-        let source_monitor = self.focused_monitor;
-        if source_monitor == target_monitor {
-            return Ok(None);
-        }
-
         // Prefer the OS-foreground window so floating windows can be moved too.
+        let source_monitor = self.focused_monitor;
         let src_idx = self.active_workspace_idx(source_monitor);
-        let tgt_idx = self.active_workspace_idx(target_monitor);
-
         let os_focus = self.previous_focused_hwnd.and_then(|hwnd| {
             self.workspaces
                 .get(&source_monitor)
@@ -465,6 +456,24 @@ impl AppState {
         let Some(window_id) = os_focus.or(tiled_focus) else {
             return Ok(None);
         };
+        self.move_window_to_monitor_transactional(window_id, target_monitor)
+    }
+
+    /// Move a window on the focused monitor's active workspace to another monitor.
+    ///
+    /// The source and target workspaces are mutated on cloned snapshots first and
+    /// committed only if both remove and insert operations succeed.
+    pub(crate) fn move_window_to_monitor_transactional(
+        &mut self,
+        window_id: u64,
+        target_monitor: MonitorId,
+    ) -> std::result::Result<Option<u64>, String> {
+        let source_monitor = self.focused_monitor;
+        if source_monitor == target_monitor {
+            return Ok(None);
+        }
+        let src_idx = self.active_workspace_idx(source_monitor);
+        let tgt_idx = self.active_workspace_idx(target_monitor);
 
         let Some(source_ws_vec) = self.workspaces.get(&source_monitor) else {
             return Err(format!(

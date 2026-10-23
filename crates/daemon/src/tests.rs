@@ -9062,8 +9062,10 @@ fn test_cmd_query_focused_empty() {
             window_id,
             column_index,
             window_index,
+            is_floating,
         } => {
             assert!(window_id.is_none());
+            assert!(!is_floating);
             assert_eq!(column_index, 0);
             assert_eq!(window_index, 0);
         }

@@ -267,6 +267,21 @@ impl Workspace {
         }
     }
 
+    /// Changes a floating window's width by `delta`, keeping its top-left corner and height.
+    /// Shrinking stops at `MIN_COLUMN_WIDTH` but never widens a window that is already narrower.
+    ///
+    /// Returns true if the window was found, false otherwise.
+    pub fn resize_floating(&mut self, window_id: WindowId, delta: i32) -> bool {
+        if let Some(floating) = self.floating_windows.iter_mut().find(|f| f.id == window_id) {
+            let width = floating.rect.width;
+            let floor = MIN_COLUMN_WIDTH.min(width);
+            floating.rect.width = width.saturating_add(delta).max(floor);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn floating_windows(&self) -> &[FloatingWindow] {
         &self.floating_windows
     }

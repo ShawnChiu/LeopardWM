@@ -814,7 +814,10 @@ impl AppState {
         self.monitors.get(&self.focused_monitor)?;
         let placements = workspace.compute_placements(self.layout_viewport(self.focused_monitor));
 
-        let focused_hwnd = workspace.focused_window()?;
+        // Resize targets a focused floating window, so the hint must follow it.
+        let focused_hwnd = self
+            .focused_floating_window()
+            .or_else(|| workspace.focused_window())?;
         placements
             .iter()
             .find(|p| p.window_id == focused_hwnd)

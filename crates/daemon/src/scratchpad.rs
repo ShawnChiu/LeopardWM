@@ -235,14 +235,13 @@ impl AppState {
     /// is not stranded hidden.
     pub(crate) fn scratchpad_stash(&mut self) {
         // A late foreground event can overwrite previous_focused_hwnd, so
-        // prefer tiled focus. A focused summoned scratchpad takes precedence
-        // because floating windows are absent from Workspace::focused_window.
-        let tiled_focus = self.focused_workspace().and_then(|ws| ws.focused_window());
-        let shown_scratchpad = self.scratchpad.filter(|s| s.shown).map(|s| s.window_id);
-        let wid = match shown_scratchpad {
-            Some(sp) if self.previous_focused_hwnd == Some(sp) => Some(sp),
-            _ => tiled_focus.or(self.previous_focused_hwnd),
-        };
+        // prefer tiled focus. A focused floating window (including a summoned
+        // scratchpad) takes precedence because floating windows are absent
+        // from Workspace::focused_window.
+        let wid = self
+            .focused_floating_window()
+            .or_else(|| self.focused_workspace().and_then(|ws| ws.focused_window()))
+            .or(self.previous_focused_hwnd);
         let Some(wid) = wid else {
             info!("Scratchpad stash: no focused window");
             return;

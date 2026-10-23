@@ -2765,7 +2765,7 @@ async fn handle_tab_action_with_restore(
                 }
             };
             if proceed {
-                let resp = s.handle_command(IpcCommand::ExpelToRight);
+                let resp = s.untab_tiled_focus();
                 if let IpcResponse::Error { message } = resp {
                     warn!("ExpelToRight from untab failed: {}", message);
                     s.pending_tab_focus = None;
@@ -2961,6 +2961,37 @@ mod tab_action_tests {
         assert_eq!(workspace.column(0).unwrap().active_tab_idx(), Some(0));
         assert_eq!(workspace.focused_column_index(), 1);
         assert_eq!(workspace.focused_window(), Some(300));
+    }
+
+    #[tokio::test]
+    async fn untab_expels_clicked_tab_while_floating_window_has_focus() {
+        const FLOATING: u64 = 900;
+        let mut app = AppState::new_with_config(Config::default(), vec![monitor(1, true)]);
+        let workspace = app.focused_workspace_mut().unwrap();
+        workspace.insert_window(100, None).unwrap();
+        workspace.insert_window_in_column(200, 0).unwrap();
+        workspace.set_focus(0, 0).unwrap();
+        workspace.toggle_focused_column_tabbed_mode();
+        workspace.insert_window(300, None).unwrap();
+        workspace.set_focus(1, 0).unwrap();
+        workspace
+            .add_floating(FLOATING, Rect::new(100, 100, 500, 400))
+            .unwrap();
+        app.previous_focused_hwnd = Some(FLOATING);
+        let state = Arc::new(Mutex::new(app));
+
+        handle_tab_action(&state, 1, 0, 0, 1, TabAction::Untab).await;
+
+        let app = state.lock().await;
+        let workspace = app.focused_workspace().unwrap();
+        let columns: Vec<_> = workspace
+            .columns()
+            .iter()
+            .map(|c| c.windows().to_vec())
+            .collect();
+        assert_eq!(columns, vec![vec![100], vec![200], vec![300]]);
+        assert_eq!(workspace.focused_window(), Some(200));
+        assert_eq!(app.focused_floating_window(), Some(FLOATING));
     }
 
     #[tokio::test]
