@@ -31,6 +31,15 @@ enum FullscreenPolicy {
     Allow,
 }
 
+enum FloatingPolicy {
+    /// Act on the focused floating window instead of the tiled focus.
+    Target,
+    /// Ignore while a floating window has focus — the command only makes
+    /// sense for columns, and would otherwise reshape the strip behind it.
+    Ignore,
+    Unchanged,
+}
+
 fn humanize_action_id(action_id: &str) -> String {
     let mut label = action_id.replace('_', " ");
     if let Some(first) = label.get_mut(0..1) {
@@ -87,6 +96,48 @@ fn fullscreen_policy(cmd: &IpcCommand) -> FullscreenPolicy {
         | EqualizeColumnWidths
         | EqualizeColumnHeights => FullscreenPolicy::Suppress,
         _ => FullscreenPolicy::Allow,
+    }
+}
+
+fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
+    use IpcCommand::*;
+    match cmd {
+        CloseWindow | ToggleFullscreen | Resize { .. } | QueryFocused => FloatingPolicy::Target,
+        SetColumnWidth { .. }
+        | CycleWidth
+        | CycleWidthUp
+        | CycleWidthDown
+        | CycleHeight
+        | CycleHeightUp
+        | CycleHeightDown
+        | MaximizeColumn
+        | CenterColumn
+        | EqualizeColumnHeights
+        | ToggleTabbed
+        | MoveColumnLeft
+        | MoveColumnRight
+        | MoveColumnToStart
+        | MoveColumnToEnd
+        | MoveWindowLeft
+        | MoveWindowRight
+        | MoveWindowUp
+        | MoveWindowDown
+        | ConsumeFromLeft
+        | ConsumeFromRight
+        | ExpelToLeft
+        | ExpelToRight => FloatingPolicy::Ignore,
+        // These already resolve floating focus themselves.
+        ToggleFloating
+        | ToggleSticky
+        | ScratchpadStash
+        | MoveToWorkspace { .. }
+        | MoveToWorkspacePrev
+        | MoveToWorkspaceNext
+        | MoveWindowToMonitorLeft
+        | MoveWindowToMonitorRight
+        | MoveWindowToMonitorUp
+        | MoveWindowToMonitorDown => FloatingPolicy::Unchanged,
+        _ => FloatingPolicy::Unchanged,
     }
 }
 
@@ -263,7 +314,24 @@ impl AppState {
         }
     }
 
+    // A focused floating window has no column. Runs before the fullscreen
+    // policy so an ignored column command does not drop fullscreen either.
+    // Some means dispatch is complete; None continues normal dispatch.
+    fn apply_floating_policy(&mut self, cmd: &IpcCommand) -> Option<IpcResponse> {
+        self.focused_floating_window()?;
+        match floating_policy(cmd) {
+            FloatingPolicy::Ignore => {
+                debug!("Ignoring {:?} while a floating window has focus", cmd);
+                Some(IpcResponse::Ok)
+            }
+            FloatingPolicy::Target | FloatingPolicy::Unchanged => None,
+        }
+    }
+
     pub(crate) fn handle_command(&mut self, cmd: IpcCommand) -> IpcResponse {
+        if let Some(resp) = self.apply_floating_policy(&cmd) {
+            return resp;
+        }
         if let Some(resp) = self.apply_fullscreen_policy(&cmd) {
             return resp;
         }
@@ -1802,6 +1870,196 @@ mod focus_nav_tests {
                 "{cmd:?} should not warp the cursor"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod floating_policy_tests {
+    use super::*;
+    use crate::config::Config;
+    use leopardwm_core_layout::Rect;
+    use leopardwm_platform_win32::MonitorInfo;
+
+    const FLOATING: u64 = 900;
+
+    const IGNORED: [IpcCommand; 23] = [
+        IpcCommand::SetColumnWidth { fraction: 0.5 },
+        IpcCommand::CycleWidth,
+        IpcCommand::CycleWidthUp,
+        IpcCommand::CycleWidthDown,
+        IpcCommand::CycleHeight,
+        IpcCommand::CycleHeightUp,
+        IpcCommand::CycleHeightDown,
+        IpcCommand::MaximizeColumn,
+        IpcCommand::CenterColumn,
+        IpcCommand::EqualizeColumnHeights,
+        IpcCommand::ToggleTabbed,
+        IpcCommand::MoveColumnLeft,
+        IpcCommand::MoveColumnRight,
+        IpcCommand::MoveColumnToStart,
+        IpcCommand::MoveColumnToEnd,
+        IpcCommand::MoveWindowLeft,
+        IpcCommand::MoveWindowRight,
+        IpcCommand::MoveWindowUp,
+        IpcCommand::MoveWindowDown,
+        IpcCommand::ConsumeFromLeft,
+        IpcCommand::ConsumeFromRight,
+        IpcCommand::ExpelToLeft,
+        IpcCommand::ExpelToRight,
+    ];
+
+    /// Three columns (100 | 200+201 | 300) focused on 201, with a floating
+    /// window holding focus over them.
+    fn floating_focus_state() -> AppState {
+        let mut state = AppState::new_with_config(
+            Config::default(),
+            vec![MonitorInfo {
+                id: 1,
+                rect: Rect::new(0, 0, 1920, 1080),
+                work_area: Rect::new(0, 0, 1920, 1040),
+                is_primary: true,
+                device_name: "DISPLAY1".to_string(),
+                scale_factor: 1.0,
+            }],
+        );
+        assert!(state.paused);
+        let ws = state.focused_workspace_mut().unwrap();
+        ws.insert_window(100, Some(400)).unwrap();
+        ws.insert_window(200, Some(600)).unwrap();
+        ws.insert_window_in_column(201, 1).unwrap();
+        ws.insert_window(300, Some(800)).unwrap();
+        ws.set_focus(1, 1).unwrap();
+        ws.add_floating(FLOATING, Rect::new(100, 100, 500, 400))
+            .unwrap();
+        state.previous_focused_hwnd = Some(FLOATING);
+        assert_eq!(state.focused_floating_window(), Some(FLOATING));
+        state
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct StripSnapshot {
+        columns: Vec<(Vec<u64>, i32, Vec<f64>, bool)>,
+        focus: (usize, usize),
+        fullscreen: Option<u64>,
+    }
+
+    fn strip_snapshot(state: &AppState) -> StripSnapshot {
+        let ws = state.focused_workspace().unwrap();
+        StripSnapshot {
+            columns: ws
+                .columns()
+                .iter()
+                .map(|c| {
+                    (
+                        c.windows().to_vec(),
+                        c.width(),
+                        c.height_weights().to_vec(),
+                        c.is_tabbed(),
+                    )
+                })
+                .collect(),
+            focus: (
+                ws.focused_column_index(),
+                ws.focused_window_index_in_column(),
+            ),
+            fullscreen: ws.fullscreen_window_id(),
+        }
+    }
+
+    #[test]
+    fn floating_policy_groups_commands() {
+        for cmd in [
+            IpcCommand::CloseWindow,
+            IpcCommand::ToggleFullscreen,
+            IpcCommand::Resize { delta: 100 },
+            IpcCommand::QueryFocused,
+        ] {
+            assert!(
+                matches!(floating_policy(&cmd), FloatingPolicy::Target),
+                "{cmd:?} should target the floating window"
+            );
+        }
+        for cmd in IGNORED {
+            assert!(
+                matches!(floating_policy(&cmd), FloatingPolicy::Ignore),
+                "{cmd:?} should be ignored"
+            );
+        }
+        for cmd in [
+            IpcCommand::ToggleFloating,
+            IpcCommand::ToggleSticky,
+            IpcCommand::ScratchpadStash,
+            IpcCommand::MoveToWorkspace { index: 2 },
+            IpcCommand::MoveToWorkspacePrev,
+            IpcCommand::MoveToWorkspaceNext,
+            IpcCommand::MoveWindowToMonitorLeft,
+            IpcCommand::MoveWindowToMonitorRight,
+            IpcCommand::MoveWindowToMonitorUp,
+            IpcCommand::MoveWindowToMonitorDown,
+            IpcCommand::FocusLeft,
+            IpcCommand::Scroll { delta: 100.0 },
+            IpcCommand::EqualizeColumnWidths,
+        ] {
+            assert!(
+                matches!(floating_policy(&cmd), FloatingPolicy::Unchanged),
+                "{cmd:?} should keep its normal dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn column_commands_are_ignored_while_floating_has_focus() {
+        for fullscreen in [false, true] {
+            let mut state = floating_focus_state();
+            if fullscreen {
+                state.focused_workspace_mut().unwrap().toggle_fullscreen();
+            }
+            let before = strip_snapshot(&state);
+            assert_eq!(before.fullscreen.is_some(), fullscreen);
+            for cmd in IGNORED {
+                assert_eq!(
+                    state.handle_command(cmd.clone()),
+                    IpcResponse::Ok,
+                    "{cmd:?}"
+                );
+                assert_eq!(
+                    strip_snapshot(&state),
+                    before,
+                    "{cmd:?} changed the strip (fullscreen: {fullscreen})"
+                );
+                assert_eq!(state.focused_floating_window(), Some(FLOATING));
+            }
+        }
+    }
+
+    #[test]
+    fn strip_commands_still_act_while_floating_has_focus() {
+        let mut state = floating_focus_state();
+        assert_eq!(state.handle_command(IpcCommand::FocusLeft), IpcResponse::Ok);
+        assert_eq!(state.focused_workspace().unwrap().focused_column_index(), 0);
+
+        let mut state = floating_focus_state();
+        assert_eq!(
+            state.handle_command(IpcCommand::EqualizeColumnWidths),
+            IpcResponse::Ok
+        );
+        let widths: Vec<i32> = state
+            .focused_workspace()
+            .unwrap()
+            .columns()
+            .iter()
+            .map(|c| c.width())
+            .collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "{widths:?}");
+
+        let mut state = floating_focus_state();
+        assert_eq!(
+            state.handle_command(IpcCommand::ToggleFloating),
+            IpcResponse::Ok
+        );
+        let ws = state.focused_workspace().unwrap();
+        assert!(!ws.is_floating(FLOATING));
+        assert!(ws.columns().iter().any(|c| c.windows().contains(&FLOATING)));
     }
 }
 
