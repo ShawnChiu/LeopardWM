@@ -29,13 +29,13 @@ unsafe extern "system" {
     fn CloseDesktop(desktop: *mut std::ffi::c_void) -> i32;
 }
 
-struct FixtureDesktop {
+pub(crate) struct FixtureDesktop {
     original: usize,
     desktop: usize,
 }
 
 impl FixtureDesktop {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         static NEXT_DESKTOP_ID: AtomicU64 = AtomicU64::new(0);
         let name: Vec<u16> = format!(
             "LeopardWM-placement-test-{}-{}",

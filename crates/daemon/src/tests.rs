@@ -15939,6 +15939,7 @@ fn test_empty_workspace_switch_releases_hidden_console_foreground() {
         }
     }
 
+    let _desktop = display_change_regression::FixtureDesktop::enter();
     let hidden = TestWindow(unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -15995,6 +15996,111 @@ fn test_empty_workspace_switch_releases_hidden_console_foreground() {
                 state.foreground_release_requests,
                 vec![(hidden_hwnd, Rect::new(0, 0, 1920, 1040))]
             );
+        }
+    }
+}
+
+#[test]
+fn test_empty_workspace_switch_releases_only_transient_visible_console_foreground() {
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowTextW,
+        UnregisterClassW, WINDOW_EX_STYLE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+
+    struct ConsoleWindow(HWND);
+    impl Drop for ConsoleWindow {
+        fn drop(&mut self) {
+            unsafe {
+                DestroyWindow(self.0).unwrap();
+                UnregisterClassW(
+                    w!("ConsoleWindowClass"),
+                    Some(GetModuleHandleW(None).unwrap().into()),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    let _desktop = display_change_regression::FixtureDesktop::enter();
+    let instance = unsafe { GetModuleHandleW(None).unwrap() };
+    unsafe extern "system" fn console_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: windows::Win32::Foundation::WPARAM,
+        lparam: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+    let class = WNDCLASSW {
+        lpfnWndProc: Some(console_proc),
+        hInstance: instance.into(),
+        lpszClassName: w!("ConsoleWindowClass"),
+        ..Default::default()
+    };
+    assert_ne!(unsafe { RegisterClassW(&class) }, 0);
+    let console = ConsoleWindow(unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("ConsoleWindowClass"),
+            w!("Command Prompt"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            0,
+            0,
+            640,
+            480,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
+        .unwrap()
+    });
+    let hwnd = console.0 .0 as u64;
+    assert!(leopardwm_platform_win32::is_window_visible(hwnd));
+
+    for (title, release) in [
+        (w!("Command Prompt"), false),
+        (w!(r"C:\Program Files\LeopardWM\bin\lwm.exe"), true),
+    ] {
+        unsafe { SetWindowTextW(console.0, title).unwrap() };
+        let mut state = AppState::new_with_config(test_config(), test_monitors());
+        state
+            .injected_window_info
+            .insert(100, make_test_window_info(100));
+        state.handle_window_event(WindowEvent::Created(100, 0));
+        state.handle_window_event(WindowEvent::Focused(
+            100,
+            leopardwm_platform_win32::current_event_time_ms(),
+        ));
+        assert_eq!(state.find_window_workspace(100), Some((1, 0)));
+        assert_eq!(state.previous_focused_hwnd, Some(100));
+
+        assert!(!state.injected_window_info.contains_key(&hwnd));
+        let info = state.lookup_window_info(hwnd).unwrap();
+        assert_eq!(info.class_name, "ConsoleWindowClass");
+        assert_eq!(info.title, unsafe { title.to_string().unwrap() });
+        assert_eq!(info.process_id, std::process::id());
+        assert_eq!(state.find_window_workspace(hwnd), None);
+        state.injected_foreground_hwnd = Some(Some(hwnd));
+
+        assert!(matches!(
+            state.handle_command(IpcCommand::SwitchWorkspaceOnMonitor {
+                monitor_device_name: "DISPLAY1".into(),
+                index: 2,
+            }),
+            IpcResponse::Ok
+        ));
+        assert_eq!(state.active_workspace_idx(1), 1);
+        if release {
+            assert_eq!(
+                state.foreground_release_requests,
+                vec![(hwnd, Rect::new(0, 0, 1920, 1040))]
+            );
+        } else {
+            assert!(state.foreground_release_requests.is_empty());
         }
     }
 }
