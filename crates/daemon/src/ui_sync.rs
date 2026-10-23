@@ -541,16 +541,18 @@ impl AppState {
         }
     }
 
+    /// The floating window that holds focus on the active workspace, if any.
+    pub(crate) fn focused_floating_window(&self) -> Option<u64> {
+        self.previous_focused_hwnd.filter(|&hwnd| {
+            self.focused_workspace()
+                .is_some_and(|ws| ws.is_floating(hwnd))
+        })
+    }
+
     /// Preserve floating focus on the active workspace instead of replacing it
     /// with the workspace's tiled focus.
     pub(crate) fn sync_foreground_window(&mut self) {
-        let floating_focus = self.previous_focused_hwnd.and_then(|hwnd| {
-            self.focused_workspace()
-                .filter(|ws| ws.is_floating(hwnd))
-                .map(|_| hwnd)
-        });
-
-        let focused_hwnd = floating_focus.or_else(|| {
+        let focused_hwnd = self.focused_floating_window().or_else(|| {
             self.focused_workspace()
                 .and_then(|ws| ws.focused_visible_window())
         });

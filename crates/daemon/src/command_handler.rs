@@ -997,13 +997,9 @@ impl AppState {
 
     fn handle_toggle_floating(&mut self) -> IpcResponse {
         let viewport = self.focused_viewport();
-        let prev_hwnd = self.previous_focused_hwnd;
+        let floating_focus = self.focused_floating_window();
         if let Some(workspace) = self.focused_workspace_mut() {
-            let foreground_is_floating = prev_hwnd
-                .map(|hwnd| workspace.is_floating(hwnd))
-                .unwrap_or(false);
-            if foreground_is_floating {
-                let hwnd = prev_hwnd.unwrap();
+            if let Some(hwnd) = floating_focus {
                 if workspace.unfloat_window(hwnd) {
                     self.disable_snap_for_window(hwnd);
                     info!("Unfloated window {} back to tiling", hwnd);
