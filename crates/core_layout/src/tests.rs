@@ -2525,6 +2525,135 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_fullscreen_window_floating_fills_viewport() {
+        let mut ws = Workspace::with_gaps(10, 10);
+        let viewport = Rect::new(0, 0, 1920, 1080);
+        let float_rect = Rect::new(50, 60, 300, 200);
+        let pinned_rect = Rect::new(700, 60, 200, 150);
+
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.insert_window(2, Some(400)).unwrap();
+        ws.add_floating(10, float_rect).unwrap();
+        ws.add_floating(11, Rect::new(400, 60, 200, 150)).unwrap();
+        ws.add_floating(12, pinned_rect).unwrap();
+        assert!(ws.set_floating_pinned(12, true));
+
+        assert!(ws.toggle_fullscreen_window(10));
+        assert_eq!(ws.fullscreen_window_id(), Some(10));
+
+        let placements = ws.compute_placements(viewport);
+        let fs = placements.iter().find(|p| p.window_id == 10).unwrap();
+        assert_eq!(fs.rect, viewport);
+        assert_eq!(fs.visibility, Visibility::Visible);
+        for id in [1, 2, 11] {
+            let p = placements.iter().find(|p| p.window_id == id).unwrap();
+            assert_eq!(p.visibility, Visibility::OffScreenLeft, "window {id}");
+        }
+        let pinned = placements.iter().find(|p| p.window_id == 12).unwrap();
+        assert_eq!(pinned.visibility, Visibility::Visible);
+        assert_eq!(pinned.rect, pinned_rect);
+    }
+
+    #[test]
+    fn test_toggle_fullscreen_window_floating_exit_restores_rect() {
+        let mut ws = Workspace::new();
+        let viewport = Rect::new(0, 0, 1920, 1080);
+        let float_rect = Rect::new(50, 60, 300, 200);
+
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.add_floating(10, float_rect).unwrap();
+
+        assert!(ws.toggle_fullscreen_window(10));
+        ws.set_window_min_width(10, 1920);
+        ws.set_window_min_height(10, 1080);
+
+        assert!(!ws.toggle_fullscreen_window(10));
+        assert!(!ws.is_fullscreen());
+        assert!(ws.is_floating(10));
+        assert_eq!(ws.focused_window(), Some(1));
+
+        let placements = ws.compute_placements(viewport);
+        let fl = placements.iter().find(|p| p.window_id == 10).unwrap();
+        assert_eq!(fl.rect, float_rect);
+        assert_eq!(fl.visibility, Visibility::Visible);
+        assert!(!ws.window_min_widths.contains_key(&10));
+        assert!(!ws.window_min_heights.contains_key(&10));
+    }
+
+    #[test]
+    fn test_toggle_fullscreen_window_retargets_from_another_window() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.add_floating(10, Rect::new(50, 60, 300, 200)).unwrap();
+
+        assert!(ws.toggle_fullscreen());
+        assert_eq!(ws.fullscreen_window_id(), Some(1));
+        ws.set_window_min_width(1, 1920);
+
+        assert!(ws.toggle_fullscreen_window(10));
+        assert_eq!(ws.fullscreen_window_id(), Some(10));
+        assert!(!ws.window_min_widths.contains_key(&1));
+    }
+
+    #[test]
+    fn test_toggle_fullscreen_window_rejects_missing_or_minimized() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.add_floating(10, Rect::new(50, 60, 300, 200)).unwrap();
+        ws.mark_minimized(10);
+
+        assert!(!ws.toggle_fullscreen_window(10));
+        assert!(!ws.toggle_fullscreen_window(999));
+        assert!(!ws.is_fullscreen());
+
+        // A rejected target leaves an existing fullscreen window in place.
+        assert!(ws.toggle_fullscreen());
+        assert!(!ws.toggle_fullscreen_window(999));
+        assert_eq!(ws.fullscreen_window_id(), Some(1));
+    }
+
+    #[test]
+    fn test_resize_floating_changes_width_only() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+        ws.add_floating(10, Rect::new(50, 60, 300, 200)).unwrap();
+
+        assert!(ws.resize_floating(10, 100));
+        assert_eq!(ws.floating_windows()[0].rect, Rect::new(50, 60, 400, 200));
+
+        assert!(ws.resize_floating(10, -250));
+        assert_eq!(ws.floating_windows()[0].rect, Rect::new(50, 60, 150, 200));
+
+        assert_eq!(ws.columns()[0].width(), 400);
+    }
+
+    #[test]
+    fn test_resize_floating_clamps_to_min_width() {
+        let mut ws = Workspace::new();
+        ws.add_floating(10, Rect::new(50, 60, 300, 200)).unwrap();
+        ws.add_floating(11, Rect::new(50, 60, 80, 200)).unwrap();
+
+        assert!(ws.resize_floating(10, -1000));
+        assert_eq!(ws.floating_windows()[0].rect.width, MIN_COLUMN_WIDTH);
+
+        // A window already below the floor does not grow when shrunk.
+        assert!(ws.resize_floating(11, -50));
+        assert_eq!(ws.floating_windows()[1].rect.width, 80);
+        assert!(ws.resize_floating(11, 50));
+        assert_eq!(ws.floating_windows()[1].rect.width, 130);
+    }
+
+    #[test]
+    fn test_resize_floating_ignores_tiled_and_missing_windows() {
+        let mut ws = Workspace::new();
+        ws.insert_window(1, Some(400)).unwrap();
+
+        assert!(!ws.resize_floating(1, 100));
+        assert!(!ws.resize_floating(999, 100));
+        assert_eq!(ws.columns()[0].width(), 400);
+    }
+
+    #[test]
     fn test_toggle_floating_tiled_to_float() {
         let mut ws = Workspace::new();
         let viewport = Rect::new(0, 0, 1920, 1080);

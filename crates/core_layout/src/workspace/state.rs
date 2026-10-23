@@ -98,6 +98,24 @@ impl Workspace {
         }
     }
 
+    /// Toggles fullscreen for a specific tiled or floating window instead of column focus.
+    /// Returns true if entering fullscreen, false if exiting or the window cannot be a target.
+    pub fn toggle_fullscreen_window(&mut self, window_id: WindowId) -> bool {
+        if self.fullscreen_window == Some(window_id) {
+            self.clear_fullscreen_if_window(window_id);
+            return false;
+        }
+        if !self.contains_window(window_id) || self.minimized_windows.contains(&window_id) {
+            return false;
+        }
+        // The previous target's measurements reflect the viewport, not genuine window minima.
+        if let Some(prev) = self.fullscreen_window {
+            self.clear_fullscreen_if_window(prev);
+        }
+        self.fullscreen_window = Some(window_id);
+        true
+    }
+
     /// Retargets active fullscreen to the focused visible window and clears the previous target's
     /// viewport-inflated minima.
     /// Returns whether the target changed.
