@@ -484,11 +484,7 @@ impl AppState {
                 ws.ensure_focused_visible_animated(vw);
                 info!("Expelled window to left");
             }),
-            IpcCommand::ExpelToRight => self.execute_workspace_command(true, true, |ws, vw| {
-                ws.expel_to_right();
-                ws.ensure_focused_visible_animated(vw);
-                info!("Expelled window to right");
-            }),
+            IpcCommand::ExpelToRight => self.expel_tiled_focus_to_right(),
             IpcCommand::ConsumeFromLeft => self.execute_workspace_command(true, true, |ws, vw| {
                 ws.consume_from_left();
                 ws.ensure_focused_visible_animated(vw);
@@ -1878,6 +1874,22 @@ impl AppState {
         }
 
         self.commit_active_tab_after_restore(column, tab, target, was_minimized)
+    }
+
+    /// The tab strip's Untab names its tab explicitly, so it skips the
+    /// floating policy but keeps the fullscreen exit `ExpelToRight` gets
+    /// from `handle_command`.
+    pub(crate) fn untab_tiled_focus(&mut self) -> IpcResponse {
+        self.exit_fullscreen_if_active();
+        self.expel_tiled_focus_to_right()
+    }
+
+    fn expel_tiled_focus_to_right(&mut self) -> IpcResponse {
+        self.execute_workspace_command(true, true, |ws, vw| {
+            ws.expel_to_right();
+            ws.ensure_focused_visible_animated(vw);
+            info!("Expelled window to right");
+        })
     }
 
     pub(crate) fn handle_tab_action_activation_with_restore(
