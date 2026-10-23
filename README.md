@@ -61,7 +61,7 @@ A few deliberate **non-features**, so you know what you're getting:
 - **PowerToys Shortcut Guide export** — `lwm query hotkeys` lists effective bindings; `lwm export-shortcut-guide` writes a user manifest (stdout, `--output PATH`, or `--install`)
 - Smooth scroll animations with layout transition effects (vsync-locked)
 - Touchpad gestures with configurable swipe actions
-- Drag-and-drop column reorder (Shift+drag to merge windows)
+- Drag-and-drop — drag a window onto a column to merge it in; Shift+drag to reorder columns or move a column to another monitor
 - **Tabbed columns** — toggle a column between vertical-stack and tab-strip mode (`Ctrl+Alt+T`); only the active tab fills the column rect, the rest sit in a clickable strip above
 - **Scratchpad** — stash the focused window out of the layout (`Ctrl+Alt+Shift+S`) and summon it back as a floating, centered overlay on demand (`Ctrl+Alt+S`); stash it again to release it back to tiling
 - **Sticky windows** — pin a window (`Ctrl+Alt+Y`) so it follows you across workspaces, keeping its current mode: a tiled window stays tiled (a column you can cycle to), a floating window stays a floating overlay
@@ -106,10 +106,38 @@ For users who prefer not to install:
 
 1. Download `LeopardWM-x.y.z-x86_64-windows.zip` (or `LeopardWM-x.y.z-arm64-windows.zip` for ARM64) from [GitHub Releases](https://github.com/jcardama/LeopardWM/releases)
 2. Extract to a permanent location
-3. Run `leopardwm.exe`
-4. (Optional) Enable autostart: `lwm autostart enable`
+3. [Put `lwm` on the PATH](#put-lwm-on-the-path). The zip does not change the PATH.
+4. Run `leopardwm.exe`
+5. (Optional) Enable autostart: `lwm autostart enable`
 
 Current releases are not code-signed, so Windows SmartScreen may show a warning on first install.
+
+### Put lwm on the PATH
+
+Zip installs need this setup so status bars and other programs can run `lwm` by name. MSI installs also need it if you deselected **PATH Environment Variable** (on by default). winget and Scoop already handle the PATH.
+
+Use the folder that actually contains `lwm.exe`, not the executable itself. For a zip, this is the extracted `LeopardWM-x.y.z-<arch>-windows` folder, with no `bin` subfolder. Explorer's **Extract All** can create a nested folder of the same name. For a default MSI install, use `C:\Program Files\LeopardWM\bin` unless you chose another install folder.
+
+To add it to your **user** PATH without admin rights:
+
+1. Search Start for "environment variables" and open **Edit environment variables for your account**.
+2. Select **Path** under user variables, then choose **Edit**.
+3. Choose **New**, paste the folder that contains `lwm.exe`, and choose **OK** to close each dialog.
+
+Or run this in PowerShell, replacing the example folder with yours:
+
+```powershell
+$dir = 'C:\Tools\LeopardWM'   # the folder that contains lwm.exe
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$entries = @($userPath -split ';' | Where-Object { $_ })
+if ($entries -notcontains $dir) {
+    [Environment]::SetEnvironmentVariable('Path', (($entries + $dir) -join ';'), 'User')
+}
+```
+
+Open a new terminal and run `where.exe lwm` to see every `lwm` found on the PATH. Restart Yasb and any other bar, terminal, or launcher after a PATH change: running programs keep the PATH they had at startup. If one still cannot find `lwm`, sign out and back in.
+
+After extracting a newer zip into a different folder, update the PATH entry to that folder.
 
 ## Quick Start (from source)
 
@@ -142,6 +170,8 @@ Set `new_window_monitor = "focused"` under `[behavior]` or choose Settings → B
 ## Default Hotkeys
 
 Most hotkeys use `Ctrl+Alt` as the base modifier. Layered pattern: base = focus, +Shift = move, +Win = monitor scope. Every hotkey is rebindable in `config.toml`. Combos Windows reserves (like `Win+Ctrl+Arrow`) can't be bound directly, but the opt-in **Reclaim Windows-reserved shortcuts** setting lets you use them anyway.
+
+Punctuation bindings accept `-`, `=`, `,`, `.`, `[`, `]`, `;`, `/`, `` ` ``, `\`, and `'`, or the word tokens `Minus`, `Equals`, `Comma`, `Period`, `Bracket_Left`, `Bracket_Right`, `Semicolon`, `Slash`, `Backtick`, `Backslash`, and `Apostrophe`. Each punctuation binding matches the Windows virtual key for that symbol on a US English layout. On other keyboard layouts, that key can be in a different place.
 
 | Key | Action |
 |---|---|
@@ -595,6 +625,12 @@ Thanks to everyone who has helped shape LeopardWM.
 
 <a href="https://github.com/bd-dxg" title="冰冻大西瓜"><img src="https://avatars.githubusercontent.com/u/34816426?v=4&s=96" width="72" alt="冰冻大西瓜" /></a><br />
 <a href="https://github.com/bd-dxg"><b>冰冻大西瓜</b></a> (<a href="https://github.com/bd-dxg">@bd-dxg</a>)
+
+<a href="https://github.com/ShawnChiu" title="Shawn"><img src="https://avatars.githubusercontent.com/u/147299642?v=4&s=96" width="72" alt="Shawn" /></a><br />
+<a href="https://github.com/ShawnChiu"><b>Shawn</b></a> (<a href="https://github.com/ShawnChiu">@ShawnChiu</a>)
+
+<a href="https://github.com/azumafuji" title="Dean Sellis"><img src="https://avatars.githubusercontent.com/u/393782?v=4&s=96" width="72" alt="Dean Sellis" /></a><br />
+<a href="https://github.com/azumafuji"><b>Dean Sellis</b></a> (<a href="https://github.com/azumafuji">@azumafuji</a>)
 
 ## License
 

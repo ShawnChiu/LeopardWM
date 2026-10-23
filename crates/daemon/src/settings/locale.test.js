@@ -517,6 +517,22 @@ assert.equal(recordedBindings['Ctrl+Alt+H'], 'focus_left');
 assert.ok(!Object.hasOwn(recordedBindings, 'Ctrl+Alt+Left'));
 assertChordIgnored('Ctrl+Alt+X');
 
+for (const [code, token, symbol] of [
+  ['Semicolon', 'Semicolon', ';'], ['Quote', 'Apostrophe', "'"],
+  ['Slash', 'Slash', '/'], ['Backslash', 'Backslash', '\\'], ['Backquote', 'Backtick', '`']
+]) {
+  recorder.ctx.loadHotkeysSorted({ ['Ctrl+Alt+' + token]: 'focus_left' }, 'Ctrl+Alt');
+  const input = recorder.rows.find(row => row.dataset.cmd === 'focus_left').input;
+  const chord = 'Ctrl+Alt+' + symbol;
+  assert.equal(input.value, chord, token + ' display');
+  input.emit('mousedown', { button: 0 });
+  input.emit('keydown', { code, key: 'non-US symbol', ctrlKey: true, altKey: true, preventDefault() {} });
+  assert.equal(input.value, chord, code + ' recording');
+  assert.ok(!input.classList.contains('recording'), code);
+  recorder.flush();
+  assert.equal(recorder.saves.at(-1).config.hotkeys[chord], 'focus_left', code + ' save');
+}
+
 for (const [full, short] of [
   ['Command (detail)', 'Command'], ['Command(detail)', 'Command'],
   ['命令（详情）', '命令'], ['命令 （详情）', '命令'],

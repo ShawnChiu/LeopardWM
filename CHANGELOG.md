@@ -2,6 +2,23 @@
 
 All notable changes to LeopardWM will be documented in this file.
 
+## 0.3.4
+
+### Features
+
+- **LeopardWM now ships native ARM64 builds.** Each release includes `LeopardWM-x.y.z-arm64-windows.zip` and `LeopardWM-x.y.z-arm64.msi` for Windows on ARM devices. Contributed by @azumafuji. (#131, #149)
+
+### Improvements
+
+- **The overview now centers each workspace row on the screen.** Rows with only a few windows no longer sit against the left edge.
+
+### Fixes
+
+- **Moving a window to another monitor no longer leaves the monitor it left scrolled past its remaining windows.** That monitor now scrolls back so its remaining windows stay in view. (#160)
+- **Shortcuts can now use the `;`, `'`, `/`, `\` and `` ` `` keys.** The Settings shortcut recorder now records these keys too. (#145)
+- **Clicking a status-bar workspace button, such as the Yasb recipe, now stays on an empty workspace instead of flashing back.** The `lwm` command now lets LeopardWM take focus from the command's own console window, so focus cannot return to a window on the previous workspace when the console closes. This needs this version's `lwm`; a status bar running an older `lwm` still flashes back.
+- **The focus border's rounded corners now line up with the window's corners on displays scaled above 100%.** The corner radius now follows the monitor's display scale, as the border width already did. Contributed by @ShawnChiu. (#157)
+
 ## 0.3.3
 
 ### Fixes

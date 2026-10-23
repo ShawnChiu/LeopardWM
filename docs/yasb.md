@@ -2,7 +2,7 @@
 
 [Yasb](https://github.com/amnweb/yasb) can show and switch LeopardWM workspaces with its built-in Custom widget. This recipe adds nine clickable buttons for **one explicitly selected monitor**, using the existing CLI. It does not install a plugin or change LeopardWM's IPC protocol.
 
-Use a matching LeopardWM CLI and daemon with `lwm query workspaces` support (introduced in 0.2.10), and put `lwm.exe` on the PATH inherited by Yasb. Yasb's GlazeWM and komorebi widgets speak those managers' own protocols; pointing them at LeopardWM will not work.
+Use a matching LeopardWM CLI and daemon with `lwm query workspaces` support (introduced in 0.2.10), and [put `lwm.exe` on the PATH inherited by Yasb](../README.md#put-lwm-on-the-path). Restart Yasb after a PATH change. Yasb's GlazeWM and komorebi widgets speak those managers' own protocols; pointing them at LeopardWM will not work.
 
 ## 1. Save the query adapter
 
@@ -192,6 +192,24 @@ Append to your Yasb `styles.css`:
 
 A strip might read `[1*] 2 3* 4 5 6 7 8 9`: brackets indicate the active workspace **on the selected monitor**, and `*` indicates at least one managed window. Hover shows the configured workspace name (or its number) and window count. Clicking a button selects that workspace on the explicit monitor, even if another monitor currently has focus. Command numbers are one-based; snapshot indices are zero-based. The click deliberately transfers focus to the target monitor.
 
+## If Yasb cannot find lwm
+
+If changing the PATH is not an option, use the full path to `lwm.exe` in both the adapter and callbacks. Find it with `where.exe lwm` in a terminal where `lwm` works. A default MSI install uses `C:\Program Files\LeopardWM\bin\lwm.exe`; for a zip, use `lwm.exe` in the extracted folder.
+
+Replace the adapter's query line with this, using your full path:
+
+```powershell
+$lines = @(& 'C:\Program Files\LeopardWM\bin\lwm.exe' query workspaces 2>$null)
+```
+
+Use the same path in all nine callbacks, keeping each workspace number and your target monitor. For example:
+
+```yaml
+on_left: 'exec "C:\Program Files\LeopardWM\bin\lwm.exe" workspace 1 --monitor \\.\DISPLAY1'
+```
+
+The double quotes around a path containing spaces are required. Backslashes are literal in YAML single-quoted strings.
+
 ## Trade-offs and troubleshooting
 
 - This is a **polling recipe**, not a native Yasb integration. Each of the nine Custom widgets independently queries every five seconds (nine queries per interval per bar). Labels can lag a click or other change by up to an interval during normal operation, and buttons can briefly reflect different snapshots. Increase `run_interval` on the shared options to reduce polling. A first-class Yasb widget consuming `lwm subscribe --events workspace_state` would avoid repeated queries and update the strip atomically.
@@ -201,7 +219,7 @@ A strip might read `[1*] 2 3* 4 5 6 7 8 9`: brackets indicate the active workspa
 - On caught failures the adapter prints a valid nine-element JSON array of `?` labels and "LeopardWM unavailable" tooltips, writes a diagnostic to stderr, and exits 1. Yasb's [`CustomWorker.run`](https://github.com/amnweb/yasb/blob/main/src/core/widgets/yasb/custom.py) parses stdout with `json.loads` and emits the result without checking the process exit code; stderr is discarded. `_handle_exec_data` replaces the previous data, then `_update_label` formats the labels. Empty stdout becomes `None`, and JSON `null` also becomes `None`; with these indexed templates, formatting fails before the `hide_empty` check and the exception handler displays the literal template instead of hiding the button. The adapter therefore supplies renderable failure data, with `hide_empty: false`. If PowerShell or the script cannot start at all, or no worker result arrives, this fallback cannot run: Yasb may retain its startup placeholder or previous label, so those labels are not a liveness guarantee. Run the adapter manually to see its error: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:APPDATA\yasb\leopardwm-workspaces.ps1" -Monitor '\\.\DISPLAY1'`. Check that Yasb inherited the correct PATH and that the CLI and daemon support this query. Command/query timeouts can delay updates beyond the normal interval; Custom has no subprocess timeout of its own.
 - For multiple monitors, use separate widget names and a separate bar assignment per target, changing the monitor in both query and click commands. Do not reuse this DISPLAY1 strip on every monitor expecting Yasb to retarget it automatically. Reusing it still controls DISPLAY1.
 
-The adapter and YAML command arguments have been checked offline with synthetic CLI snapshots, including missing/offline state and a script path containing spaces. A live Yasb/LeopardWM run has **not** been verified.
+The adapter and YAML command arguments have been checked offline with synthetic CLI snapshots, including missing/offline state and a script path containing spaces. The click commands have been checked against a live Yasb bar with LeopardWM 0.3.4, including switching to an empty workspace. With an older `lwm` on the PATH, clicking an empty workspace's button can flash it and return to the previous workspace.
 
 ## Upstream references
 

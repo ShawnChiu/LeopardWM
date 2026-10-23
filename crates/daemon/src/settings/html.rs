@@ -1811,7 +1811,10 @@ function initGestureCombo(id) {
 /* Show key chords with friendly symbols (Bracket_Left -> [). Both the
    token and the symbol alias parse to the same key, and the catalog now
    ships symbols, so this mainly tidies older token-form configs on display. */
-var KEY_SYMBOLS = { 'BRACKET_LEFT': '[', 'BRACKET_RIGHT': ']', 'COMMA': ',', 'PERIOD': '.', 'MINUS': '-', 'EQUALS': '=' };
+var KEY_SYMBOLS = {
+  'BRACKET_LEFT': '[', 'BRACKET_RIGHT': ']', 'COMMA': ',', 'PERIOD': '.', 'MINUS': '-', 'EQUALS': '=',
+  'SEMICOLON': ';', 'SLASH': '/', 'BACKTICK': '`', 'BACKSLASH': '\\', 'APOSTROPHE': "'"
+};
 function humanizeKey(chord) {
   var parts = (chord || '').split('+');
   var i = parts.length - 1;
@@ -1829,6 +1832,7 @@ var CODE_TO_KEY = {
   Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
   Space: 'Space', Enter: 'Enter', Tab: 'Tab', Escape: 'Escape',
   Minus: '-', Equal: '=', Comma: ',', Period: '.', BracketLeft: '[', BracketRight: ']',
+  Semicolon: ';', Quote: "'", Slash: '/', Backslash: '\\', Backquote: '`',
   NumpadAdd: 'NumpadAdd', NumpadSubtract: 'NumpadSubtract', NumpadMultiply: 'NumpadMultiply',
   NumpadDivide: 'NumpadDivide', NumpadDecimal: 'NumpadDecimal'
 };

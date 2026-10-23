@@ -544,6 +544,7 @@ impl AppState {
         let target_viewport = self.viewport_width_for(target_monitor);
         if !is_floating {
             target_workspace.ensure_focused_visible(target_viewport);
+            source_workspace.reconcile_scroll_bounds(self.viewport_width_for(source_monitor));
         }
 
         self.workspaces.get_mut(&source_monitor).unwrap()[src_idx] = source_workspace;

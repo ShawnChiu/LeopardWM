@@ -46,6 +46,13 @@ pub(crate) fn defer_snapback_while_settling(
     settling && recently_maximized
 }
 
+fn is_transient_console_host(title: &str, class_name: &str, executable: &str) -> bool {
+    let title_lower = title.to_ascii_lowercase();
+    class_name == "ConsoleWindowClass"
+        && (title_lower.ends_with(".exe")
+            || (!executable.is_empty() && title_lower == executable.to_ascii_lowercase()))
+}
+
 fn insert_admitted_tile(
     workspace: &mut Workspace,
     hwnd: u64,
@@ -995,10 +1002,7 @@ impl AppState {
             // one. Scheduled-task windows can disappear during that interval; admitting
             // them would cause two pointless layout reflows. Focus recovery retries
             // interactive consoles once they have a real title.
-            let title_lower = win_info.title.to_ascii_lowercase();
-            let title_looks_like_exe_path = title_lower.ends_with(".exe")
-                || (!executable.is_empty() && title_lower == executable.to_ascii_lowercase());
-            if title_looks_like_exe_path && win_info.class_name == "ConsoleWindowClass" {
+            if is_transient_console_host(&win_info.title, &win_info.class_name, &executable) {
                 debug!(
                     "Skipping transient console-host window with exe-path title: {} ({})",
                     win_info.title, win_info.class_name
@@ -1402,7 +1406,7 @@ impl AppState {
         if should_ignore_hidden_still_visible(
             is_hidden_event,
             is_managed,
-            self.is_hidden_event_still_visible(hwnd),
+            self.is_window_visible_now(hwnd),
         ) {
             debug!(
                 "Ignoring spurious Hidden event for still-visible window {}",
@@ -1627,7 +1631,7 @@ impl AppState {
         }
     }
 
-    fn is_hidden_event_still_visible(&self, hwnd: u64) -> bool {
+    fn is_window_visible_now(&self, hwnd: u64) -> bool {
         #[cfg(test)]
         if self.injected_visible_hwnds.contains(&hwnd) {
             return true;
@@ -2013,6 +2017,8 @@ impl AppState {
         }
     }
 
+    /// Also release live hidden unmanaged foregrounds and transient console hosts,
+    /// so their exit cannot return focus to a parked window and switch back.
     pub(crate) fn release_parked_foreground(&mut self) {
         #[cfg(test)]
         let foreground = self.injected_foreground_hwnd.flatten();
@@ -2022,19 +2028,37 @@ impl AppState {
             debug!("Skipping parked-foreground release because there is no OS foreground window");
             return;
         };
-        let Some((monitor, workspace_idx)) = self.find_window_workspace(hwnd) else {
-            return;
+        let reason = if let Some((monitor, workspace_idx)) = self.find_window_workspace(hwnd) {
+            if self.active_workspace_idx(monitor) == workspace_idx
+                || self
+                    .workspaces
+                    .get(&monitor)
+                    .and_then(|workspaces| workspaces.get(workspace_idx))
+                    .is_some_and(|workspace| workspace.is_floating(hwnd))
+            {
+                return;
+            }
+            "parked managed"
+        } else {
+            if !leopardwm_platform_win32::is_valid_window(hwnd) {
+                return;
+            }
+            if !self.is_window_visible_now(hwnd) {
+                "hidden unmanaged"
+            } else if self.lookup_window_info(hwnd).is_some_and(|info| {
+                let executable = get_process_executable(info.process_id).unwrap_or_default();
+                is_transient_console_host(&info.title, &info.class_name, &executable)
+            }) {
+                "transient console host"
+            } else {
+                return;
+            }
         };
-        if self.active_workspace_idx(monitor) == workspace_idx
-            || self
-                .workspaces
-                .get(&monitor)
-                .and_then(|workspaces| workspaces.get(workspace_idx))
-                .is_some_and(|workspace| workspace.is_floating(hwnd))
-        {
-            return;
-        }
 
+        info!(
+            "Attempting foreground handoff for window {} to the focus placeholder: {}",
+            hwnd, reason
+        );
         let work_area = self
             .monitors
             .get(&self.focused_monitor)
@@ -2046,13 +2070,16 @@ impl AppState {
         #[cfg(not(test))]
         if let (Some(placeholder), Some(work_area)) = (self.focus_placeholder.as_ref(), work_area) {
             match placeholder.release_foreground(hwnd, work_area) {
-                Ok(true) => {}
-                Ok(false) => debug!(
-                    "Windows did not release parked foreground window {} to the focus placeholder",
+                Ok(true) => info!(
+                    "Released foreground window {} to the focus placeholder",
                     hwnd
                 ),
-                Err(error) => debug!(
-                    "Could not release parked foreground window {}: {:?}",
+                Ok(false) => warn!(
+                    "Windows refused foreground handoff for window {} to the focus placeholder",
+                    hwnd
+                ),
+                Err(error) => warn!(
+                    "Could not release foreground window {} to the focus placeholder: {:?}",
                     hwnd, error
                 ),
             }

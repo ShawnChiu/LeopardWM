@@ -29,17 +29,22 @@ unsafe extern "system" {
     fn CloseDesktop(desktop: *mut std::ffi::c_void) -> i32;
 }
 
-struct FixtureDesktop {
+pub(crate) struct FixtureDesktop {
     original: usize,
     desktop: usize,
 }
 
 impl FixtureDesktop {
-    fn enter() -> Self {
-        let name: Vec<u16> = format!("LeopardWM-placement-test-{}", std::process::id())
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
+    pub(crate) fn enter() -> Self {
+        static NEXT_DESKTOP_ID: AtomicU64 = AtomicU64::new(0);
+        let name: Vec<u16> = format!(
+            "LeopardWM-placement-test-{}-{}",
+            std::process::id(),
+            NEXT_DESKTOP_ID.fetch_add(1, Ordering::Relaxed)
+        )
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
         unsafe {
             let original = GetThreadDesktop(GetCurrentThreadId());
             let desktop = CreateDesktopW(
@@ -1531,6 +1536,7 @@ fn test_late_cancelled_move_skips_undo_when_owner_stops_answering() {
 #[test]
 fn test_cascade_accepts_in_flight_mover_and_recovers_late_offscreen_move() {
     if run_in_placement_test_process("tests::display_change_regression::test_cascade_accepts_in_flight_mover_and_recovers_late_offscreen_move") { return; }
+    let _desktop = FixtureDesktop::enter();
     let owner =
         PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
     let (state, mut placements) = classify_non_draining_owner(&owner);
@@ -1578,6 +1584,7 @@ fn test_cascade_accepts_in_flight_mover_and_recovers_late_offscreen_move() {
 }
 
 fn cascade_probe_retry_case(resume: bool) {
+    let _desktop = FixtureDesktop::enter();
     let owner =
         PlacementOwner::spawn_with_message_mode(Rect::new(48, 48, 160, 120), 0, false, true);
     let (state, mut placements) = classify_non_draining_owner(&owner);
@@ -1688,6 +1695,35 @@ fn cascade_probe_retry_case(resume: bool) {
             "expired correction ran after owner resumed"
         );
     }
+}
+
+#[test]
+fn test_cascade_recovery_leaves_other_desktop_windows_parked() {
+    if run_in_placement_test_process(
+        "tests::display_change_regression::test_cascade_recovery_leaves_other_desktop_windows_parked",
+    ) {
+        return;
+    }
+    let _user_desktop = FixtureDesktop::enter();
+    let bystander = PlacementOwner::spawn();
+    bystander.resume();
+    leopardwm_platform_win32::move_window_offscreen(bystander.window_id).unwrap();
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(bystander.window_id)
+            && fixture_is_at_sentinel(&bystander),
+        Duration::from_secs(3)
+    ));
+
+    cascade_probe_retry_case(true);
+
+    assert!(wait_for_fixture(
+        || !leopardwm_platform_win32::pending_async_position(bystander.window_id),
+        Duration::from_secs(3)
+    ));
+    assert!(
+        fixture_is_at_sentinel(&bystander),
+        "cascade recovery moved a window outside its fixture desktop"
+    );
 }
 
 #[test]
