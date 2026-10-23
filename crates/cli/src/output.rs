@@ -37,15 +37,19 @@ pub(crate) fn print_response(response: &IpcResponse) {
             window_id,
             column_index,
             window_index,
-            ..
+            is_floating,
         } => {
             println!("Focused Window:");
             match window_id {
                 Some(id) => println!("  Window ID: {}", id),
                 None => println!("  No window focused"),
             }
-            println!("  Column index: {}", column_index);
-            println!("  Window index: {}", window_index);
+            if *is_floating {
+                println!("  Floating: yes");
+            } else {
+                println!("  Column index: {}", column_index);
+                println!("  Window index: {}", window_index);
+            }
         }
         IpcResponse::WindowList { windows } => {
             println!("Managed Windows ({} total):", windows.len());

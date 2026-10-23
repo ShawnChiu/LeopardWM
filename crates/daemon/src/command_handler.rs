@@ -318,13 +318,45 @@ impl AppState {
     // policy so an ignored column command does not drop fullscreen either.
     // Some means dispatch is complete; None continues normal dispatch.
     fn apply_floating_policy(&mut self, cmd: &IpcCommand) -> Option<IpcResponse> {
-        self.focused_floating_window()?;
+        let hwnd = self.focused_floating_window()?;
         match floating_policy(cmd) {
+            FloatingPolicy::Target => self.handle_floating_target(cmd, hwnd),
             FloatingPolicy::Ignore => {
                 debug!("Ignoring {:?} while a floating window has focus", cmd);
                 Some(IpcResponse::Ok)
             }
-            FloatingPolicy::Target | FloatingPolicy::Unchanged => None,
+            FloatingPolicy::Unchanged => None,
+        }
+    }
+
+    fn handle_floating_target(&mut self, cmd: &IpcCommand, hwnd: u64) -> Option<IpcResponse> {
+        match *cmd {
+            IpcCommand::CloseWindow => Some(self.handle_close_window()),
+            IpcCommand::Resize { delta } => {
+                if self
+                    .focused_workspace()
+                    .is_some_and(|ws| ws.fullscreen_window_id() == Some(hwnd))
+                {
+                    debug!("Ignoring {:?} while the floating window is fullscreen", cmd);
+                    return Some(IpcResponse::Ok);
+                }
+                Some(self.execute_workspace_command(true, false, |ws, _vw| {
+                    ws.resize_floating(hwnd, delta);
+                    info!("Resized floating window {} by {}", hwnd, delta);
+                }))
+            }
+            IpcCommand::QueryFocused => {
+                let ws = self.focused_workspace()?;
+                // The indices keep pointing at the tiled focus so older clients
+                // that ignore `is_floating` still read a valid strip position.
+                Some(IpcResponse::FocusedWindow {
+                    window_id: Some(hwnd),
+                    column_index: ws.focused_column_index(),
+                    window_index: ws.focused_window_index_in_column(),
+                    is_floating: true,
+                })
+            }
+            _ => None,
         }
     }
 
@@ -728,8 +760,13 @@ impl AppState {
         }
     }
 
+    fn close_window_target(&self) -> Option<u64> {
+        self.focused_floating_window()
+            .or_else(|| self.focused_workspace().and_then(|ws| ws.focused_window()))
+    }
+
     fn handle_close_window(&mut self) -> IpcResponse {
-        if let Some(hwnd) = self.focused_workspace().and_then(|ws| ws.focused_window()) {
+        if let Some(hwnd) = self.close_window_target() {
             if let Err(e) = leopardwm_platform_win32::close_window(hwnd) {
                 return IpcResponse::error(format!("Failed to close window: {}", e));
             }
@@ -2060,6 +2097,77 @@ mod floating_policy_tests {
         let ws = state.focused_workspace().unwrap();
         assert!(!ws.is_floating(FLOATING));
         assert!(ws.columns().iter().any(|c| c.windows().contains(&FLOATING)));
+    }
+
+    fn floating_rect(state: &AppState) -> Rect {
+        state
+            .focused_workspace()
+            .unwrap()
+            .floating_windows()
+            .iter()
+            .find(|f| f.id == FLOATING)
+            .unwrap()
+            .rect
+    }
+
+    #[test]
+    fn close_targets_the_focused_floating_window() {
+        let mut state = floating_focus_state();
+        assert_eq!(state.close_window_target(), Some(FLOATING));
+
+        state.previous_focused_hwnd = Some(201);
+        assert_eq!(state.close_window_target(), Some(201));
+    }
+
+    #[test]
+    fn resize_targets_the_focused_floating_window() {
+        let mut state = floating_focus_state();
+        let before = strip_snapshot(&state);
+        assert_eq!(
+            state.handle_command(IpcCommand::Resize { delta: 100 }),
+            IpcResponse::Ok
+        );
+        assert_eq!(floating_rect(&state), Rect::new(100, 100, 600, 400));
+        assert_eq!(strip_snapshot(&state), before);
+    }
+
+    #[test]
+    fn resize_is_ignored_while_the_floating_window_is_fullscreen() {
+        let mut state = floating_focus_state();
+        assert!(state
+            .focused_workspace_mut()
+            .unwrap()
+            .toggle_fullscreen_window(FLOATING));
+        assert_eq!(
+            state.handle_command(IpcCommand::Resize { delta: 100 }),
+            IpcResponse::Ok
+        );
+        assert_eq!(floating_rect(&state), Rect::new(100, 100, 500, 400));
+    }
+
+    #[test]
+    fn query_focused_reports_the_floating_window() {
+        let mut state = floating_focus_state();
+        assert_eq!(
+            state.handle_command(IpcCommand::QueryFocused),
+            IpcResponse::FocusedWindow {
+                window_id: Some(FLOATING),
+                column_index: 1,
+                window_index: 1,
+                is_floating: true,
+            }
+        );
+
+        state.previous_focused_hwnd = Some(201);
+        assert_eq!(
+            state.handle_command(IpcCommand::QueryFocused),
+            IpcResponse::FocusedWindow {
+                window_id: Some(201),
+                column_index: 1,
+                window_index: 1,
+                is_floating: false,
+            }
+        );
     }
 }
 
