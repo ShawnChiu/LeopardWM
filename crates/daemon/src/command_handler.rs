@@ -35,7 +35,8 @@ enum FloatingPolicy {
     /// Act on the focused floating window instead of the tiled focus.
     Target,
     /// Ignore while a floating window has focus — the command only makes
-    /// sense for columns, and would otherwise reshape the strip behind it.
+    /// sense for columns, and would otherwise reshape or scroll the strip
+    /// behind it.
     Ignore,
     Unchanged,
 }
@@ -105,7 +106,15 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         CloseWindow | ToggleFullscreen | Resize { .. } | QueryFocused | ScratchpadStash => {
             FloatingPolicy::Target
         }
-        SetColumnWidth { .. }
+        FocusLeft
+        | FocusRight
+        | FocusUp
+        | FocusDown
+        | FocusNext
+        | FocusPrev
+        | FocusStart
+        | FocusEnd
+        | SetColumnWidth { .. }
         | CycleWidth
         | CycleWidthUp
         | CycleWidthDown
@@ -1941,7 +1950,15 @@ mod floating_policy_tests {
 
     const FLOATING: u64 = 900;
 
-    const IGNORED: [IpcCommand; 23] = [
+    const IGNORED: [IpcCommand; 31] = [
+        IpcCommand::FocusLeft,
+        IpcCommand::FocusRight,
+        IpcCommand::FocusUp,
+        IpcCommand::FocusDown,
+        IpcCommand::FocusNext,
+        IpcCommand::FocusPrev,
+        IpcCommand::FocusStart,
+        IpcCommand::FocusEnd,
         IpcCommand::SetColumnWidth { fraction: 0.5 },
         IpcCommand::CycleWidth,
         IpcCommand::CycleWidthUp,
@@ -2055,7 +2072,6 @@ mod floating_policy_tests {
             IpcCommand::MoveWindowToMonitorRight,
             IpcCommand::MoveWindowToMonitorUp,
             IpcCommand::MoveWindowToMonitorDown,
-            IpcCommand::FocusLeft,
             IpcCommand::Scroll { delta: 100.0 },
             IpcCommand::EqualizeColumnWidths,
         ] {
@@ -2093,10 +2109,6 @@ mod floating_policy_tests {
 
     #[test]
     fn strip_commands_still_act_while_floating_has_focus() {
-        let mut state = floating_focus_state();
-        assert_eq!(state.handle_command(IpcCommand::FocusLeft), IpcResponse::Ok);
-        assert_eq!(state.focused_workspace().unwrap().focused_column_index(), 0);
-
         let mut state = floating_focus_state();
         assert_eq!(
             state.handle_command(IpcCommand::EqualizeColumnWidths),
@@ -2218,17 +2230,18 @@ mod floating_policy_tests {
     }
 
     #[test]
-    fn focus_change_exits_floating_fullscreen() {
+    fn focus_is_ignored_while_floating_is_fullscreen() {
         let mut state = floating_focus_state();
         assert!(state.config.behavior.fullscreen_follows_focus);
         assert_eq!(
             state.handle_command(IpcCommand::ToggleFullscreen),
             IpcResponse::Ok
         );
+        let before = strip_snapshot(&state);
+        assert_eq!(before.fullscreen, Some(FLOATING));
         assert_eq!(state.handle_command(IpcCommand::FocusLeft), IpcResponse::Ok);
-        let ws = state.focused_workspace().unwrap();
-        assert_eq!(ws.fullscreen_window_id(), None);
-        assert_eq!(ws.focused_column_index(), 0);
+        assert_eq!(strip_snapshot(&state), before);
+        assert_eq!(state.focused_floating_window(), Some(FLOATING));
     }
 
     #[test]
