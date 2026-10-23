@@ -112,7 +112,11 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         | ScratchpadStash
         | MoveToWorkspace { .. }
         | MoveToWorkspacePrev
-        | MoveToWorkspaceNext => FloatingPolicy::Target,
+        | MoveToWorkspaceNext
+        | MoveWindowToMonitorLeft
+        | MoveWindowToMonitorRight
+        | MoveWindowToMonitorUp
+        | MoveWindowToMonitorDown => FloatingPolicy::Target,
         FocusLeft
         | FocusRight
         | FocusUp
@@ -144,11 +148,6 @@ fn floating_policy(cmd: &IpcCommand) -> FloatingPolicy {
         | ConsumeFromRight
         | ExpelToLeft
         | ExpelToRight => FloatingPolicy::Ignore,
-        // These already resolve floating focus themselves.
-        MoveWindowToMonitorLeft
-        | MoveWindowToMonitorRight
-        | MoveWindowToMonitorUp
-        | MoveWindowToMonitorDown => FloatingPolicy::Unchanged,
         _ => FloatingPolicy::Unchanged,
     }
 }
@@ -367,6 +366,18 @@ impl AppState {
                 let index = self.relative_workspace_index(true);
                 Some(self.move_window_from_active_workspace(hwnd, index))
             }
+            IpcCommand::MoveWindowToMonitorLeft => {
+                Some(self.move_to_monitor(Some(hwnd), monitor_to_left, "left"))
+            }
+            IpcCommand::MoveWindowToMonitorRight => {
+                Some(self.move_to_monitor(Some(hwnd), monitor_to_right, "right"))
+            }
+            IpcCommand::MoveWindowToMonitorUp => {
+                Some(self.move_to_monitor(Some(hwnd), monitor_above, "up"))
+            }
+            IpcCommand::MoveWindowToMonitorDown => {
+                Some(self.move_to_monitor(Some(hwnd), monitor_below, "down"))
+            }
             IpcCommand::ScratchpadStash => {
                 self.scratchpad_stash();
                 Some(IpcResponse::Ok)
@@ -494,10 +505,16 @@ impl AppState {
             IpcCommand::FocusMonitorRight => self.focus_monitor(monitor_to_right, "right"),
             IpcCommand::FocusMonitorUp => self.focus_monitor(monitor_above, "up"),
             IpcCommand::FocusMonitorDown => self.focus_monitor(monitor_below, "down"),
-            IpcCommand::MoveWindowToMonitorLeft => self.move_to_monitor(monitor_to_left, "left"),
-            IpcCommand::MoveWindowToMonitorRight => self.move_to_monitor(monitor_to_right, "right"),
-            IpcCommand::MoveWindowToMonitorUp => self.move_to_monitor(monitor_above, "up"),
-            IpcCommand::MoveWindowToMonitorDown => self.move_to_monitor(monitor_below, "down"),
+            IpcCommand::MoveWindowToMonitorLeft => {
+                self.move_to_monitor(None, monitor_to_left, "left")
+            }
+            IpcCommand::MoveWindowToMonitorRight => {
+                self.move_to_monitor(None, monitor_to_right, "right")
+            }
+            IpcCommand::MoveWindowToMonitorUp => self.move_to_monitor(None, monitor_above, "up"),
+            IpcCommand::MoveWindowToMonitorDown => {
+                self.move_to_monitor(None, monitor_below, "down")
+            }
             IpcCommand::Resize { delta } => {
                 self.execute_workspace_command(true, false, |ws, vw| {
                     ws.resize_focused_column(delta);
@@ -970,15 +987,21 @@ impl AppState {
         })
     }
 
+    /// Moves `window`, or the focused window when `None`.
     fn move_to_monitor(
         &mut self,
+        window: Option<u64>,
         select: fn(&[MonitorInfo], MonitorId) -> Option<&MonitorInfo>,
         dir: &str,
     ) -> IpcResponse {
         let monitors: Vec<_> = self.monitors.values().cloned().collect();
         if let Some(target) = select(&monitors, self.focused_monitor) {
             let target_id = target.id;
-            match self.move_focused_window_to_monitor_transactional(target_id) {
+            let moved = match window {
+                Some(hwnd) => self.move_window_to_monitor_transactional(hwnd, target_id),
+                None => self.move_focused_window_to_monitor_transactional(target_id),
+            };
+            match moved {
                 Ok(Some(hwnd)) => {
                     info!("Moved window {} to monitor {}", hwnd, target_id);
                     if let Err(e) = self.apply_layout() {
@@ -2022,20 +2045,25 @@ mod floating_policy_tests {
         IpcCommand::ExpelToRight,
     ];
 
+    fn monitor(id: MonitorId, x: i32) -> MonitorInfo {
+        MonitorInfo {
+            id,
+            rect: Rect::new(x, 0, 1920, 1080),
+            work_area: Rect::new(x, 0, 1920, 1040),
+            is_primary: id == 1,
+            device_name: format!("DISPLAY{id}"),
+            scale_factor: 1.0,
+        }
+    }
+
     /// Three columns (100 | 200+201 | 300) focused on 201, with a floating
     /// window holding focus over them.
     fn floating_focus_state() -> AppState {
-        let mut state = AppState::new_with_config(
-            Config::default(),
-            vec![MonitorInfo {
-                id: 1,
-                rect: Rect::new(0, 0, 1920, 1080),
-                work_area: Rect::new(0, 0, 1920, 1040),
-                is_primary: true,
-                device_name: "DISPLAY1".to_string(),
-                scale_factor: 1.0,
-            }],
-        );
+        floating_focus_state_on(vec![monitor(1, 0)])
+    }
+
+    fn floating_focus_state_on(monitors: Vec<MonitorInfo>) -> AppState {
+        let mut state = AppState::new_with_config(Config::default(), monitors);
         assert!(state.paused);
         let ws = state.focused_workspace_mut().unwrap();
         ws.insert_window(100, Some(400)).unwrap();
@@ -2093,6 +2121,10 @@ mod floating_policy_tests {
             IpcCommand::MoveToWorkspace { index: 2 },
             IpcCommand::MoveToWorkspacePrev,
             IpcCommand::MoveToWorkspaceNext,
+            IpcCommand::MoveWindowToMonitorLeft,
+            IpcCommand::MoveWindowToMonitorRight,
+            IpcCommand::MoveWindowToMonitorUp,
+            IpcCommand::MoveWindowToMonitorDown,
         ] {
             assert!(
                 matches!(floating_policy(&cmd), FloatingPolicy::Target),
@@ -2106,10 +2138,6 @@ mod floating_policy_tests {
             );
         }
         for cmd in [
-            IpcCommand::MoveWindowToMonitorLeft,
-            IpcCommand::MoveWindowToMonitorRight,
-            IpcCommand::MoveWindowToMonitorUp,
-            IpcCommand::MoveWindowToMonitorDown,
             IpcCommand::Scroll { delta: 100.0 },
             IpcCommand::EqualizeColumnWidths,
         ] {
@@ -2220,6 +2248,23 @@ mod floating_policy_tests {
                 "{cmd:?}"
             );
         }
+    }
+
+    #[test]
+    fn move_to_monitor_targets_the_focused_floating_window() {
+        let mut state = floating_focus_state_on(vec![monitor(1, 0), monitor(2, 1920)]);
+        let before = strip_snapshot(&state);
+        assert_eq!(
+            state.handle_command(IpcCommand::MoveWindowToMonitorRight),
+            IpcResponse::Ok
+        );
+        assert_eq!(state.focused_monitor, 2);
+        let target = state.focused_workspace().unwrap();
+        assert!(target.is_floating(FLOATING));
+        assert!(target.columns().is_empty());
+        state.focused_monitor = 1;
+        assert!(!state.focused_workspace().unwrap().contains_window(FLOATING));
+        assert_eq!(strip_snapshot(&state), before);
     }
 
     fn floating_rect(state: &AppState) -> Rect {
