@@ -626,6 +626,12 @@ Thanks to everyone who has helped shape LeopardWM.
 <a href="https://github.com/bd-dxg" title="冰冻大西瓜"><img src="https://avatars.githubusercontent.com/u/34816426?v=4&s=96" width="72" alt="冰冻大西瓜" /></a><br />
 <a href="https://github.com/bd-dxg"><b>冰冻大西瓜</b></a> (<a href="https://github.com/bd-dxg">@bd-dxg</a>)
 
+<a href="https://github.com/ShawnChiu" title="Shawn"><img src="https://avatars.githubusercontent.com/u/147299642?v=4&s=96" width="72" alt="Shawn" /></a><br />
+<a href="https://github.com/ShawnChiu"><b>Shawn</b></a> (<a href="https://github.com/ShawnChiu">@ShawnChiu</a>)
+
+<a href="https://github.com/azumafuji" title="Dean Sellis"><img src="https://avatars.githubusercontent.com/u/393782?v=4&s=96" width="72" alt="Dean Sellis" /></a><br />
+<a href="https://github.com/azumafuji"><b>Dean Sellis</b></a> (<a href="https://github.com/azumafuji">@azumafuji</a>)
+
 ## License
 
 [GPL-3.0](LICENSE)
